@@ -6,11 +6,11 @@ use std::{io::{Read, Write, ErrorKind}, sync::mpsc, time::{Duration, Instant}};
 type Result<T> = std::result::Result<T, String>;
 
 /**
- * 结构职责：把前端交换与本机变更提交给唯一持有 TLS 流的线程。
- * 字段说明：Exchange 携带正文信封及单次响应通道，Wake 仅提示对端发起交换。
+ * 结构职责：把前端交换、本机变更与撤销提交给唯一持有 TLS 流的线程。
+ * 字段说明：Exchange 携带正文信封及单次响应通道，Wake 仅提示对端发起交换，Revoke 要求对端撤销配对后结束连接。
  * 约束条件：凭证不进入连接帧；连接认证由调用方在启动循环之前完成。
  */
-pub enum Command { Exchange(Value, mpsc::SyncSender<Result<Value>>), Wake }
+pub enum Command { Exchange(Value, mpsc::SyncSender<Result<Value>>), Wake, Revoke(mpsc::SyncSender<Result<()>>) }
 
 /** 读取超时只表示本轮没有新字节，不能丢掉已读的长度前缀或正文片段。 */
 #[derive(Default)]
@@ -39,11 +39,11 @@ impl Frames {
 
 /**
  * 函数职责：在手机侧复用同一条流发送交换请求并接收电脑变更通知。
- * 输入说明：stream 已通过固定证书和配对凭证认证，读超时须为短间隔；current 校验配对仍有效。
- * 输出说明：断线、超时或配对失效时退出，所有待处理请求返回错误。
+ * 输入说明：stream 已通过固定证书和配对凭证认证，读超时须为短间隔；current 校验配对仍有效；revoked 由调用方清空本机凭证。
+ * 输出说明：断线、超时、配对失效或电脑撤销配对时退出，所有待处理请求返回错误。
  * 实现思路：单线程拥有流，保留半帧，交替处理有界命令队列与网络消息，并定期发送心跳。
  */
-pub fn client(stream: &mut (impl Read + Write), commands: mpsc::Receiver<Command>, current: impl Fn() -> bool, wake: impl Fn()) -> Result<()> {
+pub fn client(stream: &mut (impl Read + Write), commands: mpsc::Receiver<Command>, current: impl Fn() -> bool, wake: impl Fn(), revoked: impl Fn()) -> Result<()> {
     let mut frames = Frames::default();
     let mut pending: Option<(u64, mpsc::SyncSender<Result<Value>>, Instant)> = None;
     let mut next = 0u64;
@@ -60,6 +60,7 @@ pub fn client(stream: &mut (impl Read + Write), commands: mpsc::Receiver<Command
                         super::write_frame(stream, &json!({"type":"exchange","id":next,"envelope":envelope}))?;
                     }
                     Command::Wake => {}
+                    Command::Revoke(response) => { let _ = response.send(Err("手机侧不发送撤销指令".into())); }
                 }
             }
             if heartbeat.elapsed() >= Duration::from_secs(10) {
@@ -74,6 +75,8 @@ pub fn client(stream: &mut (impl Read + Write), commands: mpsc::Receiver<Command
             match message["type"].as_str() {
                 Some("wake") => wake(),
                 Some("pong") => {},
+                // 电脑已撤销配对，本机凭证随后失效；先清空本机状态，避免面板继续显示已配对。
+                Some("revoke") => { revoked(); return Err("SYNC_AUTH: 配对已被电脑解除".into()); }
                 Some("response") => {
                     let expected = pending.as_ref().ok_or("SYNC_INVALID: 收到未知同步响应")?.0;
                     if message["id"].as_u64() != Some(expected) { return Err("SYNC_INVALID: 同步响应序号不匹配".into()); }
@@ -96,7 +99,7 @@ pub fn client(stream: &mut (impl Read + Write), commands: mpsc::Receiver<Command
 /**
  * 函数职责：在电脑侧推送变更通知并回复同一条流上的文档交换。
  * 输入说明：exchange 复用已认证的前端文档协调器，current 每轮检查配对与连接代次。
- * 输出说明：连接失效或网络错误时退出；文档交换失败只回复该次错误。
+ * 输出说明：连接失效、网络错误或送达撤销后退出；文档交换失败只回复该次错误。
  * 实现思路：唯一线程交替读取消息与通知命令，文档交换串行，心跳不进入文档处理器。
  */
 pub fn server(stream: &mut (impl Read + Write), commands: mpsc::Receiver<Command>, current: impl Fn() -> bool, exchange: impl Fn(Value) -> Result<Value>) -> Result<()> {
@@ -107,6 +110,8 @@ pub fn server(stream: &mut (impl Read + Write), commands: mpsc::Receiver<Command
             match command {
                 Command::Wake => notify = true,
                 Command::Exchange(_, response) => { let _ = response.send(Err("电脑通过变更通知触发对端交换".into())); }
+                // 撤销帧必须在对端仍持有本连接时送达；写入结果回传后本线程结束，由调用方清理连接。
+                Command::Revoke(response) => { let sent = super::write_frame(stream, &json!({"type":"revoke"})); let _ = response.send(sent); return Ok(()); }
             }
         }
         if notify { super::write_frame(stream, &json!({"type":"wake"}))?; }
@@ -167,7 +172,7 @@ mod tests {
         let (desktop_send, desktop_receive) = mpsc::sync_channel(8);
         let (wake_send, wake_receive) = mpsc::sync_channel(8);
         let running = alive.clone();
-        let phone_thread = std::thread::spawn(move || client(&mut phone, phone_receive, || running.load(Ordering::SeqCst), || { let _ = wake_send.send(()); }));
+        let phone_thread = std::thread::spawn(move || client(&mut phone, phone_receive, || running.load(Ordering::SeqCst), || { let _ = wake_send.send(()); }, || {}));
         let running = alive.clone();
         let desktop_thread = std::thread::spawn(move || server(&mut desktop, desktop_receive, || running.load(Ordering::SeqCst), |value| {
             if value["fail"] == true { return Err("SYNC_SAVE: 保存失败".into()); }
@@ -188,6 +193,30 @@ mod tests {
     }
 
     #[test]
+    fn revoke_command_notifies_the_phone_and_ends_the_connection() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut phone = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut desktop, _) = listener.accept().unwrap();
+        phone.set_read_timeout(Some(Duration::from_millis(20))).unwrap();
+        desktop.set_read_timeout(Some(Duration::from_millis(20))).unwrap();
+        let alive = Arc::new(AtomicBool::new(true));
+        let (_, phone_receive) = mpsc::sync_channel(8);
+        let (desktop_send, desktop_receive) = mpsc::sync_channel(8);
+        let revoked = Arc::new(AtomicBool::new(false));
+        let running = alive.clone(); let seen = revoked.clone();
+        let phone_thread = std::thread::spawn(move || client(&mut phone, phone_receive, || running.load(Ordering::SeqCst), || {}, || seen.store(true, Ordering::SeqCst)));
+        let running = alive.clone();
+        let desktop_thread = std::thread::spawn(move || server(&mut desktop, desktop_receive, || running.load(Ordering::SeqCst), Ok));
+        let (ack, result) = mpsc::sync_channel(1);
+        desktop_send.send(Command::Revoke(ack)).unwrap();
+        assert!(result.recv_timeout(Duration::from_secs(2)).unwrap().is_ok());
+        assert!(desktop_thread.join().unwrap().is_ok());
+        // 手机收到撤销必须先清空本机配对再从连接循环退出，不能等到下一次建连才发现凭证失效。
+        assert!(revoked.load(Ordering::SeqCst));
+        assert!(phone_thread.join().unwrap().unwrap_err().starts_with("SYNC_AUTH:"));
+    }
+
+    #[test]
     fn disconnected_stream_rejects_pending_exchange() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let mut phone = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
@@ -197,7 +226,7 @@ mod tests {
         let (send, commands) = mpsc::sync_channel(8);
         let (response, result) = mpsc::sync_channel(1);
         send.send(Command::Exchange(json!({"text":"尚未确认的正文"}), response)).unwrap();
-        assert!(client(&mut phone, commands, || true, || {}).is_err());
+        assert!(client(&mut phone, commands, || true, || {}, || {}).is_err());
         assert!(result.recv_timeout(Duration::from_secs(1)).unwrap().is_err());
         server.join().unwrap();
     }

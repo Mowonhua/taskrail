@@ -6,7 +6,7 @@ use rand::{rngs::OsRng, RngCore};
 use rustls::{pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName}, ClientConfig, ClientConnection, RootCertStore, ServerConfig, ServerConnection, StreamOwned};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::{collections::HashMap, io::{Read, Write}, net::{IpAddr, SocketAddr, TcpListener, TcpStream, UdpSocket, Shutdown}, path::PathBuf, sync::{atomic::{AtomicUsize, Ordering}, mpsc, Arc, Mutex, OnceLock}, time::{Duration, SystemTime, UNIX_EPOCH}};
+use std::{collections::HashMap, io::{Read, Write}, net::{IpAddr, SocketAddr, TcpListener, TcpStream, UdpSocket, Shutdown}, path::PathBuf, sync::{atomic::{AtomicBool, AtomicUsize, Ordering}, mpsc, Arc, Mutex, OnceLock}, time::{Duration, SystemTime, UNIX_EPOCH}};
 use tauri::{Emitter, Manager};
 mod connection;
 
@@ -16,7 +16,11 @@ type Result<T> = std::result::Result<T, String>;
 #[derive(Clone, Serialize, Deserialize)]
 struct Peer { id: String, secret: String, address: String, certificate: Vec<u8> }
 #[derive(Serialize, Deserialize)]
-struct Credentials { certificate: Vec<u8>, key: Vec<u8>, id: String, secret: String, peer: Option<Peer> }
+struct Credentials {
+    certificate: Vec<u8>, key: Vec<u8>, id: String, secret: String, peer: Option<Peer>,
+    /** 手机解除配对后尚未送达电脑的撤销；送达之前电脑仍显示已配对，因此要持久化并重试。 */
+    #[serde(default)] revocation: Option<Peer>,
+}
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Offer { version: u8, address: String, #[serde(default)] addresses: Vec<String>, certificate: Vec<u8>, token: String, expires: u64 }
 struct Inner { credentials: Credentials, offer: Option<Offer>, pending: Option<Peer>, port: Option<u16>, daemon: Option<ServiceDaemon> }
@@ -25,6 +29,8 @@ struct LiveConnection { id: String, session: String, sender: mpsc::SyncSender<co
 struct Runtime {
     inner: Mutex<Inner>, directory: PathBuf, responses: Mutex<HashMap<String, mpsc::SyncSender<Result<Value>>>>,
     connection: Mutex<Option<LiveConnection>>, connection_start: Mutex<()>, connection_epoch: AtomicUsize,
+    /** 待送达撤销正在重试；状态轮询频繁触发时只保留一个送达线程。 */
+    revoking: AtomicBool,
 }
 #[derive(Default)]
 pub struct SyncState { runtime: OnceLock<Arc<Runtime>>, initialization: Mutex<()> }
@@ -66,10 +72,10 @@ fn runtime(app: &tauri::AppHandle, state: &SyncState) -> Result<Arc<Runtime>> {
         Some(value) => serde_json::from_value(value).map_err(err)?,
         None => {
             let cert = rcgen::generate_simple_self_signed(vec!["taskrail.local".into()]).map_err(err)?;
-            Credentials { certificate: cert.cert.der().to_vec(), key: cert.key_pair.serialize_der(), id: random(), secret: random(), peer: None }
+            Credentials { certificate: cert.cert.der().to_vec(), key: cert.key_pair.serialize_der(), id: random(), secret: random(), peer: None, revocation: None }
         }
     };
-    let value = Arc::new(Runtime { inner: Mutex::new(Inner { credentials, offer: None, pending: None, port: None, daemon: None }), directory, responses: Mutex::new(HashMap::new()), connection: Mutex::new(None), connection_start: Mutex::new(()), connection_epoch: AtomicUsize::new(0) });
+    let value = Arc::new(Runtime { inner: Mutex::new(Inner { credentials, offer: None, pending: None, port: None, daemon: None }), directory, responses: Mutex::new(HashMap::new()), connection: Mutex::new(None), connection_start: Mutex::new(()), connection_epoch: AtomicUsize::new(0), revoking: AtomicBool::new(false) });
     save_credentials(&value, &*value.inner.lock().map_err(err)?)?;
     let _ = state.runtime.set(value.clone()); Ok(value)
 }
@@ -134,6 +140,20 @@ fn start(app: &tauri::AppHandle, runtime: &Arc<Runtime>) -> Result<()> {
 fn authenticated(inner: &Inner, request: &Value) -> bool {
     inner.credentials.peer.as_ref().is_some_and(|peer| request["id"].as_str() == Some(&peer.id) && request["secret"].as_str() == Some(&peer.secret))
 }
+/** 两端各持一半身份，排序后摘要使双方得到同一个值；证书与 id 不随解除配对轮换。 */
+fn pairing_identity(own: &str, other: &str) -> String {
+    let (first, second) = if own <= other { (own, other) } else { (other, own) };
+    storage::fingerprint(format!("{first}:{second}").as_bytes())
+}
+/** 手机用自己的 id 与电脑证书，电脑用自己的证书与手机 id；该身份跨解除配对保持不变，用于判断绑定是否仍属于同一台设备。 */
+fn identity(credentials: &Credentials, mobile: bool) -> Option<String> {
+    let peer = credentials.peer.as_ref()?;
+    Some(if mobile {
+        pairing_identity(&credentials.id, &storage::fingerprint(&peer.certificate))
+    } else {
+        pairing_identity(&storage::fingerprint(&credentials.certificate), &peer.id)
+    })
+}
 fn handle(app: &tauri::AppHandle, runtime: &Runtime, request: Value) -> Result<Value> {
     if request["protocol"] != 1 { return Err("SYNC_PROTOCOL: 同步协议不兼容".into()); }
     let mut inner = runtime.inner.lock().map_err(err)?;
@@ -153,6 +173,13 @@ fn handle(app: &tauri::AppHandle, runtime: &Runtime, request: Value) -> Result<V
         return Ok(json!(false));
     }
     if !authenticated(&inner, &request) { return Err("SYNC_AUTH: 设备未配对或配对已撤销".into()); }
+    // 手机解除配对后主动送达撤销；电脑必须同时清空凭证，否则面板会一直显示已配对却无法交换。
+    if request["action"] == "revoke" {
+        drop(inner);
+        revoke_pairing(runtime)?;
+        app.emit("taskrail:sync-revoked", ()).map_err(|error| error.to_string())?;
+        return Ok(json!(true));
+    }
     if request["action"] == "ping" { return Ok(Value::Null); }
     if request["action"] != "exchange" { return Err("SYNC_PROTOCOL: 未知同步操作".into()); }
     drop(inner);
@@ -237,6 +264,54 @@ fn remove_connection(runtime: &Runtime, id: Option<&str>) -> bool {
     if let Some(previous) = live.take() { let _ = previous.socket.shutdown(Shutdown::Both); return true; }
     false
 }
+/** 对端已解除配对：清空本机保存的配对凭证并返回是否发生变化，调用方据此刷新界面。 */
+fn revoke_pairing(runtime: &Runtime) -> Result<bool> {
+    let mut inner = runtime.inner.lock().map_err(err)?;
+    if inner.credentials.peer.take().is_none() { return Ok(false); }
+    inner.credentials.secret = random(); inner.pending = None; inner.offer = None;
+    runtime.connection_epoch.fetch_add(1, Ordering::SeqCst);
+    save_credentials(runtime, &inner)?;
+    drop(inner);
+    remove_connection(runtime, None);
+    Ok(true)
+}
+/** 结束长连接之前先送达撤销；等待回复期间不能持有配对锁，连接线程的存活检查需要它。 */
+fn announce_revocation(runtime: &Runtime) {
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let Ok(live) = runtime.connection.lock() else { return; };
+    let Some(live) = live.as_ref() else { return; };
+    if live.sender.try_send(connection::Command::Revoke(sender)).is_ok() { let _ = receiver.recv_timeout(Duration::from_secs(3)); }
+}
+/**
+ * 函数职责：把手机侧的解除配对送达电脑。
+ * 输入说明：runtime 中存在待送达撤销；重复调用由 revoking 去重，只保留一个送达线程。
+ * 输出说明：电脑确认收到或本机凭证已不被电脑接受时清除待送达记录；网络失败保留，供下次重试。
+ */
+fn deliver_revocation(runtime: &Arc<Runtime>) -> Result<()> {
+    // 已有线程在送同一批凭证时等它结束：紧随其后的配对请求若先到，电脑仍会以“已有配对设备”拒绝。
+    if runtime.revoking.swap(true, Ordering::SeqCst) {
+        for _ in 0..40 { if !runtime.revoking.load(Ordering::SeqCst) { break; } std::thread::sleep(Duration::from_millis(100)); }
+        return Ok(());
+    }
+    let result = (|| {
+        let peer = runtime.inner.lock().map_err(err)?.credentials.revocation.clone().ok_or("没有待送达的撤销")?;
+        // 电脑地址可能已经变化，先用广播找到持有同一证书的设备再送达。
+        match connect_available(&peer, &json!({"protocol":1,"action":"revoke","id":peer.id,"secret":peer.secret})) {
+            Ok(_) => {}
+            // 电脑已不认识这组凭证，撤销目的已经达到，不必再送。
+            Err(error) if error.starts_with("SYNC_AUTH:") => {}
+            Err(error) => return Err(error),
+        }
+        let mut inner = runtime.inner.lock().map_err(err)?;
+        // 送达期间用户可能已与另一台设备配对，只清除本次送达的设备记录。
+        if inner.credentials.revocation.as_ref().is_some_and(|pending| pending.id == peer.id && pending.certificate == peer.certificate) {
+            inner.credentials.revocation = None; save_credentials(runtime, &inner)?;
+        }
+        Ok(())
+    })();
+    runtime.revoking.store(false, Ordering::SeqCst);
+    result
+}
 fn serve_stream(app: &tauri::AppHandle, runtime: &Runtime, stream: &mut StreamOwned<ServerConnection, TcpStream>, request: Value) -> Result<()> {
     let session = {
         let inner = runtime.inner.lock().map_err(err)?;
@@ -272,8 +347,9 @@ fn ensure_connection(app: &tauri::AppHandle, runtime: &Arc<Runtime>, epoch: usiz
     let (mut stream, endpoint) = match open_stream(&peer) {
         Ok(stream) => (stream, peer.address.clone()),
         Err(first) => {
-            // 认证或协议错误不是地址错误，不通过发现重复尝试同一设备。
-            if first.starts_with("SYNC_AUTH:") || first.starts_with("SYNC_PROTOCOL:") { return Err(first); }
+            // 认证错误说明电脑已撤销配对，本机必须同样撤销；协议错误只表示版本不兼容，保留配对。
+            if first.starts_with("SYNC_AUTH:") { if revoke_pairing(runtime)? { let _ = app.emit("taskrail:sync-revoked", ()); } return Err(first); }
+            if first.starts_with("SYNC_PROTOCOL:") { return Err(first); }
             let mut found = None;
             for endpoint in discover(&peer).into_iter().filter(|value| value != &peer.address).take(8) {
                 if let Ok(stream) = open_stream(&Peer { address: endpoint.clone(), ..peer.clone() }) { found = Some((stream, endpoint)); break; }
@@ -291,7 +367,7 @@ fn ensure_connection(app: &tauri::AppHandle, runtime: &Arc<Runtime>, epoch: usiz
     let (id, commands) = install_connection(runtime, &peer.secret, &stream.sock, Some(epoch))?;
     let runtime = runtime.clone(); let app = app.clone();
     std::thread::spawn(move || {
-        let _ = connection::client(&mut stream, commands, || connection_current(&runtime, &id, &peer.secret), || { let _ = app.emit("taskrail:sync-wake", ()); });
+        let _ = connection::client(&mut stream, commands, || connection_current(&runtime, &id, &peer.secret), || { let _ = app.emit("taskrail:sync-wake", ()); }, || { if revoke_pairing(&runtime).unwrap_or(false) { let _ = app.emit("taskrail:sync-revoked", ()); } });
         // 意外断线唤醒控制器更新状态并按既有错误策略重试；主动关闭已经移除了代次。
         if remove_connection(&runtime, Some(&id)) { let _ = app.emit("taskrail:sync-wake", ()); }
     });
@@ -303,7 +379,19 @@ pub async fn sync_status(app: tauri::AppHandle, state: tauri::State<'_, SyncStat
     let paired = runtime.inner.lock().map_err(err)?.credentials.peer.is_some();
     if paired && !cfg!(target_os = "android") { start(&app, &runtime)?; }
     let inner = runtime.inner.lock().map_err(err)?;
-    Ok(json!({"paired": paired, "session": inner.credentials.peer.as_ref().map(|peer| storage::fingerprint(peer.secret.as_bytes())), "address": inner.credentials.peer.as_ref().map(|peer| &peer.address), "pending": inner.pending.as_ref().map(|peer| &peer.id), "listening": inner.port.is_some()}))
+    let status = json!({
+        "paired": paired,
+        "session": inner.credentials.peer.as_ref().map(|peer| storage::fingerprint(peer.secret.as_bytes())),
+        "identity": identity(&inner.credentials, cfg!(target_os = "android")),
+        "address": inner.credentials.peer.as_ref().map(|peer| &peer.address),
+        "pending": inner.pending.as_ref().map(|peer| &peer.id),
+        "listening": inner.port.is_some(),
+    });
+    let retry = inner.credentials.revocation.is_some();
+    drop(inner);
+    // 撤销未送达时随状态刷新重试；电脑离线期间保留记录，配对状态不再回退成已配对。
+    if retry { let runtime = runtime.clone(); std::thread::spawn(move || { let _ = deliver_revocation(&runtime); }); }
+    Ok(status)
 }
 #[tauri::command]
 pub async fn sync_offer(app: tauri::AppHandle, state: tauri::State<'_, SyncState>) -> Result<Offer> {
@@ -330,6 +418,9 @@ pub async fn sync_pair(app: tauri::AppHandle, state: tauri::State<'_, SyncState>
     address(&offer.address)?;
     let runtime = runtime(&app, &state)?;
     let (id, secret) = { let inner = runtime.inner.lock().map_err(err)?; if inner.credentials.peer.is_some() { return Err("请先解除已有配对".into()); } (inner.credentials.id.clone(), inner.credentials.secret.clone()) };
+    // 上次解除配对时电脑可能还没收到撤销，它仍有配对记录就会拒绝新请求；先用本次二维码地址补送一次。
+    if let Some(pending) = runtime.inner.lock().map_err(err)?.credentials.revocation.as_mut().filter(|pending| pending.certificate == offer.certificate) { pending.address = offer.address.clone(); }
+    { let runtime = runtime.clone(); let _ = tauri::async_runtime::spawn_blocking(move || deliver_revocation(&runtime)).await; }
     let mut peer = Peer { id: id.clone(), secret: secret.clone(), address: offer.address, certificate: offer.certificate };
     let target = peer.clone();
     let (accepted, address) = tauri::async_runtime::spawn_blocking(move || connect_available(&target, &json!({"protocol":1,"action":"pair","id":id,"secret":secret,"token":offer.token}))).await.map_err(err)??;
@@ -339,10 +430,24 @@ pub async fn sync_pair(app: tauri::AppHandle, state: tauri::State<'_, SyncState>
 }
 #[tauri::command]
 pub async fn sync_unpair(app: tauri::AppHandle, state: tauri::State<'_, SyncState>) -> Result<()> {
-    let runtime = runtime(&app, &state)?; let mut inner = runtime.inner.lock().map_err(err)?;
-    inner.credentials.peer = None; inner.credentials.secret = random(); inner.pending = None; inner.offer = None;
+    let runtime = runtime(&app, &state)?;
+    // 电脑主动解除时先让在线手机同步撤销；手机不在线时它下次连接会被拒绝，并在本机撤销。
+    if !cfg!(target_os = "android") { announce_revocation(&runtime); }
+    let previous = {
+        let mut inner = runtime.inner.lock().map_err(err)?;
+        let previous = inner.credentials.peer.take();
+        // 手机侧要保留旧凭证并持久化，直到电脑确认收到撤销，否则对端仍会显示已配对。
+        if cfg!(target_os = "android") { inner.credentials.revocation = previous.clone(); }
+        inner.credentials.secret = random(); inner.pending = None; inner.offer = None;
+        save_credentials(&runtime, &inner)?;
+        previous
+    };
     runtime.connection_epoch.fetch_add(1, Ordering::SeqCst); remove_connection(&runtime, None);
-    save_credentials(&runtime, &inner)
+    if cfg!(target_os = "android") && previous.is_some() {
+        let runtime = runtime.clone();
+        let _ = tauri::async_runtime::spawn_blocking(move || { let _ = deliver_revocation(&runtime); });
+    }
+    Ok(())
 }
 #[tauri::command]
 pub async fn sync_address(app: tauri::AppHandle, state: tauri::State<'_, SyncState>, address: String) -> Result<()> {
@@ -485,7 +590,7 @@ mod tests {
         let (phone_send, phone_receive) = mpsc::sync_channel(8);
         let (wake_send, wake_receive) = mpsc::sync_channel(8);
         let running = alive.clone();
-        let client = std::thread::spawn(move || connection::client(&mut stream, phone_receive, || running.load(Ordering::SeqCst), || { let _ = wake_send.send(()); }));
+        let client = std::thread::spawn(move || connection::client(&mut stream, phone_receive, || running.load(Ordering::SeqCst), || { let _ = wake_send.send(()); }, || {}));
         // 跨过多次 socket 读超时后，TLS 状态和同一连接仍须可用。
         std::thread::sleep(Duration::from_millis(150));
         desktop_send.send(connection::Command::Wake).unwrap();
@@ -502,18 +607,77 @@ mod tests {
     fn revoked_and_unrecognized_devices_cannot_authenticate() {
         let peer = Peer { id: random(), secret: random(), address: String::new(), certificate: vec![] };
         let request = json!({"id":peer.id,"secret":peer.secret});
-        let mut inner = Inner { credentials: Credentials { id: random(), secret: random(), certificate: vec![], key: vec![], peer: Some(peer) }, offer: None, pending: None, port: None, daemon: None };
+        let mut inner = Inner { credentials: Credentials { id: random(), secret: random(), certificate: vec![], key: vec![], peer: Some(peer), revocation: None }, offer: None, pending: None, port: None, daemon: None };
         assert!(authenticated(&inner, &request));
         assert!(!authenticated(&inner, &json!({"id":request["id"],"secret":"wrong"})));
         inner.credentials.peer = None; assert!(!authenticated(&inner, &request));
+    }
+    fn test_runtime(directory: &std::path::Path, credentials: Credentials) -> Runtime {
+        Runtime {
+            inner: Mutex::new(Inner { credentials, offer: None, pending: None, port: None, daemon: None }),
+            directory: directory.into(), responses: Mutex::new(HashMap::new()), connection: Mutex::new(None), connection_start: Mutex::new(()),
+            connection_epoch: AtomicUsize::new(0), revoking: AtomicBool::new(false),
+        }
+    }
+    #[test]
+    fn pairing_identity_matches_on_both_ends() {
+        let desktop = rcgen::generate_simple_self_signed(vec!["taskrail.local".into()]).unwrap();
+        let certificate = desktop.cert.der().to_vec();
+        let phone_id = random();
+        let phone = Credentials { id: phone_id.clone(), secret: random(), certificate: vec![], key: vec![], peer: Some(Peer { id: phone_id.clone(), secret: random(), address: String::new(), certificate: certificate.clone() }), revocation: None };
+        let host = Credentials { id: random(), secret: random(), certificate, key: vec![], peer: Some(Peer { id: phone_id.clone(), secret: random(), address: String::new(), certificate: vec![] }), revocation: None };
+        let shared = identity(&phone, true).unwrap();
+        assert_eq!(identity(&host, false), Some(shared.clone()));
+        // 换一台电脑或换一部手机都必须得到不同的绑定身份，旧绑定不能沿用。
+        let other = Credentials { peer: Some(Peer { id: random(), secret: random(), address: String::new(), certificate: vec![] }), ..host };
+        assert_ne!(identity(&other, false), Some(shared));
+    }
+    #[test]
+    fn revoking_the_pairing_clears_credentials_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let peer = Peer { id: random(), secret: random(), address: String::new(), certificate: vec![] };
+        let runtime = test_runtime(directory.path(), Credentials { id: random(), secret: random(), certificate: vec![], key: vec![], peer: Some(peer), revocation: None });
+        assert!(revoke_pairing(&runtime).unwrap());
+        let inner = runtime.inner.lock().unwrap();
+        assert!(inner.credentials.peer.is_none());
+        // 电脑端不需要向手机送达撤销，待送达记录不能残留。
+        assert!(inner.credentials.revocation.is_none());
+        drop(inner);
+        assert!(!revoke_pairing(&runtime).unwrap());
+    }
+    #[test]
+    fn revocation_is_delivered_and_cleared_from_disk() {
+        let certificate = rcgen::generate_simple_self_signed(vec!["taskrail.local".into()]).unwrap();
+        let config = ServerConfig::builder().with_no_client_auth().with_single_cert(
+            vec![certificate.cert.der().clone()], PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(certificate.key_pair.serialize_der()))).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = listener.local_addr().unwrap().to_string();
+        let phone = Peer { id: random(), secret: random(), address: endpoint, certificate: certificate.cert.der().to_vec() };
+        let expected = phone.clone();
+        let server = std::thread::spawn(move || {
+            let (socket, _) = listener.accept().unwrap();
+            let mut stream = StreamOwned::new(ServerConnection::new(Arc::new(config)).unwrap(), socket);
+            let request = read_frame(&mut stream).unwrap();
+            assert_eq!(request["action"], "revoke");
+            assert_eq!(request["id"], expected.id); assert_eq!(request["secret"], expected.secret);
+            write_frame(&mut stream, &json!({"ok":true})).unwrap();
+        });
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(test_runtime(directory.path(), Credentials { id: random(), secret: random(), certificate: vec![], key: vec![], peer: None, revocation: Some(phone) }));
+        deliver_revocation(&runtime).unwrap();
+        assert!(runtime.inner.lock().unwrap().credentials.revocation.is_none());
+        // 送达成功后必须落盘，重启应用不能再送一次，也不能把已撤销的配对带回来。
+        assert_eq!(storage::load_json(&directory.path().join("identity.json")).unwrap().unwrap()["revocation"], Value::Null);
+        server.join().unwrap();
     }
     #[test]
     fn replacing_connection_and_cancelling_connect_preserve_generation_boundaries() {
         let directory = tempfile::tempdir().unwrap();
         let peer = Peer { id: random(), secret: random(), address: String::new(), certificate: vec![] };
         let runtime = Runtime {
-            inner: Mutex::new(Inner { credentials: Credentials { id: random(), secret: random(), certificate: vec![], key: vec![], peer: Some(peer.clone()) }, offer: None, pending: None, port: None, daemon: None }),
+            inner: Mutex::new(Inner { credentials: Credentials { id: random(), secret: random(), certificate: vec![], key: vec![], peer: Some(peer.clone()), revocation: None }, offer: None, pending: None, port: None, daemon: None }),
             directory: directory.path().into(), responses: Mutex::new(HashMap::new()), connection: Mutex::new(None), connection_start: Mutex::new(()), connection_epoch: AtomicUsize::new(0),
+            revoking: AtomicBool::new(false),
         };
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let mut first_peer = TcpStream::connect(listener.local_addr().unwrap()).unwrap();

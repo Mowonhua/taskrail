@@ -26,6 +26,7 @@ export class SyncController {
   private stopListener?: () => void;
   private stopWakeListener?: () => void;
   private stopPairListener?: () => void;
+  private stopRevokeListener?: () => void;
   private resyncRequested = false;
   /** 手机已提交配对、等待电脑允许；此状态按短间隔复查，不能套用离线退避。 */
   private awaitingApproval = false;
@@ -57,7 +58,12 @@ export class SyncController {
     });
     // 配对请求写在原生端，轮询间隔会退避到十五秒；收到请求立即刷新，确认按钮才能马上出现。
     if (this.desktop) this.stopPairListener = await listen('taskrail:sync-pair-request', () => this.sync());
-    if (this.stopped) { this.stopListener(); this.stopWakeListener?.(); this.stopPairListener?.(); return; }
+    // 任一端解除配对都会让对端凭证失效；两端都监听，立即刷新为未配对而不必等下一轮交换失败。
+    this.stopRevokeListener = await listen('taskrail:sync-revoked', () => {
+      if (this.busy) this.resyncRequested = true;
+      else void this.sync();
+    });
+    if (this.stopped) { this.stopListener(); this.stopWakeListener?.(); this.stopPairListener?.(); this.stopRevokeListener?.(); return; }
     document.addEventListener('visibilitychange', this.visibility);
     await this.sync();
   }
@@ -125,7 +131,7 @@ export class SyncController {
         else { this.awaitingApproval = true; this.setStatus('等待电脑确认'); return; }
       }
       this.connection = await this.transport.status();
-      await this.engine.attachPairing(this.connection.session);
+      await this.engine.attachPairing(this.connection.identity, this.connection.session);
       if (!this.connection.paired) { this.offline = false; this.error = ''; this.setStatus('未配对'); return; }
       if (!this.desktop) {
         if (this.stopped || document.hidden) return;
@@ -178,12 +184,15 @@ export class SyncController {
   async unpair(): Promise<void> {
     this.pendingOffer = undefined;
     this.awaitingApproval = false;
-    await this.transport.unpair(); await this.engine.reset();
+    // 旧版本把会话摘要存为配对身份，解除前先换成稳定身份，否则重新配对时对不上会清空已选文档。
+    await this.engine.attachPairing(this.connection.identity, this.connection.session);
+    // 保留文档映射：重新配对同一台设备后按原选择自动继续同步，无需重新勾选和关联。
+    await this.transport.unpair();
     this.connection = await this.transport.status(); this.offline = false; this.error = ''; this.setStatus('未配对'); this.changed();
   }
   stop(): void {
     this.stopped = true; clearTimeout(this.timer); clearTimeout(this.dirtyTimer);
-    this.stopListener?.(); this.stopWakeListener?.(); this.stopPairListener?.(); document.removeEventListener('visibilitychange', this.visibility);
+    this.stopListener?.(); this.stopWakeListener?.(); this.stopPairListener?.(); this.stopRevokeListener?.(); document.removeEventListener('visibilitychange', this.visibility);
     void this.transport.disconnect().catch(() => {});
   }
 }

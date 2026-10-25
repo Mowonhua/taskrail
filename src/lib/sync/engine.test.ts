@@ -84,6 +84,30 @@ describe('同步持久化', () => {
     expect(right.snapshot().records[id].binding).toBeUndefined();
     expect(b.disk().text).toBe('甲\n\n乙\n');
   });
+  it('解除配对保留文档映射，同一台设备重新配对后按原选择继续同步', async () => {
+    const a = device(); const engine = a.engine(); await engine.load();
+    await engine.attachPairing('device-identity');
+    const id = await engine.enable('local', 'project');
+    await engine.attachPairing(undefined);
+    expect(engine.snapshot().records[id].binding).toEqual({ localId: 'local', enabled: true });
+    await engine.attachPairing('device-identity');
+    expect(engine.snapshot().records[id].binding?.enabled).toBe(true);
+  });
+  it('换设备时清除旧映射，避免把旧选择发给另一台电脑', async () => {
+    const a = device(); const engine = a.engine(); await engine.load();
+    await engine.attachPairing('device-identity'); await engine.enable('local', 'project');
+    await engine.attachPairing('other-identity', 'other-session');
+    expect(engine.snapshot().records).toEqual({});
+    expect(engine.snapshot().pairing).toBe('other-identity');
+  });
+  it('旧版本记录的会话摘要升级为稳定身份时保留已选文档', async () => {
+    const a = device(); const engine = a.engine(); await engine.load();
+    await engine.attachPairing('session-digest');
+    const id = await engine.enable('local', 'project');
+    await engine.attachPairing('device-identity', 'session-digest');
+    expect(engine.snapshot().pairing).toBe('device-identity');
+    expect(engine.snapshot().records[id].binding?.enabled).toBe(true);
+  });
   it('损坏的同步记录阻止后续写入，不能回退为空状态覆盖原文件', async () => {
     let writes = 0;
     const engine = new SyncEngine({ read: async () => text('正文'), apply: async () => {}, accept: async () => 'local' }, {
@@ -92,7 +116,7 @@ describe('同步持久化', () => {
     });
     await expect(engine.load()).rejects.toThrow('SYNC_STATE');
     await expect(engine.enable('local', 'project')).rejects.toThrow('SYNC_STATE');
-    await expect(engine.reset()).rejects.toThrow('SYNC_STATE'); expect(writes).toBe(0);
+    await expect(engine.attachPairing('paired')).rejects.toThrow('SYNC_STATE'); expect(writes).toBe(0);
   });
   it('往返重复交换及独立修改最终收敛', async () => {
     const a = device(), b = device(); const left = a.engine(), right = b.engine();

@@ -83,13 +83,16 @@ export class SyncEngine {
     this.attachments.retain(new Set(Object.values(this.state.records).filter(record => !record.binding || record.binding.enabled).map(record => record.document.id)));
     await this.save();
   }); }
-  reset(): Promise<void> { return this.run(async () => { this.attachments.reset(); this.state = { version: 1, records: {} }; await this.save(); }); }
-  /** 配对代次发生变化时清除旧映射，防止退出发生在撤销凭证与清理状态之间时泄露旧选择。 */
-  attachPairing(pairing?: string): Promise<void> {
+  /**
+   * identity 只在换设备时变化，解除配对或轮换密钥都不影响，因此重新配对可以沿用原有文档映射。
+   * 旧版本把会话摘要存为 pairing：仍配对的旧状态里 session 与旧值相同，此时只改名以保留已选文档。
+   */
+  attachPairing(identity?: string, session?: string): Promise<void> {
     return this.run(async () => {
-      if (this.state.pairing === pairing) return;
+      if (!identity || this.state.pairing === identity) return;
+      if (this.state.pairing && this.state.pairing === session) { this.state.pairing = identity; await this.save(); return; }
       this.attachments.reset();
-      this.state = { version: 1, pairing, records: {} }; await this.save();
+      this.state = { version: 1, pairing: identity, records: {} }; await this.save();
     });
   }
   private async capture(record: SyncRecord): Promise<void> {

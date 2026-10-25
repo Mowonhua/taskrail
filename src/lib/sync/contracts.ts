@@ -58,6 +58,7 @@ export interface SyncRecord {
 }
 /** 用户所选文档的完整清单；revision 是本机持久化操作序号，不是设备时间。 */
 export interface SyncSelection { revision: number; ids: DocumentId[] }
+/** pairing 是稳定配对身份而非连接代次：解除配对和重新互信都不改变，换设备才清除 records。 */
 export interface SyncState { version: 1; pairing?: string; records: Record<DocumentId, SyncRecord>; selectionRevision?: number; remoteSelection?: SyncSelection }
 /**
  * 协议 3 为增量传输：版本按 peerKnown 差集编码，正文可缩为行级补丁；needsFull 请求对端下轮回复全量。
@@ -91,7 +92,8 @@ export interface SyncStore {
   save(state: SyncState): Promise<void>;
 }
 export interface PairingOffer { version: 1; address: string; addresses?: string[]; certificate: number[]; token: string; expires: number }
-export interface ConnectionStatus { paired: boolean; session?: string; address?: string; pending?: string; listening: boolean }
+/** identity 由两端设备凭证推导，解除配对后不变，用于重新配对时延续已选文档；session 每次互信变化都会变。 */
+export interface ConnectionStatus { paired: boolean; session?: string; identity?: string; address?: string; pending?: string; listening: boolean }
 /** 原生端隐藏连接凭证；前端只处理明确选择的文档及经过认证的消息。 */
 export interface SyncTransport {
   status(): Promise<ConnectionStatus>;

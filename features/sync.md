@@ -70,6 +70,11 @@
 | 关键实现 | src-tauri/src/sync.rs::handle |
 | 关键实现 | src-tauri/src/sync/connection.rs::client |
 | 关键实现 | src-tauri/src/sync/connection.rs::server |
+| 关键实现 | src-tauri/src/sync.rs::revoke_pairing |
+| 关键实现 | src-tauri/src/sync.rs::announce_revocation |
+| 关键实现 | src-tauri/src/sync.rs::deliver_revocation |
+| 关键实现 | src-tauri/src/sync.rs::identity |
+| 关键实现 | src/lib/sync/engine.ts::SyncEngine.attachPairing |
 | 关键实现 | src-tauri/plugins/mobile/android/src/main/java/MlKitScannerActivity.kt::MlKitScannerActivity |
 | 关键实现 | src-tauri/plugins/mobile/android/src/main/res/values/styles.xml::Theme.TaskrailScanner |
 | 关键实现 | src-tauri/plugins/mobile/android/consumer-rules.pro::<module> |
@@ -89,6 +94,8 @@
 | S-08 | 正常 | 电脑输入防抖后主动通知手机，手机退到后台释放连接，返回前台立即重连并交换；退到后台的旧同步任务不能继续建连 | src/lib/sync/controller.test.ts::电脑输入防抖后主动通知长连接\，手机进入后台释放连接, src/lib/sync/controller.test.ts::手机离开前台不启动连接\，前台确认后显示已同步, src/lib/sync/controller.test.ts::读取连接状态期间退到后台不再建连 |
 | S-09 | 正常 | 电脑端二维码在面板内按 320px 呈现，点击后铺满窗口放大查看，点击任意处或按 Esc 关闭放大层且配对面板保持打开 | scripts/test-sync-ui.mjs::<module> |
 | S-10 | 正常 | 手机扫码提交配对请求后电脑立即显示允许连接，不等待空闲轮询；扫码返回时正在运行的同步不能把配对推迟到下一轮轮询；手机等待允许期间约一秒复查一次，允许后立即开始连接，建连失败仍按离线退避 | src/lib/sync/controller.test.ts::电脑收到手机配对请求时立即刷新确认状态\，不等待空闲轮询, src/lib/sync/controller.test.ts::扫码返回时正在进行的同步不能推迟配对请求\，配对在本轮结束后立即发出, src/lib/sync/controller.test.ts::手机等待电脑确认期间一秒复查配对\，确认后立即连接 |
+| S-11 | 正常 | 任一端解除配对后两端都清除配对并显示未配对：电脑解除时先向已连接的手机发出撤销，手机清空凭证并结束连接；手机解除时把撤销送达电脑，电脑清空凭证；电脑已不认识该凭证视为撤销送达，仍失败时保留待送达撤销，下次连接或配对同一台电脑时重试 | src-tauri/src/sync/connection.rs::tests::revoke_command_notifies_the_phone_and_ends_the_connection, src-tauri/src/sync.rs::tests::revoking_the_pairing_clears_credentials_once, src-tauri/src/sync.rs::tests::revocation_is_delivered_and_cleared_from_disk, src/lib/sync/controller.test.ts::收到对端解除配对的通知立即刷新为未配对 |
+| S-12 | 正常 | 与同一台设备重新配对后沿用原有文档选择并直接继续同步：配对身份由两端设备凭证推导，解除配对和密钥轮换都不改变，只有换成另一台设备才清除本地映射与待接收提示；旧版本记录的会话摘要升级为稳定身份时同样保留已选文档 | src-tauri/src/sync.rs::tests::pairing_identity_matches_on_both_ends, src/lib/sync/engine.test.ts::同步持久化 > 解除配对保留文档映射\，同一台设备重新配对后按原选择继续同步, src/lib/sync/engine.test.ts::同步持久化 > 换设备时清除旧映射\，避免把旧选择发给另一台电脑, src/lib/sync/engine.test.ts::同步持久化 > 旧版本记录的会话摘要升级为稳定身份时保留已选文档, src/lib/sync/controller.test.ts::解除配对后重新配对同一台电脑\，保留已选项目并直接继续同步 |
 
 ## F-SYN-003 同步面板
 

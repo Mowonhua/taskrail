@@ -16,7 +16,7 @@ function fixture(desktop = false) {
   const engine = new SyncEngine({ read, apply, accept: async () => 'local' }, { load: async () => null, save: async () => {} });
   const probe = vi.fn(async () => {});
   const transport: SyncTransport = {
-    status: async () => ({ paired: true, session: 'paired-device', listening: desktop }), probe, exchange: async value => value,
+    status: async () => ({ paired: true, session: 'paired-device', identity: 'paired-identity', listening: desktop }), probe, exchange: async value => value,
     offer: async () => { throw new Error('此场景不发起配对'); }, pair: async () => true,
     approve: async () => {}, unpair: async () => {}, respond: async () => {}, address: async () => {},
     notify: vi.fn(async () => {}), disconnect: vi.fn(async () => {}),
@@ -258,12 +258,35 @@ it('交换过程中收到电脑通知，结束后立即跟进且不重复轮询'
   } finally { vi.useRealTimers(); }
 });
 
+it('解除配对后重新配对同一台电脑，保留已选项目并直接继续同步', async () => {
+  const f = fixture(); await f.controller.start(); const id = await f.engine.enable('local', 'project');
+  await f.controller.sync();
+  f.transport.status = async () => ({ paired: false, listening: false });
+  await f.controller.unpair();
+  expect(f.controller.status).toBe('未配对');
+  // 解除配对不清空映射，重新配对同一台设备后原来的勾选与关联继续生效。
+  expect(f.engine.snapshot().records[id].binding).toMatchObject({ localId: 'local', enabled: true });
+  f.transport.status = async () => ({ paired: true, session: 'paired-again', identity: 'paired-identity', listening: false });
+  await f.controller.sync();
+  expect(f.engine.snapshot().records[id].binding?.enabled).toBe(true);
+  expect(f.controller.status).toBe('已同步');
+});
+
+it('收到对端解除配对的通知立即刷新为未配对', async () => {
+  const f = fixture(true); await f.controller.start(); await f.engine.enable('local', 'project');
+  expect(f.controller.connection.paired).toBe(true);
+  f.transport.status = async () => ({ paired: false, listening: true });
+  await listeners.get('taskrail:sync-revoked')?.({ payload: null });
+  await vi.waitFor(() => expect(f.controller.status).toBe('未配对'));
+  expect(f.controller.connection.paired).toBe(false);
+});
+
 it('读取连接状态期间退到后台不再建连', async () => {
   const f = fixture(); await f.controller.start();
   const exchange = vi.spyOn(f.transport, 'exchange'); f.probe.mockClear();
   f.transport.status = async () => {
     vi.spyOn(document, 'hidden', 'get').mockReturnValue(true);
-    return { paired: true, session: 'paired-device', listening: false };
+    return { paired: true, session: 'paired-device', identity: 'paired-identity', listening: false };
   };
   await f.controller.sync();
   expect(f.probe).not.toHaveBeenCalled(); expect(exchange).not.toHaveBeenCalled();
