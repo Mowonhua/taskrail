@@ -1,10 +1,10 @@
 /**
- * 文件职责：管理列表标记手势、画布卡片拖动及正文右侧、空任务、空段落的指针定位。
+ * 文件职责：管理列表标记手势、画布卡片拖动、正文右侧、空任务、空段落的指针定位及手机触摸聚焦。
  * 定义范围：指针状态机、正文焦点、末尾空段落分隔和同父级可见插入边界（顶层可跨列表跨越标题）。
  */
 import { locale, translate } from '../i18n';
 import { EditorView, ViewPlugin, type ViewUpdate } from '@codemirror/view';
-import { EditorSelection, type TransactionSpec } from '@codemirror/state';
+import { EditorSelection, Transaction, type TransactionSpec } from '@codemirror/state';
 import { getHiddenRanges } from '../markdown';
 import { actionsFacet, documentField, modeFacet, resourcesFacet } from './state';
 import type { DragKind } from './types';
@@ -21,6 +21,11 @@ interface DropBoundary { before: number | null; y: number }
 
 /** 落点吸附距离：指针离插入线超过一行左右时不再显示落点。 */
 const DROP_RADIUS = 30;
+
+/** 手指位移超过该值即视为滑动，轻点的抖动不能撤销聚焦。 */
+const TOUCH_SLIDE_DISTANCE = 10;
+/** 触摸后超过该时间的移动属于长按选字，不能再按滑动撤销聚焦。 */
+const TOUCH_SLIDE_WINDOW = 250;
 
 /**
  * 函数职责：从候选落点中选出指针最终提交的位置。
@@ -53,11 +58,20 @@ class MarkerGestures {
   private lastClick: { time: number; x: number; y: number; marker: HTMLElement } | null = null;
   private closeMenu: (() => void) | null = null;
   private touchStart: { x: number; y: number; time: number } | null = null;
+  /** 手机触摸起点：记录触摸前的焦点与插入点，用于区分轻点、滑动与长按选字。 */
+  private touchPan: { x: number; y: number; time: number; focused: boolean; sliding: boolean; selection: EditorSelection } | null = null;
+  private touchFocusFrame = 0;
   constructor(private readonly view: EditorView) {
     view.dom.addEventListener('pointerdown', this.down, true);
     view.dom.addEventListener('click', this.nativeBlankClick, true);
     view.scrollDOM.addEventListener('mousedown', this.forwardBottomMouseDown);
     view.dom.addEventListener('contextmenu', this.context, true);
+    if (view.state.facet(resourcesFacet).nativeSelection) {
+      view.dom.addEventListener('touchstart', this.panStart, { passive: true, capture: true });
+      view.dom.addEventListener('touchmove', this.panMove, { passive: true, capture: true });
+      view.dom.addEventListener('touchend', this.panEnd, { passive: true, capture: true });
+      view.dom.addEventListener('touchcancel', this.panEnd, { passive: true, capture: true });
+    }
     window.addEventListener('pointermove', this.move);
     window.addEventListener('pointerup', this.up);
     window.addEventListener('pointercancel', this.cancel);
@@ -115,15 +129,62 @@ class MarkerGestures {
   destroy(): void {
     this.cancel();
     this.closeMenu?.();
+    cancelAnimationFrame(this.touchFocusFrame);
     this.view.dom.removeEventListener('pointerdown', this.down, true);
     this.view.dom.removeEventListener('click', this.nativeBlankClick, true);
     this.view.scrollDOM.removeEventListener('mousedown', this.forwardBottomMouseDown);
     this.view.dom.removeEventListener('contextmenu', this.context, true);
+    this.view.dom.removeEventListener('touchstart', this.panStart, true);
+    this.view.dom.removeEventListener('touchmove', this.panMove, true);
+    this.view.dom.removeEventListener('touchend', this.panEnd, true);
+    this.view.dom.removeEventListener('touchcancel', this.panEnd, true);
     window.removeEventListener('pointermove', this.move);
     window.removeEventListener('pointerup', this.up);
     window.removeEventListener('pointercancel', this.cancel);
     window.removeEventListener('keydown', this.key);
     window.removeEventListener('blur', this.cancel);
+  }
+  /**
+   * 记录触摸起点和触摸前的编辑状态。手机 WebView 会在手指按住正文时立即聚焦并显示光标，
+   * 这里只记录，等移动超过阈值后再撤销那次聚焦。
+   */
+  private panStart = (event: TouchEvent): void => {
+    cancelAnimationFrame(this.touchFocusFrame);
+    const touch = event.touches[0];
+    this.touchPan = event.touches.length === 1 && touch
+      ? { x: touch.clientX, y: touch.clientY, time: performance.now(), focused: this.view.hasFocus, sliding: false, selection: this.view.state.selection }
+      : null;
+  };
+  /**
+   * 未聚焦时手指滑动不应留下光标：滑动确认后撤销本次触摸建立的焦点和选区，
+   * 并把插入点恢复到滑动前，避免滚动或抽屉手势偷偷改变编辑目标。
+   * 已聚焦的滚动保留焦点；长按选字在时间窗口之后才开始位移，不能按滑动处理。
+   */
+  private panMove = (event: TouchEvent): void => {
+    const pan = this.touchPan, touch = event.touches[0];
+    if (event.touches.length !== 1) { this.touchPan = null; return; }
+    if (!pan || !touch || pan.sliding || pan.focused || performance.now() - pan.time > TOUCH_SLIDE_WINDOW) return;
+    if (Math.hypot(touch.clientX - pan.x, touch.clientY - pan.y) <= TOUCH_SLIDE_DISTANCE) return;
+    pan.sliding = true;
+    this.dropTouchFocus(pan.selection);
+  };
+  private panEnd = (): void => {
+    const pan = this.touchPan;
+    this.touchPan = null;
+    if (!pan?.sliding || pan.focused) return;
+    // WebView 也可能在抬手后才补上聚焦；下一帧再撤销一次，轻点不经过这里。
+    this.touchFocusFrame = requestAnimationFrame(() => {
+      this.touchFocusFrame = 0;
+      if (this.view.hasFocus) this.dropTouchFocus(pan.selection);
+    });
+  };
+  /** 撤销本次触摸带来的聚焦和选区，同时把插入点恢复到触摸前，避免滑动改变编辑目标。 */
+  private dropTouchFocus(selection: EditorSelection): void {
+    const focused = this.view.hasFocus;
+    this.view.contentDOM.blur();
+    if (focused) window.getSelection()?.removeAllRanges();
+    // 恢复插入点不能进入撤销历史，也不能触发滚动。
+    if (!this.view.state.selection.eq(selection)) this.view.dispatch({ selection, scrollIntoView: false, annotations: Transaction.addToHistory.of(false) });
   }
   private down = (event: PointerEvent): void => {
     this.paragraphAnchor = null;

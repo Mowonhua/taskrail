@@ -39,22 +39,42 @@ try {
       await page.waitForTimeout(20);
     }
     await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
-    await page.waitForTimeout(230);
+    await page.waitForTimeout(320);
   }
-  await swipe(10, 400, 130);
-  assert.equal(await page.locator('.sidebar').count(), 1, '左侧向右滑动展开导航');
-  await swipe(180, 400, -130);
-  assert.equal(await page.locator('.sidebar').count(), 0, '向左滑动收起导航');
-  await swipe(10, 500, 10, -160);
-  assert.equal(await page.locator('.sidebar').count(), 0, '纵向滚动不展开导航');
+  const drawer = () => page.locator('.sidebar').count();
+  // 抽屉手势区为视口正中宽 50%、高 75% 的矩形，起手点必须落在区域内。
+  const { width: viewWidth, height: viewHeight } = page.viewportSize();
+  await swipe(viewWidth / 2, viewHeight * 0.45, 130);
+  assert.equal(await drawer(), 1, '视口中心向右滑动展开导航');
+  await swipe(viewWidth / 2, viewHeight * 0.45, -130);
+  assert.equal(await drawer(), 0, '视口中心向左滑动收起导航');
+  await swipe(10, viewHeight * 0.45, 130);
+  assert.equal(await drawer(), 0, '左侧边缘向右滑动不展开导航');
+  await swipe(viewWidth / 2, viewHeight * 0.45, 10, -160);
+  assert.equal(await drawer(), 0, '纵向滚动不展开导航');
   for (const width of [320, 390, 430]) {
     await page.setViewportSize({ width, height: 844 });
-    await swipe(width * 0.49, 450, 80);
-    assert.equal(await page.locator('.sidebar').count(), 1, `${width}px 视口左侧 49% 处右滑展开导航`);
-    await swipe(180, 450, -130);
-    assert.equal(await page.locator('.sidebar').count(), 0);
-    await swipe(width * 0.51, 450, 80);
-    assert.equal(await page.locator('.sidebar').count(), 0, `${width}px 视口右侧 51% 处右滑不展开导航`);
+    await swipe(width / 2, 450, 80);
+    assert.equal(await drawer(), 1, `${width}px 视口中心右滑展开导航`);
+    await swipe(width / 2, 450, -130);
+    assert.equal(await drawer(), 0);
+    await swipe(width * 0.2, 450, 80);
+    assert.equal(await drawer(), 0, `${width}px 视口左侧 20% 处右滑不展开导航`);
+    await swipe(width * 0.8, 450, 80);
+    assert.equal(await drawer(), 0, `${width}px 视口右侧 20% 处右滑不展开导航`);
+    await swipe(width / 2, 60, 80);
+    assert.equal(await drawer(), 0, `${width}px 视口顶部横滑不展开导航`);
   }
-  console.log('手机导航验收通过：三个浮层外部关闭、弹窗外部关闭不聚焦正文、快捷键入口移除、更新入口、左右滑动与纵向滚动隔离。');
+  // 滑动正文只触发展开，不把焦点交给编辑器；轻点正文才聚焦。
+  const content = await page.locator('.cm-content').boundingBox();
+  const centerX = page.viewportSize().width / 2;
+  await page.evaluate(() => { if (document.activeElement instanceof HTMLElement) document.activeElement.blur(); });
+  await swipe(centerX, content.y + 120, 120);
+  assert.equal(await drawer(), 1, '正文上的中心横滑仍可展开导航');
+  assert.notEqual(await page.evaluate(() => document.activeElement?.getAttribute('aria-label')), 'Markdown 任务文档', '手指滑动不唤起正文光标');
+  await swipe(centerX, 450, -130);
+  await page.locator('[aria-label="Markdown 任务文档"]').tap();
+  await page.waitForTimeout(200);
+  assert.equal(await page.evaluate(() => document.activeElement?.getAttribute('aria-label')), 'Markdown 任务文档', '轻点正文仍聚焦编辑器');
+  console.log('手机导航验收通过：三个浮层外部关闭、弹窗外部关闭不聚焦正文、快捷键入口移除、更新入口、中心手势区开合与滑动不聚焦。');
 } finally { await browser.close(); }
