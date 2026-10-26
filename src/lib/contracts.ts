@@ -6,6 +6,8 @@
 /** 结构职责：承载本机项目关联；桌面路径指向用户原文件，Android 路径指向可由应用删除的私有副本。 */
 export interface Project {
   id: string; name: string; path: string;
+  /** 可选图标引用：`emoji:表情` 或 `lucide:名称`；缺省显示通用文档标识，不写入 Markdown。 */
+  icon?: string;
   /** 缺省为未归档；归档保留关联及阅读状态，但不参与导航、聚合和搜索。 */
   archived?: boolean;
 }

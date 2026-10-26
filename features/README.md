@@ -27,3 +27,4 @@
 | 移动编辑 | [mobile.md](mobile.md) | Android 平台隔离、托管文件、触屏导航和应用更新 |
 | 局域网同步 | [sync.md](sync.md) | 配对、版本合并、持久化与文档接收 |
 | Markdown 画布 | [canvas.md](canvas.md) | 内嵌自由白板、共享图片附件和完整文档搬运 |
+| 项目导航 | [navigation.md](navigation.md) | 项目列表的标识、切换与排序 |

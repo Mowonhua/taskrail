@@ -635,6 +635,90 @@ async function chooseThemeSetting(name: string, value: string): Promise<void> {
   option.click(); await tick();
 }
 
+describe('项目图标', () => {
+  it('默认显示通用标识，右键其他项目可选择图标且不切换当前项目', async () => {
+    await start(['# 甲清单\n', '# 乙清单\n']);
+    const rows = () => [...document.querySelectorAll<HTMLButtonElement>('.project-list button')];
+    const firstRow = rows().find(row => row.title === firstProject.path)!;
+    const secondRow = rows().find(row => row.title === secondProject.path)!;
+    expect(firstRow.querySelector('.project-icon svg')).not.toBeNull();
+    expect(secondRow.querySelector('.project-icon svg')).not.toBeNull();
+    secondRow.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 100, clientY: 100 }));
+    await tick();
+    button('设置项目图标').click(); await tick();
+    const dialog = document.querySelector('[role="dialog"]')!;
+    expect(dialog.querySelector('h2')?.textContent).toBe('项目图标');
+    expect(dialog.textContent).toContain(secondProject.name);
+    await vi.waitFor(() => expect(document.querySelector('.icon-choice[title="公文包"]')).not.toBeNull());
+    document.querySelector<HTMLButtonElement>('.icon-choice[title="公文包"]')!.click(); await tick();
+    await vi.waitFor(async () => expect((await files.loadConfig())?.projects.find(project => project.id === secondProject.id)?.icon).toBe('emoji:💼'));
+    expect(crumbName()).toBe(firstProject.name);
+    expect(secondRow.querySelector('.project-icon-glyph')?.textContent).toBe('💼');
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    await remount();
+    const restored = [...document.querySelectorAll<HTMLButtonElement>('.project-list button')].find(row => row.title === secondProject.path)!;
+    expect(restored.querySelector('.project-icon-glyph')?.textContent).toBe('💼');
+  });
+
+  it('可切换到 Lucide 图标、搜索并持久化，重启后恢复同一图标', async () => {
+    await start(['# 甲清单\n']);
+    button('更多操作').click(); await tick();
+    button('设置项目图标').click(); await tick();
+    button('图标').click(); await tick();
+    await vi.waitFor(() => expect(document.querySelector('.icon-choice[title="briefcase"]')).not.toBeNull());
+    document.querySelector<HTMLButtonElement>('.icon-choice[title="briefcase"]')!.click();
+    await tick();
+    await vi.waitFor(async () => expect((await files.loadConfig())?.projects[0].icon).toBe('lucide:briefcase'));
+    const row = () => [...document.querySelectorAll<HTMLButtonElement>('.project-list button')].find(item => item.title === firstProject.path)!;
+    await vi.waitFor(() => expect(row().querySelector('.project-icon-lucide svg')).not.toBeNull());
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    await remount();
+    const restored = [...document.querySelectorAll<HTMLButtonElement>('.project-list button')].find(item => item.title === firstProject.path)!;
+    await vi.waitFor(() => expect(restored.querySelector('.project-icon-lucide svg')).not.toBeNull());
+    button('更多操作').click(); await tick();
+    button('设置项目图标').click(); await tick();
+    const iconTab = [...document.querySelectorAll<HTMLButtonElement>('.icon-picker-tab')].find(item => item.textContent?.trim() === '图标')!;
+    expect(iconTab.getAttribute('aria-pressed')).toBe('true');
+    await vi.waitFor(() => expect(document.querySelector('.icon-choice[title="briefcase"]')?.getAttribute('aria-pressed')).toBe('true'));
+  });
+
+  it('搜索可找到推荐之外的表情并写回配置', async () => {
+    await start(['# 甲清单\n']);
+    button('更多操作').click(); await tick();
+    button('设置项目图标').click(); await tick();
+    await vi.waitFor(() => expect(document.querySelector('.icon-picker-search')).not.toBeNull());
+    const search = document.querySelector<HTMLInputElement>('[aria-label="搜索表情"]')!;
+    search.value = '披萨'; search.dispatchEvent(new Event('input', { bubbles: true }));
+    const pizza = () => [...document.querySelectorAll<HTMLButtonElement>('.icon-choice')].find(item => item.textContent?.trim() === '🍕');
+    await vi.waitFor(() => expect(pizza()).toBeTruthy());
+    expect(document.querySelector('.icon-picker-categories')).toBeNull();
+    pizza()!.click();
+    await vi.waitFor(async () => expect((await files.loadConfig())?.projects[0].icon).toBe('emoji:🍕'));
+  });
+
+  it('可从更多菜单自定义图标、拒绝多字素输入并恢复默认', async () => {
+    await start(['# 甲清单\n']);
+    button('更多操作').click(); await tick();
+    button('设置项目图标').click(); await tick();
+    const input = document.querySelector<HTMLInputElement>('[aria-label="自定义图标"]')!;
+    input.value = 'ab'; input.dispatchEvent(new Event('input', { bubbles: true })); await tick();
+    button('使用此图标').click(); await tick();
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain('请输入一个字符或表情');
+    expect((await files.loadConfig())?.projects[0].icon).toBeUndefined();
+    input.value = '🦄'; input.dispatchEvent(new Event('input', { bubbles: true })); await tick();
+    button('使用此图标').click(); await tick();
+    await vi.waitFor(async () => expect((await files.loadConfig())?.projects[0].icon).toBe('emoji:🦄'));
+    const row = () => [...document.querySelectorAll<HTMLButtonElement>('.project-list button')].find(item => item.title === firstProject.path)!;
+    expect(row().querySelector('.project-icon-glyph')?.textContent).toBe('🦄');
+    button('更多操作').click(); await tick();
+    button('设置项目图标').click(); await tick();
+    expect(document.querySelector('[role="dialog"]')?.textContent).toContain('🦄');
+    button('恢复默认图标').click(); await tick();
+    await vi.waitFor(async () => expect((await files.loadConfig())?.projects[0].icon).toBeUndefined());
+    expect(row().querySelector('.project-icon svg')).not.toBeNull();
+  });
+});
+
 describe('主题下拉菜单', () => {
   it('设置说明按需显示，Escape 先关闭帮助，主题管理收起时 Tab 不进入隐藏操作', async () => {
     await start(['# 设置交互\n']); button('设置').click(); await tick();

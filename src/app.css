@@ -61,7 +61,15 @@ body:has(.desktop-window.card-mode) .modal-backdrop{padding-top:24px}
 .project-drop-before::before,.project-drop-after::after{content:"";position:absolute;left:0;right:0;height:2px;background:var(--accent);pointer-events:none}
 .project-drop-before::before{top:0}
 .project-drop-after::after{bottom:0}
-.project-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* 图标位与导航图标同权；无自定义图标时用通用文档标识占位，混合有无图标的项目仍保持文字对齐。 */
+.project-icon{display:inline-flex;align-items:center;justify-content:center;flex:0 0 18px;width:18px;height:18px;line-height:1;color:var(--muted)}
+.project-icon svg{display:block}
+.project-icon-glyph{display:block;font-size:16px;line-height:1}
+.project-icon-svg *{stroke-width:1.75}
+.project-icon-pending{display:block;width:17px;height:17px;flex-shrink:0}
+.project-icon-large .project-icon-pending{width:22px;height:22px}
+.nav-active .project-icon{color:inherit}
+.project-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 /* 大纲条目沿用侧栏导航的视觉参数；缩进按标题级别递增，禁用条目表示当前投影不可见。 */
 .outline-list{overflow:auto;min-height:0;display:flex;flex-direction:column;gap:2px;padding-bottom:4px}
 /* 分区切换时列表整体重新入场；减少动态效果时由全局媒体查询禁用。 */
@@ -331,6 +339,47 @@ body:has(.desktop-window.card-mode) .modal-backdrop{padding-top:24px}
 .file-path{font-family:Consolas,monospace;font-size:11px!important;background:var(--sidebar);border-radius:4px;padding:10px;word-break:break-all}
 .modal-actions{display:flex;gap:10px;justify-content:flex-end;flex-wrap:wrap;margin-top:24px}
 .dialog-error{color:var(--danger);font-size:12px!important;margin:15px 0 0}
+/* 图标选择器提供分类浏览和完整搜索；网格自身滚动，避免分类和结果较多时撑高弹窗。 */
+.project-icon-picker{display:flex;flex-direction:column;min-width:0}
+.icon-picker-current{display:flex;align-items:center;gap:12px;margin:4px 0 16px;min-width:0}
+.project-icon-large{flex-basis:40px;width:40px;height:40px;border:1px solid var(--field-border,var(--line));border-radius:var(--control-radius,7px);background:var(--field-background,var(--surface));color:var(--muted)}
+.project-icon-large .project-icon-glyph{font-size:25px}
+.project-icon-large svg{width:22px;height:22px}
+.icon-picker-project{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:14px;font-weight:550}
+.icon-picker-toolbar{display:flex;flex-direction:column;gap:10px;margin-bottom:12px}
+.icon-picker-tabs{display:flex;gap:2px;padding:2px;border:1px solid var(--field-border,var(--line));border-radius:var(--control-radius,6px);align-self:flex-start}
+.icon-picker-tab{padding:5px 12px;border-radius:calc(var(--control-radius,6px) - 2px);font-size:12px;color:var(--muted)}
+.icon-picker-tab[aria-pressed=true]{background:var(--accent-soft);color:var(--accent);font-weight:550}
+.icon-picker-tab[aria-pressed=true]:hover:not(:disabled){background:var(--accent-soft)}
+.icon-picker-search{display:block;width:100%;height:34px;font-size:13px;padding:7px 10px}
+.icon-picker-categories{display:flex;gap:4px;overflow-x:auto;overflow-y:hidden;scrollbar-width:none;margin-bottom:8px;padding:5px 0;flex-shrink:0;mask-image:linear-gradient(to right,#000 calc(100% - 18px),transparent)}
+.icon-picker-categories::-webkit-scrollbar{display:none}
+.icon-picker-category{display:grid;place-items:center;flex:0 0 auto;width:30px;height:28px;padding:0;border:1px solid transparent;border-radius:var(--control-radius,5px);color:var(--muted)}
+.icon-picker-category[aria-pressed=true]{border-color:var(--accent);background:var(--accent-soft);color:var(--accent)}
+.icon-picker-category[aria-pressed=true]:hover:not(:disabled){background:var(--accent-soft)}
+.icon-picker-category-emoji{font-size:15px;line-height:1;pointer-events:none}
+.icon-picker-category-svg{width:15px;height:15px;color:var(--muted);pointer-events:none}
+.icon-picker-category-svg *{stroke-width:1.8}
+.icon-picker-category[aria-pressed=true] .icon-picker-category-svg{color:var(--accent)}
+.icon-picker-viewport{min-height:0}
+.icon-picker-grid{display:grid;grid-template-columns:repeat(8,minmax(0,1fr));grid-auto-rows:min-content;align-content:start;gap:6px;max-height:clamp(220px,38dvh,320px);overflow:auto;overscroll-behavior:contain;padding:5px}
+.icon-choice{display:grid;place-items:center;aspect-ratio:1;min-width:0;padding:0;border:1px solid transparent;border-radius:var(--control-radius,5px);line-height:1}
+.icon-choice-active{border-color:var(--accent);background:var(--accent-soft)}
+.icon-choice-emoji{display:block;font-size:21px;line-height:1;pointer-events:none}
+.icon-choice-lucide{width:19px;height:19px;color:var(--ink);pointer-events:none}
+.icon-choice-lucide *{stroke-width:1.75}
+.icon-choice[aria-pressed=true] .icon-choice-lucide{color:var(--accent)}
+.icon-picker-state{display:flex;align-items:center;justify-content:center;gap:10px;min-height:clamp(150px,24dvh,190px);padding:24px;color:var(--muted);font-size:12px;text-align:center}
+.icon-picker-retry{flex-shrink:0;padding:6px 10px;border:1px solid var(--control-border,var(--line));border-radius:var(--control-radius,5px);font-size:12px;background:var(--control-background,transparent)}
+.icon-picker-retry:hover:not(:disabled){background:var(--control-hover-background,var(--hover))}
+.icon-picker-note{margin:6px 0 0;font-size:11px;color:var(--muted)}
+.icon-custom-row{display:flex;align-items:center;gap:8px;margin-top:14px}
+.icon-custom-input{flex:1;min-width:0}
+.icon-custom-apply{flex-shrink:0;border:1px solid var(--control-border,var(--line));border-radius:var(--control-radius,5px);padding:10px 12px;font-size:12px;background:var(--control-background,transparent);box-shadow:var(--control-shadow,none)}
+.icon-custom-apply:hover:not(:disabled){background:var(--control-hover-background,var(--hover))}
+.icon-reset{display:block;margin:16px 0 0;padding:4px 0;font-size:12px;color:var(--muted)}
+.icon-reset:hover:not(:disabled){color:var(--ink);background:none}
+@media(max-width:520px){.icon-picker-grid{grid-template-columns:repeat(6,minmax(0,1fr))}}
 .shortcuts{display:grid;grid-template-columns:150px 1fr;font-size:12px;line-height:1.8;gap:10px;margin:23px 0}
 .shortcuts dt{font-family:Consolas,monospace;color:var(--accent)}
 .shortcuts dd{margin:0;color:var(--muted)}

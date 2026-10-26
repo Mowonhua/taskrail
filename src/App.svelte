@@ -14,6 +14,8 @@
   import WindowControls from './lib/WindowControls.svelte';
   import UpdatePanel from './lib/UpdatePanel.svelte';
   import SettingsPanel from './lib/SettingsPanel.svelte';
+  import ProjectIcon from './lib/ProjectIcon.svelte';
+  import ProjectIconPicker from './lib/ProjectIconPicker.svelte';
   import { UpdateCoordinator } from './lib/updater/update-coordinator';
   import type { UpdateStatus } from './lib/updater/contracts';
   import { formatBytes } from './lib/updater/format-bytes';
@@ -32,6 +34,7 @@
   import { activeOutlineFrom, outlineEntries } from './lib/markdown/outline';
   import { resolveDocumentResource } from './lib/resource-paths';
   import { validateAppConfig } from './lib/config-validation';
+  import { serializeProjectIcon, type ProjectIcon as IconReference } from './lib/project-icons';
   import { applyTheme, bootThemeKey, builtInThemes, parseTheme } from './lib/themes';
   import { WindowMaterialController, type WindowMaterial } from './lib/window-material';
   import { registerDrawerGestures } from './lib/mobile-navigation';
@@ -196,9 +199,11 @@
   /** 面包屑切换列表锚定触发按钮；大纲侧栏没有项目列表，切换项目从这里进入。 */
   let crumbMenu = $state<{ x: number; y: number } | null>(null);
   let removeTarget = $state<Project | null>(null);
+  /** 图标对话框的目标独立于当前项目，从项目菜单编辑其他项目时不切换正文。 */
+  let iconTarget = $state<Project | null>(null);
   let projectActionBusy = $state(false);
   let addingProject = $state(false);
-  let dialog = $state<'project' | 'rename' | 'settings' | 'help' | 'conflict' | 'recovery' | 'remove' | 'archived-projects' | 'updates' | null>(null);
+  let dialog = $state<'project' | 'rename' | 'settings' | 'help' | 'conflict' | 'recovery' | 'remove' | 'archived-projects' | 'updates' | 'icon' | null>(null);
   let projectName = $state('');
   let projectPath = $state('');
   let createFile = $state(false);
@@ -847,8 +852,8 @@
         const closed = element.closest('details:not([open])');
         return !closed || element === closed.querySelector(':scope > summary');
       });
-    // 设置页从首个选择器开始；隐藏的文件导入控件不能占据初始焦点或 Tab 循环。
-    (focusable().find(element => element.matches('[role="combobox"], input, select, textarea')) ?? focusable()[0] ?? node).focus();
+    // 设置页从首个选择器开始；图标网格可指定初始格子。隐藏的文件导入控件不能占据初始焦点或 Tab 循环。
+    (focusable().find(element => element.matches('[data-autofocus]')) ?? focusable().find(element => element.matches('[role="combobox"], input, select, textarea')) ?? focusable()[0] ?? node).focus();
     const trap = (event: KeyboardEvent) => {
       if (event.key !== 'Tab') return;
       const elements = focusable(); const first = elements[0]; const last = elements.at(-1);
@@ -885,6 +890,28 @@
     if (!active || !projectName.trim()) return;
     const project = config.projects.find(item => item.id === active!.project.id)!;
     project.name = projectName.trim(); active.project = project; version += 1; dialog = null; scheduleConfig();
+  }
+  /** 图标对话框只修改目标项目的本机配置，不要求先切换到该项目。 */
+  function openIconPicker(project: Project): void {
+    iconTarget = project;
+    openDialog('icon');
+  }
+  /**
+   * 函数职责：保存或清除目标项目图标并持久化本机配置。
+   * 输入说明：icon 为 null 表示恢复默认；其他值是选择器给出的表情或 Lucide 引用。
+   * 输出说明：只修改目标项目；配置写入失败由既有错误横幅处理，内存中的图标保留。
+   * 实现思路：按 id 重新定位配置对象，避免菜单持有旧引用；活动会话同步替换项目对象。
+   * 约束条件：图标属于本机界面配置，不进入同步文档的项目资料，因此不触发同步脏标记。
+   */
+  function saveProjectIcon(icon: IconReference | null): void {
+    const target = iconTarget;
+    if (!target) return;
+    const project = config.projects.find(item => item.id === target.id);
+    if (!project) { iconTarget = null; dialog = null; return; }
+    const value = icon ? serializeProjectIcon(icon) : null;
+    if (value) project.icon = value; else delete project.icon;
+    if (active?.project.id === project.id) active.project = project;
+    iconTarget = null; dialog = null; version += 1; scheduleConfig();
   }
   /**
    * 函数职责：归档或解除指定项目的关联，统一维护会话生命周期。
@@ -958,7 +985,7 @@
     event.preventDefault();
     if (projectActionBusy) return;
     const bounds = (event.currentTarget as HTMLElement).getBoundingClientRect();
-    projectMenu = { project, x: Math.max(8, Math.min(event.clientX || bounds.left, window.innerWidth - 230)), y: Math.max(8, Math.min(event.clientY || bounds.bottom, window.innerHeight - 100)) };
+    projectMenu = { project, x: Math.max(8, Math.min(event.clientX || bounds.left, window.innerWidth - 230)), y: Math.max(8, Math.min(event.clientY || bounds.bottom, window.innerHeight - 150)) };
     menuOpen = false;
     void tick().then(() => document.querySelector<HTMLElement>('[data-project-menu] button')?.focus());
   }
@@ -1426,7 +1453,7 @@
             ondragend={() => { draggedProjectId = null; projectDropTarget = null; }}
             oncontextmenu={event => showProjectMenu(event, project)}
             onkeydown={event => { if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) { event.preventDefault(); showProjectMenu(event as unknown as MouseEvent, project); } }}
-            onclick={() => openProject(project)} title={project.path}><span class="project-name">{project.name}</span></button>
+            onclick={() => openProject(project)} title={project.path}><ProjectIcon icon={project.icon}/><span class="project-name">{project.name}</span></button>
         {/each}
       </nav>
       <div class="sidebar-bottom"><button class="icon-button" aria-label={$t("设置")} onclick={() => openDialog('settings')}><svg width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m8 2-.5 2-1.5.9-2-.6-2 3.4 1.5 1.4v1.8L2 12.3l2 3.4 2-.6 1.5.9.5 2h4l.5-2 1.5-.9 2 .6 2-3.4-1.5-1.4V9.1L18 7.7l-2-3.4-2 .6-1.5-.9-.5-2Z"/><circle cx="10" cy="10" r="3"/></svg></button></div>
@@ -1450,7 +1477,7 @@
         <button role="menuitem" onclick={save}>{$t("保存")} <kbd>Ctrl S</kbd></button>
         <button role="menuitem" onclick={() => { editor?.insertTask(); menuOpen = false; }}>{$t("新增任务")} <kbd>Ctrl N</kbd></button>
         <button role="menuitem" disabled={mode !== 'todo'} onclick={() => { editor?.insertCanvas(); menuOpen = false; }}>{$t('插入画布')}</button>
-        <hr/>{#if active.project.id !== INSPIRATION_ID}<button role="menuitem" onclick={() => openDialog('rename')}>{$t("重命名项目")}</button>{/if}
+        <hr/>{#if active.project.id !== INSPIRATION_ID}<button role="menuitem" onclick={() => openDialog('rename')}>{$t("重命名项目")}</button><button role="menuitem" onclick={() => { if (active) openIconPicker(active.project); }}>{$t("设置项目图标")}</button>{/if}
         <button role="menuitem" onclick={() => exportMarkdown()}>{$t("另存 Markdown 副本")}</button>
         <button role="menuitem" disabled={bundleBusy} onclick={exportCanvasBundle}>{$t('导出完整文档')}</button>
         {#if active.project.id !== INSPIRATION_ID}<button role="menuitem" onclick={() => openDialog('remove')}>{$t(mobile ? '删除项目' : '移除项目关联')}</button>{/if}
@@ -1554,6 +1581,7 @@
       }
       if (event.key === 'Tab') projectMenu = null;
     }}>
+    <button role="menuitem" onclick={() => { const target = projectMenu?.project; if (target) openIconPicker(target); }}>{$t("设置项目图标")}</button>
     <button role="menuitem" onclick={() => { if (projectMenu) void retireProject(projectMenu.project, true); }}>{$t("归档项目")}</button>
     <button role="menuitem" onclick={() => { const target = projectMenu?.project; openDialog('remove'); removeTarget = target ?? null; }}>{$t("删除项目")}</button>
   </div>
@@ -1592,6 +1620,8 @@
         <button class="primary" disabled={addingProject} onclick={addProject}>{mobile && !projectPath ? $t('创建项目') : $t("添加项目")}</button>
       {:else if dialog === 'rename'}
         <h2 id="dialog-title">{$t("重命名项目")}</h2><label>{$t("项目名称")}<input bind:value={projectName}/></label><button class="primary" onclick={renameProject}>{$t("保存名称")}</button>
+      {:else if dialog === 'icon'}
+        <ProjectIconPicker projectName={iconTarget?.name ?? ''} icon={iconTarget?.icon} {mobile} onSelect={saveProjectIcon} onReset={() => saveProjectIcon(null)}/>
       {:else if dialog === 'remove'}
         <h2 id="dialog-title">{$t('删除「{name}」项目？', { name: removeTarget?.name ?? '' })}</h2><p>{mobile ? $t('将删除手机上的文档和恢复草稿。导入来源及电脑上的文件不受影响。') : $t("Markdown 文件会保留在原位置。你可以随时重新关联。")}</p><div class="modal-actions"><button onclick={() => dialog = null}>{$t("取消")}</button><button class="primary" disabled={projectActionBusy} onclick={removeProject}>{$t("删除项目")}</button></div>
       {:else if dialog === 'archived-projects'}
