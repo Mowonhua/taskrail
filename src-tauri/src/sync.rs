@@ -445,7 +445,8 @@ pub async fn sync_unpair(app: tauri::AppHandle, state: tauri::State<'_, SyncStat
     runtime.connection_epoch.fetch_add(1, Ordering::SeqCst); remove_connection(&runtime, None);
     if cfg!(target_os = "android") && previous.is_some() {
         let runtime = runtime.clone();
-        let _ = tauri::async_runtime::spawn_blocking(move || { let _ = deliver_revocation(&runtime); });
+        // 释放等待句柄后撤销请求仍在后台执行，解除配对命令不等待网络请求完成。
+        drop(tauri::async_runtime::spawn_blocking(move || { let _ = deliver_revocation(&runtime); }));
     }
     Ok(())
 }
