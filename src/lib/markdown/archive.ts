@@ -357,9 +357,12 @@ function sortCompletedChildren(model: DocumentModel, recent: ReadonlySet<number>
       result += model.text.slice(position, siblings[0].moveFrom);
       for (let index = 0; index < order.length; index++) {
         let part = parts.get(order[index].from)!;
-        // 原来的末项可能没有行分隔，移到列表内部时必须补齐，防止相邻标题拼接。
-        if (index < order.length - 1 && !part.endsWith('\n')) part += model.text.includes('\r\n') ? '\r\n' : '\n';
-        result += part;
+        // 行分隔属于列表中的位置，不能随条目搬到末尾并与列表外分隔叠加。
+        // 子树递归同样保留原末尾分隔，因此只替换当前条目语法终点之后的部分。
+        const item = order[index];
+        part = part.slice(0, part.length - (item.moveTo - item.to));
+        const slot = siblings[index];
+        result += part + model.text.slice(slot.to, slot.moveTo);
       }
       position = siblings.at(-1)!.moveTo;
     }

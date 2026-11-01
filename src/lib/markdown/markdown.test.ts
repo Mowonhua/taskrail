@@ -3,7 +3,7 @@
  * 定义范围：语法节点识别、完成恢复、排序缩进和可靠身份的行为测试。
  */
 import { describe, expect, it } from 'vitest';
-import { parseDocument, taskToggleChanges, moveItemChanges, moveItemPosition, indentItemChanges, getHiddenRanges, searchTasks, foldKey, type TextChange } from './index';
+import { parseDocument, taskToggleChanges, moveItemChanges, moveItemPosition, indentItemChanges, getHiddenRanges, searchTasks, foldKey, normalizeArchiveChanges, type TextChange } from './index';
 const apply = (text: string, changes: TextChange[]): string => [...changes].sort((a,b)=>b.from-a.from).reduce((s,c)=>s.slice(0,c.from)+c.insert+s.slice(c.to),text);
 
 describe('shared syntax model', () => {
@@ -50,6 +50,16 @@ describe('task transactions', () => {
   });
 });
 describe('structure edits', () => {
+  it('松散子任务完成和移到末尾保留 CRLF 分隔与定位', () => {
+    const text = '- [ ] 父\r\n  - [ ] 甲\r\n\r\n  - [ ] 乙\r\n\r\n# 归档\r\n\r\n- [x] 旧任务\r\n';
+    const model = parseDocument(text);
+    const moved = apply(text, moveItemChanges(model, model.tasks[1].from, null));
+    expect(moved).toBe(text.replace('甲', '临时').replace('乙', '甲').replace('临时', '乙'));
+    const position = moveItemPosition(model, model.tasks[1].from, null, model.tasks[1].contentFrom);
+    expect(moved[position]).toBe('甲');
+    const checked = apply(text, taskToggleChanges(model, model.tasks[1].from));
+    expect(apply(checked, normalizeArchiveChanges(parseDocument(checked)))).toBe(moved.replace('[ ] 甲', '[x] 甲'));
+  });
   it('moves full content including hidden descendants and retains outside source and CRLF', () => {
     const text='# A\r\n\r\n- [ ] first\r\n\r\n  prose\r\n\r\n  ```\r\n  code\r\n  ```\r\n\r\n  - [x] nested\r\n- [ ] second\r\n\r\n# B\r\n';const m=parseDocument(text);const first=m.tasks[0], second=m.tasks[2];
     const moved=apply(text,moveItemChanges(m,first.from,null));expect(moved).toBe('# A\r\n\r\n- [ ] second\r\n- [ ] first\r\n\r\n  prose\r\n\r\n  ```\r\n  code\r\n  ```\r\n\r\n  - [x] nested\r\n\r\n# B\r\n');
@@ -57,7 +67,8 @@ describe('structure edits', () => {
     expect(()=>moveItemChanges(m,first.from,m.tasks[1].from)).toThrow('INVALID_MOVE');expect(second.parentFrom).toBe(null);
   });
   it('handles moving EOF without newline and crossing headings between top-level lists', () => {
-    const m=parseDocument('- one\n- two');expect(apply(m.text,moveItemChanges(m,m.items[1].from,0))).toBe('- two\n- one\n');
+    const m=parseDocument('- one\n- two');expect(apply(m.text,moveItemChanges(m,m.items[1].from,0))).toBe('- two\n- one');
+    const crlf=parseDocument('- one\r\n- two');expect(apply(crlf.text,moveItemChanges(crlf,crlf.items[1].from,0))).toBe('- two\r\n- one');
     const separate=parseDocument('- one\n\n# section\n\n- other');
     expect(apply(separate.text,moveItemChanges(separate,0,separate.items[1].from))).toBe('\n# section\n\n- one\n- other');
   });
@@ -117,7 +128,16 @@ describe('structural edge cases', () => {
   });
   it('preserves a loose list when its last item moves before a preceding item', () => {
     const m=parseDocument('- one\n\n- two\n');const next=parseDocument(apply(m.text,moveItemChanges(m,m.items[1].from,0)));
-    expect(next.text).toBe('- two\n\n- one\n\n');
+    expect(next.text).toBe('- two\n\n- one\n');
+  });
+  it.each(['', '\r\n', '\r\n\r\n# 后续\r\n'])('松散列表末项上移保留 CRLF 尾部分隔 %j', suffix => {
+    const text = '- one\r\n\r\n- two' + suffix;
+    const model = parseDocument(text);
+    const source = model.items[1];
+    const moved = apply(text, moveItemChanges(model, source.from, model.items[0].from));
+    expect(moved).toBe('- two\r\n\r\n- one' + suffix);
+    const position = moveItemPosition(model, source.from, model.items[0].from, source.contentFrom);
+    expect(moved.slice(position, position + 3)).toBe('two');
   });
 });
 

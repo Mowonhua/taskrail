@@ -69,12 +69,34 @@ function moveTarget(model: DocumentModel, source: ListItem, beforeFrom: number |
  * 函数职责：移动完整列表项且保持其它字符原样。
  * 输入说明：beforeFrom 为相同父级、同列表目标，null 表示列表末尾。
  * 输出说明：删除与插入组成一笔事务；无变化返回空数组。
- * 实现思路：移动物理行范围，仅在文件末尾缺少换行时补足结构分隔。
+ * 实现思路：末项与内部项互换时保留各位置的行分隔，其余移动按物理行范围补足结构分隔。
  */
 export function moveItemChanges(model: DocumentModel, sourceFrom: number, beforeFrom: number | null): TextChange[] {
   const source = requireItem(model, sourceFrom);
   const target = moveTarget(model, source, beforeFrom);
   if (target.position === source.moveFrom || target.position === source.moveTo) return [];
+  const last = model.items.filter(item => item.parentFrom === source.parentFrom && item.listFrom === target.listFrom).at(-1)!;
+  if (target.listFrom === source.listFrom && target.position === last.moveTo) {
+    // 同列表追加时交换两个位置的分隔：条目间空行留在列表内，原列表末尾保持原样。
+    // 独立替换旧末项分隔，才能继续用删除、插入事务可靠映射其它条目的位置。
+    return [
+      { from: source.moveFrom, to: source.moveTo, insert: '' },
+      { from: last.to, to: last.moveTo, insert: model.text.slice(source.to, source.moveTo) + model.text.slice(source.moveFrom, source.to) + model.text.slice(last.to, last.moveTo) },
+    ];
+  }
+  if (target.listFrom === source.listFrom && source === last && target.position < source.moveFrom) {
+    const siblings = model.items.filter(item => item.parentFrom === source.parentFrom && item.listFrom === source.listFrom);
+    const previous = siblings.at(-2)!;
+    // Lezer 的条目终点可能包含 CR；交换分隔时必须把 CRLF 作为完整字符对保留。
+    const previousTo = previous.to - Number(model.text[previous.to - 1] === '\r' && model.text[previous.to] === '\n');
+    const sourceTo = source.to - Number(model.text[source.to - 1] === '\r' && model.text[source.to] === '\n');
+    // 末项上移后，原前一项成为末项：把内部行分隔用于新插入位置，并把原列表尾部分隔交给它。
+    // 删除范围须包含前一项后的完整分隔，否则松散列表会在父任务底部残留空行。
+    return [
+      { from: target.position, to: target.position, insert: model.text.slice(source.moveFrom, sourceTo) + model.text.slice(previousTo, source.moveFrom) },
+      { from: previousTo, to: source.moveTo, insert: model.text.slice(sourceTo, source.moveTo) },
+    ];
+  }
   const newline = model.text.includes('\r\n') ? '\r\n' : '\n';
   let insert = model.text.slice(source.moveFrom, source.moveTo);
   if (!insert.endsWith('\n')) insert += newline;
@@ -82,9 +104,14 @@ export function moveItemChanges(model: DocumentModel, sourceFrom: number, before
   const loose = target.listFrom === source.listFrom
     && model.items.some(item => item.listFrom === source.listFrom && /\r?\n[ \t]*\r?\n/.test(model.text.slice(item.to, item.moveTo)));
   if (loose && !/\r?\n[ \t]*\r?\n$/.test(insert)) insert += newline;
+  // 追加到无末尾换行的文档时，原条目携带的分隔只用于前方，不能在底部新增空行。
+  if (target.position === model.text.length && !model.text.endsWith('\n')) insert = insert.replace(/(?:\r?\n[ \t]*)+$/, '');
   // 目标可位于没有末尾换行的文档末端，此时先结束存活条目的最后一行。
   if (target.position > 0 && model.text[target.position - 1] !== '\n') insert = newline + insert;
-  return [{ from: source.moveFrom, to: source.moveTo, insert: '' }, { from: target.position, to: target.position, insert }].sort((a,b)=>a.from-b.from);
+  // 文末无换行的末项上移时，原有的前置换行改作插入项的后置分隔，不能在文末再留下它。
+  const removeFrom = source.moveTo === model.text.length && !model.text.endsWith('\n') && target.position < source.moveFrom
+    ? source.moveFrom - newline.length : source.moveFrom;
+  return [{ from: removeFrom, to: source.moveTo, insert: '' }, { from: target.position, to: target.position, insert }].sort((a,b)=>a.from-b.from);
 }
 /**
  * 函数职责：映射排序条目内部的光标与后代折叠位置。
@@ -97,6 +124,10 @@ export function moveItemPosition(model: DocumentModel, sourceFrom: number, befor
   if (position < source.moveFrom || position > source.moveTo) return position;
   const target = moveTarget(model, source, beforeFrom).position;
   if (target === source.moveFrom || target === source.moveTo) return position;
+  const last = model.items.filter(item => item.parentFrom === source.parentFrom && item.listFrom === source.listFrom).at(-1)!;
+  if (target === last.moveTo) {
+    return last.to - (source.moveTo - source.moveFrom) + (source.moveTo - source.to) + position - source.moveFrom;
+  }
   const prefix = target > 0 && model.text[target - 1] !== '\n' ? (model.text.includes('\r\n') ? 2 : 1) : 0;
   return target - (target > source.moveFrom ? source.moveTo - source.moveFrom : 0) + prefix + position - source.moveFrom;
 }

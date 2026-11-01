@@ -2,6 +2,7 @@
 import { afterEach, expect, it } from 'vitest';
 import { EditorController } from './index';
 import { hiddenContentRanges } from './visibility';
+import { actionsFacet } from './state';
 
 Range.prototype.getClientRects = () => [] as unknown as DOMRectList;
 Range.prototype.getBoundingClientRect = () => new DOMRect();
@@ -125,4 +126,95 @@ it('源码删除已展开父任务时，不把展开身份转移给下一任务�
   instance.undo();
   expect(instance.text).toBe(text);
   expect(summary(instance).getAttribute('aria-expanded')).toBe('true');
+});
+
+it('完成首个子任务后不出现额外空行', () => {
+  const instance = editor('- [ ] 父\n  - [ ] 甲\n  - [ ] 乙');
+  instance.toggleTask(instance.model.tasks[1].from);
+  expect(instance.text).toBe('- [ ] 父\n  - [ ] 乙\n  - [x] 甲');
+  expect([...instance.view.contentDOM.querySelectorAll('.cm-line')].map(line => line.textContent)).toEqual(['父', '乙']);
+  instance.undo();
+  expect(instance.text).toBe('- [ ] 父\n  - [ ] 甲\n  - [ ] 乙');
+});
+
+it('末尾子任务上移后不留下空行', () => {
+  const instance = editor('- [ ] 父\n  - [ ] 甲\n  - [ ] 乙');
+  instance.moveItem(instance.model.tasks[2].from, 'up');
+  expect(instance.text).toBe('- [ ] 父\n  - [ ] 乙\n  - [ ] 甲');
+  instance.undo();
+  expect(instance.text).toBe('- [ ] 父\n  - [ ] 甲\n  - [ ] 乙');
+});
+
+it.each(['', '\n', '\n- [ ] 后续', '\n\n- [ ] 后续', '\n\n'])('完成非末尾子任务保留原有行分隔 %j', suffix => {
+  const text = '- [ ] 父\n  - [ ] 甲\n  - [ ] 乙' + suffix;
+  const instance = editor(text);
+  instance.toggleTask(instance.model.tasks[1].from);
+  expect(instance.text).toBe('- [ ] 父\n  - [ ] 乙\n  - [x] 甲' + suffix);
+  const lines = [...instance.view.contentDOM.querySelectorAll('.cm-line')].map(line => line.textContent);
+  expect(lines).toEqual(suffix.includes('后续') ? ['父', '乙', '后续'] : ['父', '乙']);
+  instance.undo();
+  expect(instance.text).toBe(text);
+});
+
+it.each(['', '\n', '\n- [ ] 后续', '\n\n- [ ] 后续', '\n\n'])('子任务拖到末尾保留原有行分隔 %j', suffix => {
+  const text = '- [ ] 父\n  - [ ] 甲\n  - [ ] 乙' + suffix;
+  const instance = editor(text);
+  instance.focusAt(instance.model.tasks[1].contentFrom);
+  instance.state.facet(actionsFacet).moveDrag('item', instance.model.tasks[1].from, null);
+  expect(instance.text).toBe('- [ ] 父\n  - [ ] 乙\n  - [ ] 甲' + suffix);
+  expect(instance.state.selection.main.head).toBe(instance.model.tasks[2].contentFrom);
+  instance.undo();
+  expect(instance.text).toBe(text);
+});
+
+it.each(['', '\n', '\n\n# 归档\n\n- [x] 旧任务\n'])('松散子任务拖到末尾保留列表外分隔 %j', suffix => {
+  const text = '- [ ] 父\n  - [ ] 甲\n\n  - [ ] 乙' + suffix;
+  const instance = editor(text);
+  instance.focusAt(instance.model.tasks[1].contentFrom);
+  instance.state.facet(actionsFacet).moveDrag('item', instance.model.tasks[1].from, null);
+  expect(instance.text).toBe('- [ ] 父\n  - [ ] 乙\n\n  - [ ] 甲' + suffix);
+  expect(instance.state.selection.main.head).toBe(instance.model.tasks[2].contentFrom);
+  instance.undo();
+  expect(instance.text).toBe(text);
+});
+
+it.each(['\n', '\n  '])('完成松散子任务不在归档前叠加空行 %j', separator => {
+  const suffix = '\n\n# 归档\n\n- [x] 旧任务\n';
+  const text = '- [ ] 父\n  - [ ] 甲' + separator + '\n  - [ ] 乙' + suffix;
+  const instance = editor(text);
+  instance.toggleTask(instance.model.tasks[1].from);
+  expect(instance.text).toBe('- [ ] 父\n  - [ ] 乙' + separator + '\n  - [x] 甲' + suffix);
+  expect([...instance.view.contentDOM.querySelectorAll('.cm-line')].map(line => line.textContent)).toEqual(['父', '乙']);
+  instance.undo();
+  expect(instance.text).toBe(text);
+});
+
+it.each([
+  ['紧凑列表无尾换行', '\n', ''],
+  ['紧凑列表有尾换行', '\n', '\n'],
+  ['紧凑列表后接归档', '\n', '\n\n# 归档\n\n- [x] 旧任务\n'],
+  ['松散列表无尾换行', '\n\n', ''],
+  ['松散列表有尾换行', '\n\n', '\n'],
+  ['松散列表后接归档', '\n\n', '\n\n# 归档\n\n- [x] 旧任务\n'],
+  ['松散列表空行含缩进', '\n  \n', '\n\n# 归档\n\n- [x] 旧任务\n'],
+])('完成恢复后拖回上方不新增空行：%s', (_name, gap, suffix) => {
+  const text = '- [ ] 父\n  - [ ] 甲' + gap + '  - [ ] 乙' + suffix;
+  const instance = editor(text);
+  const visibleLines = () => [...instance.view.contentDOM.querySelectorAll('.cm-line')].map(line => line.textContent);
+  const originalLines = visibleLines();
+  instance.toggleTask(instance.model.tasks[1].from);
+  summary(instance).click();
+  instance.toggleTask(instance.model.tasks[2].from);
+  expect(instance.text).toBe('- [ ] 父\n  - [ ] 乙' + gap + '  - [ ] 甲' + suffix);
+  instance.focusAt(instance.model.tasks[2].contentFrom);
+  instance.state.facet(actionsFacet).moveDrag('item', instance.model.tasks[2].from, instance.model.tasks[1].from);
+  expect(instance.text).toBe(text);
+  expect(visibleLines()).toEqual(originalLines);
+  expect(instance.state.selection.main.head).toBe(instance.model.tasks[1].contentFrom);
+  instance.undo();
+  expect(instance.text).toBe('- [ ] 父\n  - [ ] 乙' + gap + '  - [ ] 甲' + suffix);
+  instance.redo();
+  expect(instance.text).toBe(text);
+  instance.undo(); instance.undo(); instance.undo();
+  expect(instance.text).toBe(text);
 });

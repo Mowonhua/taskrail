@@ -611,11 +611,15 @@ function buildPreview(state: EditorState, composing = false): DecorationSet {
       merged.push({ from: range.from, to: range.to, widget, block: range.kind !== 'fold' });
     }
     // 过滤范围右端是下一条可见行的起点；块替换不能吞掉该行的缩进、标题等行装饰。
-    for (const range of merged) {
+    for (const [index, range] of merged.entries()) {
       // 折叠正文用行内替换把入口接在父行末尾；保留下一可见行前的换行，避免两条任务并行。
       // 装饰过滤仍采用完整隐藏范围，与键盘保护保持一致；文末没有后续行时全部吞掉。
       const to = !range.block && range.to < state.doc.length ? range.to - 1 : range.to;
-      ranges.push(Decoration.replace({ widget: range.widget, block: range.block, inclusiveEnd: false }).range(range.from, to));
+      // 完成组或其紧邻的隐藏归档覆盖文末时不再补空行；其它分区过滤保留可编辑出口。
+      const previous = merged[index - 1];
+      const completedTail = range.widget instanceof CompletedGroupWidget
+        || previous?.widget instanceof CompletedGroupWidget && previous.to === range.from;
+      ranges.push(Decoration.replace({ widget: range.widget, block: range.block, inclusiveEnd: completedTail && to === state.doc.length }).range(range.from, to));
     }
   }
   // 隐藏区间已排序且不重叠，二分定位避免大清单装饰与已完成项形成平方级扫描。
