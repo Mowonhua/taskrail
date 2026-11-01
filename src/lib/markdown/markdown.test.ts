@@ -57,7 +57,8 @@ describe('structure edits', () => {
     expect(()=>moveItemChanges(m,first.from,m.tasks[1].from)).toThrow('INVALID_MOVE');expect(second.parentFrom).toBe(null);
   });
   it('handles moving EOF without newline and crossing headings between top-level lists', () => {
-    const m=parseDocument('- one\n- two');expect(apply(m.text,moveItemChanges(m,m.items[1].from,0))).toBe('- two\n- one\n');
+    const m=parseDocument('- one\n- two');expect(apply(m.text,moveItemChanges(m,m.items[1].from,0))).toBe('- two\n- one');
+    const crlf=parseDocument('- one\r\n- two');expect(apply(crlf.text,moveItemChanges(crlf,crlf.items[1].from,0))).toBe('- two\r\n- one');
     const separate=parseDocument('- one\n\n# section\n\n- other');
     expect(apply(separate.text,moveItemChanges(separate,0,separate.items[1].from))).toBe('\n# section\n\n- one\n- other');
   });

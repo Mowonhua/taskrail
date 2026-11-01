@@ -615,7 +615,8 @@ function buildPreview(state: EditorState, composing = false): DecorationSet {
       // 折叠正文用行内替换把入口接在父行末尾；保留下一可见行前的换行，避免两条任务并行。
       // 装饰过滤仍采用完整隐藏范围，与键盘保护保持一致；文末没有后续行时全部吞掉。
       const to = !range.block && range.to < state.doc.length ? range.to - 1 : range.to;
-      ranges.push(Decoration.replace({ widget: range.widget, block: range.block, inclusiveEnd: false }).range(range.from, to));
+      // 块替换覆盖文末时包含终点，避免编辑器在摘要后生成空文本行。
+      ranges.push(Decoration.replace({ widget: range.widget, block: range.block, inclusiveEnd: range.block && to === state.doc.length }).range(range.from, to));
     }
   }
   // 隐藏区间已排序且不重叠，二分定位避免大清单装饰与已完成项形成平方级扫描。

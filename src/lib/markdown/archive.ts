@@ -359,6 +359,8 @@ function sortCompletedChildren(model: DocumentModel, recent: ReadonlySet<number>
         let part = parts.get(order[index].from)!;
         // 原来的末项可能没有行分隔，移到列表内部时必须补齐，防止相邻标题拼接。
         if (index < order.length - 1 && !part.endsWith('\n')) part += model.text.includes('\r\n') ? '\r\n' : '\n';
+        // 无末尾换行的列表重排后，将原先的行分隔留在条目之间，而非新增文末空行。
+        if (index === order.length - 1 && siblings.at(-1)!.moveTo === model.text.length && !model.text.endsWith('\n') && order[index] !== siblings.at(-1)) part = part.replace(/\r?\n$/, '');
         result += part;
       }
       position = siblings.at(-1)!.moveTo;

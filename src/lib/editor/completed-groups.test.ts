@@ -126,3 +126,20 @@ it('源码删除已展开父任务时，不把展开身份转移给下一任务�
   expect(instance.text).toBe(text);
   expect(summary(instance).getAttribute('aria-expanded')).toBe('true');
 });
+
+it('完成首个子任务后不出现额外空行', () => {
+  const instance = editor('- [ ] 父\n  - [ ] 甲\n  - [ ] 乙');
+  instance.toggleTask(instance.model.tasks[1].from);
+  expect(instance.text).toBe('- [ ] 父\n  - [ ] 乙\n  - [x] 甲');
+  expect([...instance.view.contentDOM.querySelectorAll('.cm-line')].map(line => line.textContent)).toEqual(['父', '乙']);
+  instance.undo();
+  expect(instance.text).toBe('- [ ] 父\n  - [ ] 甲\n  - [ ] 乙');
+});
+
+it('末尾子任务上移后不留下空行', () => {
+  const instance = editor('- [ ] 父\n  - [ ] 甲\n  - [ ] 乙');
+  instance.moveItem(instance.model.tasks[2].from, 'up');
+  expect(instance.text).toBe('- [ ] 父\n  - [ ] 乙\n  - [ ] 甲');
+  instance.undo();
+  expect(instance.text).toBe('- [ ] 父\n  - [ ] 甲\n  - [ ] 乙');
+});

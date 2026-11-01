@@ -84,7 +84,10 @@ export function moveItemChanges(model: DocumentModel, sourceFrom: number, before
   if (loose && !/\r?\n[ \t]*\r?\n$/.test(insert)) insert += newline;
   // 目标可位于没有末尾换行的文档末端，此时先结束存活条目的最后一行。
   if (target.position > 0 && model.text[target.position - 1] !== '\n') insert = newline + insert;
-  return [{ from: source.moveFrom, to: source.moveTo, insert: '' }, { from: target.position, to: target.position, insert }].sort((a,b)=>a.from-b.from);
+  // 文末无换行的末项上移时，原有的前置换行改作插入项的后置分隔，不能在文末再留下它。
+  const removeFrom = source.moveTo === model.text.length && !model.text.endsWith('\n') && target.position < source.moveFrom
+    ? source.moveFrom - newline.length : source.moveFrom;
+  return [{ from: removeFrom, to: source.moveTo, insert: '' }, { from: target.position, to: target.position, insert }].sort((a,b)=>a.from-b.from);
 }
 /**
  * 函数职责：映射排序条目内部的光标与后代折叠位置。
