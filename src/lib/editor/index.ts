@@ -321,7 +321,7 @@ export class EditorController {
 
   /**
    * 函数职责：应用持久化的界面状态。
-   * 输入说明：restoreScroll 为真时才按 ui.scrollTop 写像素滚动，仅适用于布局已稳定的项目切换；
+   * 输入说明：restoreScroll 为真时按 ui.scrollTop 恢复项目阅读位置，并等待重建后的布局稳定；
    * 接收同步的位置必须由语义锚点恢复，写回替换前的像素值会落到错误位置。
    */
   private applyUIState(ui: ProjectView, restoreScroll: boolean): void {
@@ -334,7 +334,36 @@ export class EditorController {
     const expandedGroups = model.items.filter(item => groupKeys.has(foldKey(model, item))).map(item => item.from);
     const sourceReturn = ui.sourceReturn ? { ...ui.sourceReturn, cursor: Math.min(ui.sourceReturn.cursor, this.state.doc.length), anchor: Math.min(ui.sourceReturn.anchor, this.state.doc.length) } : null;
     this.view.dispatch({ selection: { anchor: Math.max(0, Math.min(ui.cursor, this.state.doc.length)) }, effects: [this.mode.reconfigure(this.modeExtensions(ui.mode, ui.sourceView ?? (ui.mode === 'archive' ? 'archive' : 'todo'))), setFolds.of(folded), setExpandedCompletedGroups.of(expandedGroups), setSourceReturn.of(ui.mode === 'source' ? sourceReturn : null)], annotations: Transaction.addToHistory.of(false) });
-    if (restoreScroll) this.view.scrollDOM.scrollTop = ui.scrollTop;
+    if (restoreScroll) this.restoreScrollTop(ui.scrollTop);
+  }
+
+  /**
+   * 项目状态重建后，CodeMirror 会重新估算行高并补偿滚动。立即写入只供同步读取使用，
+   * 最终位置须在测量和补偿之后恢复，否则每次切回都会叠加高度差。
+   * 连续两帧无需校正才停止；用户操作、切换项目或显式定位通过代次取消旧恢复。
+   */
+  private restoreScrollTop(scrollTop: number): void {
+    const generation = this.positionGeneration;
+    const current = () => generation === this.positionGeneration;
+    const scroll = this.view.scrollDOM;
+    scroll.scrollTop = scrollTop;
+    let attempts = 0;
+    let stable = 0;
+    const measure = (): void => this.view.requestMeasure({
+      key: this,
+      read: () => current() ? Math.max(0, Math.min(scrollTop, scroll.scrollHeight - scroll.clientHeight)) : null,
+      write: target => {
+        if (target === null || !current()) return;
+        // 测量写阶段之后仍有内部滚动补偿，下一帧才可写入最终像素值。
+        this.view.dom.ownerDocument.defaultView!.requestAnimationFrame(() => {
+          if (!current()) return;
+          stable = Math.abs(scroll.scrollTop - target) <= 0.5 ? stable + 1 : 0;
+          scroll.scrollTop = target;
+          if (stable < 2 && ++attempts < 30) measure();
+        });
+      },
+    });
+    measure();
   }
   /**
    * 搜索、大纲及空内容点击的唯一居中定位入口：展开目标后从当前视口平滑滚动到居中位置。
