@@ -1,8 +1,9 @@
 /**
- * 文件职责：共享公式语法，确保编辑预览与任务识别使用同一棵树。
- * 定义范围：块公式、行内公式及 Markdown 扩展组合。
+ * 文件职责：共享公式与删除线语法，确保编辑预览与任务识别使用同一棵树。
+ * 定义范围：块公式、行内公式、CJK 友好删除线及 Markdown 扩展组合。
  */
 import { GFM, type MarkdownConfig, type MarkdownExtension } from '@lezer/markdown';
+import { cjkStrikethrough } from './cjk';
 
 /**
  * 结构职责：定义公式节点及美元定界规则。
@@ -46,4 +47,4 @@ export const mathExtension: MarkdownConfig = {
     },
   }],
 };
-export const markdownExtensions: MarkdownExtension = [GFM, mathExtension];
+export const markdownExtensions: MarkdownExtension = [GFM, mathExtension, cjkStrikethrough()];

@@ -333,6 +333,16 @@ describe('唯一文档编辑事务', () => {
     expect(instance.view.dom.querySelector('.fm-task-checkbox')).toBeNull();
     expect(instance.text).toBe(source);
   });
+  it('中文括号紧邻删除线标记时按 CJK 友好规则排版且不改写原文', () => {
+    const source = '- [ ] ~~（带括号）~~有文字';
+    const instance = editor(source);
+    instance.focusAt(source.length);
+    const strike = instance.view.dom.querySelector('.fm-strike');
+    expect(strike?.textContent).toBe('（带括号）');
+    expect(instance.view.dom.textContent).not.toContain('~~');
+    instance.setMode('source');
+    expect(instance.text).toBe(source);
+  });
   it('点击行内公式只放置光标，不请求居中滚动', () => {
     const source = '前文 $x^2$ 后文';
     const instance = editor(source);

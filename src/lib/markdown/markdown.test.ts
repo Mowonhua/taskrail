@@ -35,6 +35,22 @@ describe('shared syntax model', () => {
     expect(model.tasks).toHaveLength(1);
     expect(model.text).toBe(text);
   });
+  it('parses strikethrough next to Chinese punctuation as inline syntax', () => {
+    const strikethroughs = (text: string): string[] => {
+      const names: string[] = [];
+      parseDocument(text).tree.iterate({ enter: node => { if (node.name === 'Strikethrough') names.push(text.slice(node.from, node.to)); } });
+      return names;
+    };
+    // 闭合标记内侧是中文括号时，CommonMark 只按 ASCII 标点判断，会把整段当作普通文本。
+    expect(strikethroughs('~~（带括号）~~有文字')).toEqual(['~~（带括号）~~']);
+    expect(strikethroughs('有~~（带括号）~~文字')).toEqual(['~~（带括号）~~']);
+    expect(strikethroughs('~~（带括号）~~有文字。')).toEqual(['~~（带括号）~~']);
+    expect(strikethroughs('字~~正文~~字')).toEqual(['~~正文~~']);
+    // 标记内侧为空白或外侧未闭合时仍保持 CommonMark 结果，不把标记当成删除线。
+    expect(strikethroughs('~~ 带括号~~')).toEqual([]);
+    expect(strikethroughs('~~带括号 ~~')).toEqual([]);
+    expect(strikethroughs('~~a~~~b')).toEqual([]);
+  });
 });
 describe('task transactions', () => {
   it('requires explicit group completion and only edits checkbox characters', () => {

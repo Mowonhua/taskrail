@@ -4,12 +4,14 @@
  */
 import { GFM, parser } from '@lezer/markdown';
 import type { SyntaxNode } from '@lezer/common';
+import { cjkStrikethrough } from '../markdown/cjk';
 
 /**
  * 更新说明来自远端清单，按发布说明的常见写法解析：
- * 不套用编辑器的公式扩展，价格等普通美元文本不会被误认成公式。
+ * 不套用编辑器的公式扩展，价格等普通美元文本不会被误认成公式；
+ * 删除线与正文共用 CJK 友好判定，中文括号紧邻标记时仍能排版。
  */
-const notesParser = parser.configure(GFM);
+const notesParser = parser.configure([GFM, cjkStrikethrough()]);
 
 /** 引用式链接的定义表；标签做空白归一并整体忽略大小写。 */
 type LinkReferences = ReadonlyMap<string, { url: string; title: string }>;

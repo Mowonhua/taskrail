@@ -97,4 +97,9 @@ describe('更新说明渲染', () => {
     expect(container.querySelector('code')?.textContent).toBe('代码');
     expect(container.querySelector('del')?.textContent).toBe('删除');
   });
+
+  it('中文括号紧邻删除线标记时仍然渲染', () => {
+    const container = render('~~（带括号）~~有文字\n');
+    expect(container.querySelector('del')?.textContent).toBe('（带括号）');
+  });
 });

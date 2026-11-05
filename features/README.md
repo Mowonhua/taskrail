@@ -29,3 +29,4 @@
 | Markdown 画布 | [canvas.md](canvas.md) | 内嵌自由白板、共享图片附件和完整文档搬运 |
 | 项目导航 | [navigation.md](navigation.md) | 项目列表的标识、切换与排序 |
 | 任务编辑 | [task-editing.md](task-editing.md) | 子任务完成、排序与显示 |
+| 行内 Markdown | [markdown-inline.md](markdown-inline.md) | 行内语法排版与删除线定界符判定 |
