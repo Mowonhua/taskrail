@@ -21,7 +21,6 @@ function parseVersion(version) {
  * 函数职责：校验发布版本与可选 Git 标签完全一致。
  * 输入说明：versions 是各清单和锁文件的版本映射，tag 缺省时仅校验文件一致性。
  * 输出说明：返回版本和预发布标志；非法 SemVer、版本漂移或标签不符时抛错。
- * 实现思路：将 npm 版本作为一致性基准，再验证严格 SemVer 与标签。
  */
 export function validateReleaseVersions(versions, tag) {
   const version = versions.npm;
@@ -37,7 +36,6 @@ export function validateReleaseVersions(versions, tag) {
  * 函数职责：按 SemVer 比较发布优先级。
  * 输入说明：两个完整版本，允许构建元数据；数值预发布标识符不得有前导零。
  * 输出说明：返回负数、零或正数；构建元数据不参与排序，非法版本抛错。
- * 实现思路：依次比较主次修订版本和预发布标识符，正式版高于同版本预发布。
  */
 export function compareVersions(left, right) {
   const a = parseVersion(left);
@@ -62,15 +60,27 @@ export function compareVersions(left, right) {
 }
 
 /**
+ * 函数职责：确定一个版本必须发布的产物名称与资源集合。
+ * 输出说明：旧版本不含 APK；v0.7.1（含预发布）起必须提供 arm64 APK，非法 SemVer 抛错。names 仅列出参与摘要计算的文件，不包含 SHA256SUMS 本身。
+ * 实现思路：保留旧标签重建能力；资源准备与校验必须采用同一兼容边界。
+ */
+export function releaseArtifacts(version) {
+  parseVersion(version);
+  const installerName = `Taskrail_${version}_x64-setup.exe`;
+  const signatureName = `${installerName}.sig`;
+  const apkName = compareVersions(version, '0.7.1-0') >= 0 ? `Taskrail-${version}-arm64.apk` : null;
+  return { installerName, signatureName, apkName, names: [installerName, signatureName, 'latest.json', ...(apkName ? [apkName] : [])] };
+}
+
+/**
  * 函数职责：生成 Tauri Windows x64 静态更新清单。
  * 输入说明：使用实际安装包名、签名正文、仓库、版本、说明及 RFC 3339 发布时间。
  * 输出说明：返回可序列化清单；下载地址只指向同仓库同版本 GitHub Release。
- * 实现思路：把产物与版本组成固定下载地址，并嵌入完整签名正文。
  */
 export function createUpdateManifest({ repository, version, installerName, signature, notes, publishedAt }) {
-  parseVersion(version);
+  const artifacts = releaseArtifacts(version);
   if (!/^[A-Za-z0-9_-]+\/[A-Za-z0-9_.-]+$/.test(repository)) throw new Error('GitHub 仓库名称无效');
-  if (installerName !== `Taskrail_${version}_x64-setup.exe`) throw new Error('安装包文件名与版本不一致');
+  if (installerName !== artifacts.installerName) throw new Error('安装包文件名与版本不一致');
   if (typeof signature !== 'string' || signature.trim().length === 0) throw new Error('缺少更新签名正文');
   if (typeof notes !== 'string' || !Number.isFinite(Date.parse(publishedAt))) throw new Error('发布说明或日期无效');
   return {
@@ -90,12 +100,9 @@ export function createUpdateManifest({ repository, version, installerName, signa
  * 函数职责：验证下载到的发布资源能组成完整且一致的更新包。
  * 输入说明：files 为资源名到 Buffer 的映射，必须包含 Windows 安装包、签名、latest.json 和 SHA256SUMS；v0.7.1（含预发布）起还必须包含同版本 arm64 APK。
  * 输出说明：返回已验证清单；缺失、重名、摘要不符或清单指向其他版本时抛错。
- * 实现思路：按版本确定完整资源集合，保留旧版四项资源兼容，再验证摘要，再对照清单中的版本、下载地址及签名。
  */
 export function verifyReleaseFiles(files, repository, version) {
-  const installerName = `Taskrail_${version}_x64-setup.exe`;
-  const names = [installerName, `${installerName}.sig`, 'latest.json'];
-  if (compareVersions(version, '0.7.1-0') >= 0) names.push(`Taskrail-${version}-arm64.apk`);
+  const { installerName, signatureName, names } = releaseArtifacts(version);
   if (files.size !== names.length + 1 || [...names, 'SHA256SUMS'].some((name) => !files.get(name)?.length)) throw new Error('发布资源缺失或包含意外文件');
   const rows = files.get('SHA256SUMS').toString('utf8').trim().split(/\r?\n/);
   if (rows.length !== names.length) throw new Error('资源摘要数量不正确');
@@ -109,7 +116,7 @@ export function verifyReleaseFiles(files, repository, version) {
   }
   const manifest = JSON.parse(files.get('latest.json').toString('utf8'));
   if (manifest.version !== version) throw new Error('更新清单版本与标签不一致');
-  const expected = createUpdateManifest({ repository, version, installerName, signature: files.get(`${installerName}.sig`).toString('utf8'), notes: manifest.notes, publishedAt: manifest.pub_date });
+  const expected = createUpdateManifest({ repository, version, installerName, signature: files.get(signatureName).toString('utf8'), notes: manifest.notes, publishedAt: manifest.pub_date });
   if (Object.keys(manifest.platforms ?? {}).length !== 1 || manifest.platforms?.['windows-x86_64']?.url !== expected.platforms['windows-x86_64'].url) throw new Error('更新清单下载地址与发布资源不一致');
   if (manifest.platforms['windows-x86_64'].signature !== expected.platforms['windows-x86_64'].signature) throw new Error('更新清单签名与发布资源不一致');
   return manifest;
@@ -119,7 +126,6 @@ export function verifyReleaseFiles(files, repository, version) {
  * 函数职责：决定已验证的新版本可以更新哪些频道。
  * 输入说明：current 按 stable、preview 保存现有清单，空频道用 null；manifest 必须已经通过资源校验。
  * 输出说明：返回应更新的频道映射；相同或较低版本不修改，预发布不进入 stable。
- * 实现思路：对目标频道逐一比较 SemVer，仅提升更高版本，正式版同时参与两个频道。
  */
 export function selectChannelUpdates(current, manifest) {
   const { prerelease } = validateReleaseVersions({ npm: manifest.version });

@@ -4,7 +4,7 @@
  */
 import { translate } from '../i18n';
 import type { UpdateCandidate, UpdateOptions, UpdateStatus } from './contracts';
-import { errorMessage } from '../session/save-coordinator';
+import { errorMessage } from '../errors';
 
 // ==================== 更新策略 ====================
 

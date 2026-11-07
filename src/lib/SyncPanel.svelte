@@ -2,7 +2,7 @@
   /** 同步面板只呈现设备、文档选择和冲突入口；正文写入仍由同步协调器负责。 */
   import QRCode from 'qrcode';
   import { invoke } from '@tauri-apps/api/core';
-  import { errorMessage } from './session/save-coordinator';
+  import { errorMessage } from './errors';
   import { encodePairingOffer, decodePairingOffer } from './sync/pairing-code';
   import type { SyncController } from './sync/controller';
   import { assembleMerge, commonAncestor, defaultChoices, diffHunks, type MergeChoice, type MergeHunk, type MergeHunkKind } from './sync/merge';

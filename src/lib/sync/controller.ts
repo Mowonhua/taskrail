@@ -2,7 +2,7 @@
 import { listen } from '@tauri-apps/api/event';
 import type { ConnectionStatus, PairingOffer, SyncEnvelope, SyncTransport } from './contracts';
 import { SyncEngine } from './engine';
-import { errorMessage } from '../session/save-coordinator';
+import { errorMessage } from '../errors';
 /**
  * 需要用户处理的同步错误：配对失效、协议不兼容、超出限制、本机保存失败和本机网络配置错误。
  * 连接被拒、超时和断线只表示对端暂时不可达，重试即可，不进入底栏提示。

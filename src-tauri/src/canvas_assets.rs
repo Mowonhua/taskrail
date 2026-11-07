@@ -128,7 +128,7 @@ pub fn put(document: &Path, bytes: &[u8], mime_type: &str) -> Result<CanvasAsset
                 }
                 read(document, &asset)?;
             }
-            sync_parent(&path)?;
+            storage::sync_parent(&path)?;
         }
         Err(error) => return Err(FileError::io(error)),
     }
@@ -179,7 +179,7 @@ pub fn save_bundle(path: &Path, bytes: &[u8]) -> Result<(), FileError> {
     temporary
         .persist(path)
         .map_err(|error| FileError::io(error.error))?;
-    sync_parent(path)
+    storage::sync_parent(path)
 }
 
 /// 函数职责：有上限地读取完整文档 ZIP。
@@ -307,16 +307,6 @@ fn read_limited(path: &Path, maximum: usize) -> Result<Vec<u8>, FileError> {
         return Err(invalid("附件或完整文档包过大。"));
     }
     Ok(bytes)
-}
-
-fn sync_parent(path: &Path) -> Result<(), FileError> {
-    #[cfg(unix)]
-    fs::File::open(path.parent().unwrap())
-        .and_then(|directory| directory.sync_all())
-        .map_err(FileError::io)?;
-    #[cfg(not(unix))]
-    let _ = path;
-    Ok(())
 }
 
 #[cfg(test)]

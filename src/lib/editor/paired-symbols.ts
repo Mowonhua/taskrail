@@ -6,14 +6,12 @@ import { insertBracket } from '@codemirror/autocomplete';
 import { CharCategory, EditorState, Prec, Transaction, codePointAt, codePointSize } from '@codemirror/state';
 import { EditorView } from '@codemirror/view';
 
-/** 开符号到闭符号的映射，半角符号与对应的全角、中文符号成对收录。 */
 const OPENINGS: ReadonlyMap<string, string> = new Map([
   ['(', ')'], ['[', ']'], ['{', '}'], ['<', '>'], ['"', '"'], ["'", "'"],
   ['（', '）'], ['［', '］'], ['｛', '｝'], ['〈', '〉'], ['《', '》'], ['【', '】'],
   ['〔', '〕'], ['〖', '〗'], ['「', '」'], ['『', '』'], ['“', '”'], ['‘', '’'],
 ]);
 
-/** 闭符号到开符号的反查，用于判断输入的字符是不是闭符号。 */
 const CLOSINGS: ReadonlyMap<string, string> = new Map([...OPENINGS].map(([open, close]) => [close, open]));
 
 /** 输入法可能一次整体提交的成对文本到开符号；只有整段提交才会命中，逐个键入不受影响。 */
@@ -106,7 +104,9 @@ function completeComposingSymbol(view: EditorView): void {
  * 成对高亮的符号表，开闭两两排列。
  * 说明：自配对符号（引号）与尖括号在 Markdown 中容易被误判，只收录成对的括号与中文引号。
  */
-export const matchingBrackets = '()[]{}（）［］｛｝〈〉《》【】〔〕〖〗「」『』“”‘’';
+export const matchingBrackets = [...OPENINGS]
+  .filter(([open, close]) => open !== close && open !== '<')
+  .map(([open, close]) => open + close).join('');
 
 /** 函数职责：读取指定位置右侧的一个字符（含代理对），越界返回空串。 */
 function nextChar(state: EditorState, pos: number): string {

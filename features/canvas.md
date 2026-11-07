@@ -78,6 +78,7 @@
 | 关键实现 | src/lib/canvas/model.ts::canvasAssetsFromText |
 | 关键实现 | src/lib/canvas/save-queue.ts::CanvasSaveQueue |
 | 关键实现 | src-tauri/src/canvas_assets.rs::put |
+| 关键实现 | src-tauri/src/storage.rs::sync_parent |
 | 关键实现 | src-tauri/src/canvas_assets.rs::read |
 
 ### 行为场景

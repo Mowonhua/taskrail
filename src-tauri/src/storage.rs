@@ -184,8 +184,9 @@ fn staged_file(path: &Path, bytes: &[u8]) -> Result<tempfile::NamedTempFile, Fil
     Ok(temporary)
 }
 
-/// 文件内容在替换前已刷新；Unix 再刷新目录项。Windows 使用 tempfile 的原子 MoveFileEx 替换。
-fn sync_parent(path: &Path) -> Result<(), FileError> {
+/// 函数职责：在文件提交后刷新父目录项，保证目录变更在 Unix 上持久化。
+/// 调用约束：调用前必须已刷新文件内容并完成提交；Windows 的原子替换由 tempfile 完成，此处不再操作目录。
+pub(crate) fn sync_parent(path: &Path) -> Result<(), FileError> {
     #[cfg(unix)]
     fs::File::open(path.parent().unwrap_or(Path::new(".")))
         .and_then(|directory| directory.sync_all())

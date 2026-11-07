@@ -3,6 +3,7 @@
  * 定义范围：保存状态、只读编辑器文本访问及文件端口调度。
  */
 import { translate } from '../i18n';
+import { errorMessage } from '../errors';
 import type { FilePort, FileSnapshot } from '../contracts';
 
 /** 结构职责：表示界面可解释的保存状态；冲突时保留最新磁盘快照供用户比较。 */
@@ -191,12 +192,4 @@ export class SaveCoordinator {
 
   private reportError(error: unknown): void { this.options.onStatus({ kind: 'error', message: errorMessage(error) }); }
   dispose(): void { this.disposed = true; clearTimeout(this.timer); clearTimeout(this.recoveryTimer); }
-}
-
-/** 将结构化平台错误保留为可辨识的代码和文本，避免只显示 Object。 */
-export function errorMessage(error: unknown): string {
-  if (error instanceof Error) return `${'code' in error ? String(error.code) + ': ' : ''}${error.message}`;
-  if (typeof error === 'string') return error;
-  if (error && typeof error === 'object' && 'message' in error) return `${'code' in error ? String(error.code) + ': ' : ''}${String(error.message)}`;
-  return String(error);
 }

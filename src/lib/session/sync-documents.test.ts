@@ -1,6 +1,7 @@
+import { defaultPreferences } from '../config-defaults';
 import { describe, expect, it, vi } from 'vitest';
 import type { AppConfig, FilePort, FileSnapshot } from '../contracts';
-import { defaultPreferences } from '../browser-files';
+
 import { SessionSyncDocuments } from './sync-documents';
 import type { CanvasAssetPort } from '../canvas/types';
 import type { SyncAttachment } from '../sync/contracts';

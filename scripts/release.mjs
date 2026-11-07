@@ -6,7 +6,7 @@ import { createHash } from 'node:crypto';
 import { appendFile, mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { compareVersions, createUpdateManifest, validateReleaseVersions, verifyReleaseFiles } from './release-policy.mjs';
+import { releaseArtifacts, createUpdateManifest, validateReleaseVersions, verifyReleaseFiles } from './release-policy.mjs';
 
 // ==================== 函数定义 ====================
 
@@ -14,7 +14,6 @@ import { compareVersions, createUpdateManifest, validateReleaseVersions, verifyR
  * 函数职责：读取仓库中的发布版本并验证一致性。
  * 输入说明：root 是仓库目录，tag 是可选发布标签。
  * 输出说明：返回有效版本和预发布标志；任一清单或锁文件不一致时失败。
- * 实现思路：读取 npm、Tauri 和 Cargo 的版本及锁文件，交由纯规则校验。
  */
 export async function readReleaseVersion(root, tag) {
   const [npmText, npmLockText, tauriText, cargoText, cargoLockText] = await Promise.all(
@@ -37,26 +36,23 @@ export async function readReleaseVersion(root, tag) {
  * 函数职责：将签名后的 Windows x64 NSIS 与 Android arm64 产物整理为完整发布资源。
  * 输入说明：root 指向仓库，repository 和 tag 标识 GitHub 发布；output 是独立输出目录。
  * 输出说明：从 v0.7.1（含预发布）起必须读取 dist-android 中的同版本 APK；写入安装包、签名、APK、latest.json、SHA256SUMS，并返回输出目录；不执行远端操作。
- * 实现思路：定位唯一版本安装包，读取签名与版本说明，生成清单后对全部文件计算摘要并自校验。
  */
 export async function prepareRelease({ root, repository, tag, output }) {
   const { version } = await readReleaseVersion(root, tag);
-  const installerName = `Taskrail_${version}_x64-setup.exe`;
+  const { installerName, signatureName, apkName } = releaseArtifacts(version);
   const bundle = join(root, 'src-tauri/target/release/bundle/nsis');
   const [installer, signature, notes] = await Promise.all([
     readFile(join(bundle, installerName)),
-    readFile(join(bundle, `${installerName}.sig`)),
+    readFile(join(bundle, signatureName)),
     readFile(join(root, `docs/releases/${tag}.md`), 'utf8'),
   ]);
   const manifest = createUpdateManifest({ repository, version, installerName, signature: signature.toString('utf8'), notes, publishedAt: new Date().toISOString() });
   const files = new Map([
     [installerName, installer],
-    [`${installerName}.sig`, signature],
+    [signatureName, signature],
     ['latest.json', Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`)],
   ]);
-  // 旧标签仍可恢复发布；新版本必须在公开前把两个平台的产物纳入同一份摘要。
-  if (compareVersions(version, '0.7.1-0') >= 0) {
-    const apkName = `Taskrail-${version}-arm64.apk`;
+  if (apkName) {
     files.set(apkName, await readFile(join(root, 'dist-android', apkName)));
   }
   const sums = [...files].map(([name, bytes]) => `${createHash('sha256').update(bytes).digest('hex')}  ${name}`).join('\n');

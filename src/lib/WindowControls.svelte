@@ -2,7 +2,7 @@
   import { t } from './i18n';
   import { onMount } from 'svelte';
   import { getCurrentWindow } from '@tauri-apps/api/window';
-  import { errorMessage } from './session/save-coordinator';
+  import { errorMessage } from './errors';
 
   /**
    * 文件职责：为应用顶部工具栏提供原生窗口控制按钮。

@@ -2,10 +2,11 @@
  * 文件职责：通过公开 DOM 和浏览器文件端口验证真实 App 的编辑保存闭环。
  * 定义范围：任务编辑、项目隔离、搜索、主题持久化及桌面窗口控制与退出保存。
  */
+import { defaultPreferences } from '../config-defaults';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mount, tick, unmount } from 'svelte';
 import App from '../../App.svelte';
-import { BrowserFilePort, defaultPreferences } from '../browser-files';
+import { BrowserFilePort } from '../browser-files';
 import { AndroidFilePort } from '../files/android';
 import { builtInThemes, paletteKeys, parseTheme, type ThemeDefinition } from '../themes';
 import type { AppConfig, Project, ProjectView } from '../contracts';
@@ -278,6 +279,8 @@ beforeEach(() => {
   const browserStorage = (globalThis as unknown as { jsdom: { window: { localStorage: Storage } } }).jsdom.window.localStorage;
   vi.stubGlobal('localStorage', browserStorage);
   localStorage.clear(); document.body.replaceChildren();
+  // jsdom 不提供字体测量；此处验证设置和持久化，字体探测按无测量能力回退。
+  vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(null);
   Range.prototype.getClientRects = () => [] as unknown as DOMRectList;
   Range.prototype.getBoundingClientRect = () => new DOMRect();
   // jsdom 未实现滚动 API；大纲列表的跟随滚动只验证调用路径，不验证视觉位置。

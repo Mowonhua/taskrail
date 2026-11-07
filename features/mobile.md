@@ -21,6 +21,7 @@
 | 关键实现 | src/lib/editor/paired-symbols.ts::singleSymbolPairs |
 | 关键实现 | src/lib/editor/paired-symbols.ts::compositionBracketCompletion |
 | 关键实现 | src/lib/editor/paired-symbols.ts::pairingCaret |
+| 关键实现 | src/lib/editor/paired-symbols.ts::matchingBrackets |
 | 关键实现 | src/lib/mobile-navigation.ts::registerDrawerGestures |
 | 关键实现 | src/App.svelte::dismissPopovers |
 

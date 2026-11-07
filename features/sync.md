@@ -67,6 +67,7 @@
 |---|---|
 | 主入口 | src-tauri/src/sync.rs::sync_exchange |
 | 关键实现 | src/lib/sync/controller.ts::SyncController |
+| 关键实现 | src/lib/errors.ts::errorMessage |
 | 关键实现 | src-tauri/src/sync.rs::handle |
 | 关键实现 | src-tauri/src/sync/connection.rs::client |
 | 关键实现 | src-tauri/src/sync/connection.rs::server |

@@ -6,6 +6,7 @@ import type { AppConfig } from './contracts';
 import { builtInThemes, validateTheme } from './themes';
 import { translate } from './i18n';
 import { parseProjectIcon } from './project-icons';
+import { documentPathKey } from './resource-paths';
 
 /**
  * 函数职责：拒绝会使界面崩溃或同文件形成双会话的配置。
@@ -23,7 +24,7 @@ export function validateAppConfig(value: unknown): AppConfig | null {
     if (project.archived !== undefined && typeof project.archived !== 'boolean') return fail();
     // 图标只接受 `emoji:表情` 或 `lucide:名称`；Lucide 名称只做语法校验，未知图标由渲染层回退。
     if (project.icon !== undefined && parseProjectIcon(project.icon) === null) return fail();
-    const path = project.path.replace(/\\/g, '/').toLocaleLowerCase();
+    const path = documentPathKey(project.path);
     if (identities.has(project.id) || paths.has(path)) return fail();
     identities.add(project.id); paths.add(path);
   }

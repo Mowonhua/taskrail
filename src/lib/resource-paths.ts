@@ -1,5 +1,5 @@
 /**
- * 文件职责：将 Markdown 相对资源定位到所属文档目录。
+ * 文件职责：解析 Markdown 文档的本地资源与文件身份。
  * 定义范围：Windows 本地路径解析；协议白名单由编辑器与系统外链端口负责。
  */
 
@@ -24,4 +24,12 @@ export function resolveDocumentResource(documentPath: string, resource: string, 
   if (/^\/[a-z]:/i.test(path)) path = path.slice(1);
   if (url.host) path = `//${url.host}${path}`;
   return convert(path);
+}
+
+/**
+ * 函数职责：生成项目关联共用的文件身份键，忽略路径分隔符与大小写差异。
+ * 约束条件：沿用应用现有的 Windows 路径语义；不解析相对段、符号链接或访问文件系统。
+ */
+export function documentPathKey(path: string): string {
+  return path.replace(/\\/g, '/').toLocaleLowerCase();
 }

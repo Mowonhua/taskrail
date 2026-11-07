@@ -1,5 +1,6 @@
 <script lang="ts">
   /** 文件职责：组织项目导航、唯一编辑视图、查询和保存反馈。 */
+  import { defaultPreferences } from './lib/config-defaults';
   import { onMount, tick } from 'svelte';
   import { t, setLocalePreference } from './lib/i18n';
   import { fly } from 'svelte/transition';
@@ -24,15 +25,16 @@
   import { EditorController, getDocumentModel } from './lib/editor';
   import { renderTaskTitle } from './lib/editor/preview';
   import { sourceVisibleRanges } from './lib/editor/source-scope';
-  import { BrowserFilePort, defaultPreferences, welcomeText } from './lib/browser-files';
+  import { BrowserFilePort, welcomeText } from './lib/browser-files';
   import type { AppConfig, FilePort, FileSnapshot, Project, ProjectView, RecoveryDraft, ViewMode } from './lib/contracts';
-  import { SaveCoordinator, errorMessage } from './lib/session/save-coordinator';
+  import { SaveCoordinator } from './lib/session/save-coordinator';
+  import { errorMessage } from './lib/errors';
   import type { ProjectSession, TaskResult } from './lib/session/types';
   import { getHiddenRanges, parseDocument, searchTasks, taskIsArchived } from './lib/markdown';
   import type { DocumentModel, ListItem } from './lib/markdown';
   import { countWords } from './lib/word-count';
   import { activeOutlineFrom, outlineEntries } from './lib/markdown/outline';
-  import { resolveDocumentResource } from './lib/resource-paths';
+  import { documentPathKey, resolveDocumentResource } from './lib/resource-paths';
   import { validateAppConfig } from './lib/config-validation';
   import { serializeProjectIcon, type ProjectIcon as IconReference } from './lib/project-icons';
   import { applyTheme, bootThemeKey, builtInThemes, parseTheme } from './lib/themes';
@@ -101,11 +103,6 @@
   let cardTransitioning = $state(false);
   let appShell: HTMLDivElement;
   const cardWindow = desktop ? createCardWindowController() : undefined;
-
-  /** Windows 大小写与分隔符差异视为同一路径，用于防止同一文件形成双会话。 */
-  function samePath(left: string, right: string): boolean {
-    return left.replace(/\\/g, '/').toLocaleLowerCase() === right.replace(/\\/g, '/').toLocaleLowerCase();
-  }
 
   /** 灵感簿会话的伪项目身份；名称为文件本名，界面文案在展示处翻译。 */
   function inspirationProject(path: string): Project {
@@ -876,8 +873,8 @@
     try {
       // 手机新建直接使用应用私有目录；用户选择过导入副本时沿用该副本。
       if (mobile && !projectPath) { await choosePath(true); if (!projectPath) return; }
-      if (config.projects.some(item => samePath(item.path, projectPath))) throw new Error($t("这个文件已经关联到项目。"));
-      if (config.inspiration && samePath(config.inspiration.path, projectPath)) throw new Error($t("这个文件已用作灵感簿。"));
+      if (config.projects.some(item => documentPathKey(item.path) === documentPathKey(projectPath))) throw new Error($t("这个文件已经关联到项目。"));
+      if (config.inspiration && documentPathKey(config.inspiration.path) === documentPathKey(projectPath)) throw new Error($t("这个文件已用作灵感簿。"));
       if (createFile) await files.create(projectPath, `# ${projectName.trim()}\n\n- [ ] \n`);
       else await files.read(projectPath);
       const project = { id: crypto.randomUUID(), name: projectName.trim(), path: projectPath };
@@ -1007,8 +1004,8 @@
     if (!project) return;
     try {
       const path = await files.chooseFile(false); if (!path) return;
-      if (config.projects.some(item => item.id !== project.id && samePath(item.path, path))) throw new Error($t("这个文件已经关联到另一个项目。"));
-      if (project.id !== INSPIRATION_ID && config.inspiration && samePath(config.inspiration.path, path)) throw new Error($t("这个文件已用作灵感簿。"));
+      if (config.projects.some(item => item.id !== project.id && documentPathKey(item.path) === documentPathKey(path))) throw new Error($t("这个文件已经关联到另一个项目。"));
+      if (project.id !== INSPIRATION_ID && config.inspiration && documentPathKey(config.inspiration.path) === documentPathKey(path)) throw new Error($t("这个文件已用作灵感簿。"));
       const disk = await files.read(path);
       const session = sessions.get(project.id);
       // 新文件与内存草稿可能不同；先持久化待恢复文本，打开后展示双方内容供选择。
@@ -1119,7 +1116,7 @@
         const platform = await import('./lib/files/tauri');
         if (/^(https?:|mailto:)/i.test(url) || url.startsWith('//')) { await platform.openExternalLink(url.startsWith('//') ? `https:${url}` : url); return; }
         const path = resolveDocumentResource(resourceDocumentPath, url, path => path);
-        const project = config.projects.find(item => item.path.replace(/\\/g, '/').toLocaleLowerCase() === path.toLocaleLowerCase());
+        const project = config.projects.find(item => documentPathKey(item.path) === documentPathKey(path));
         if (project) {
           await openProject(project);
           const hash = url.indexOf('#'); if (hash >= 0) await openDocumentLink(url.slice(hash));

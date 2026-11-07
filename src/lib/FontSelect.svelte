@@ -7,6 +7,7 @@
   import { tick } from 'svelte';
   import { loadSystemFontFamilies, quoteFontFamily } from './font-stack';
   import { t } from './i18n';
+  import { observeAnchoredPopover, positionAnchoredPopover } from './anchored-popover';
 
   interface FontOption {
     value: string | null;
@@ -51,7 +52,6 @@
     return options;
   });
 
-  /** 函数职责：计算加载与筛选状态行文案；输出说明：null 表示不显示状态行。 */
   const status = $derived.by<string | null>(() => {
     if (loading) return $t('正在加载系统字体…');
     if (loadFailed) return $t('无法读取系统字体，可手动输入字体名。');
@@ -65,45 +65,13 @@
     return null;
   });
 
-  function positionPopup() {
-    if (!open || !trigger || !popup) return;
-    const bounds = trigger.getBoundingClientRect();
-    // 顶层浮层不受父容器裁切；锚点滚出任一裁切祖先时收起，避免菜单脱离字段悬浮。
-    for (let ancestor = trigger.parentElement; ancestor; ancestor = ancestor.parentElement) {
-      const style = getComputedStyle(ancestor);
-      const clip = ancestor.getBoundingClientRect();
-      if ((/auto|scroll|hidden|clip/.test(style.overflowY) && (bounds.bottom <= clip.top || bounds.top >= clip.bottom)) ||
-          (/auto|scroll|hidden|clip/.test(style.overflowX) && (bounds.right <= clip.left || bounds.left >= clip.right))) {
-        close();
-        return;
-      }
-    }
-    const margin = 8;
-    const gap = 4;
-    const viewport = window.visualViewport;
-    const viewportTop = viewport?.offsetTop ?? 0;
-    const viewportLeft = viewport?.offsetLeft ?? 0;
-    const viewportHeight = viewport?.height ?? window.innerHeight;
-    const viewportWidth = viewport?.width ?? window.innerWidth;
-    const below = viewportTop + viewportHeight - bounds.bottom - gap - margin;
-    const above = bounds.top - viewportTop - gap - margin;
-    const desiredHeight = Math.min(popup.scrollHeight, 320);
-    const placeAbove = below < desiredHeight && above > below;
-    const availableHeight = Math.max(0, placeAbove ? above : below);
-    const width = Math.min(bounds.width, Math.max(0, viewportWidth - margin * 2));
-    popup.style.width = `${width}px`;
-    popup.style.maxHeight = `${Math.min(320, availableHeight)}px`;
-    popup.style.left = `${Math.max(viewportLeft + margin, Math.min(bounds.left, viewportLeft + viewportWidth - margin - width))}px`;
-    popup.style.top = `${placeAbove ? Math.max(viewportTop + margin, bounds.top - gap - popup.getBoundingClientRect().height) : bounds.bottom + gap}px`;
-  }
-
   function close() {
     open = false;
     query = '';
     if (typeof popup?.hidePopover === 'function' && popup.matches(':popover-open')) popup.hidePopover();
   }
 
-  /** 函数职责：首次展开时懒加载字体列表；失败保留状态行并允许重试。 */
+  /** 首次展开懒加载；失败后保留手动输入，不在每次展开时反复发起扫描。 */
   function ensureFonts() {
     if (fonts !== null || loading || loadFailed) return;
     loading = true;
@@ -121,7 +89,7 @@
     // 等待 hidden 更新后再进入顶层；异步间隙关闭或卸载时不能重新打开。
     if (!open || !popup?.isConnected) return;
     if (typeof popup.showPopover === 'function' && !popup.matches(':popover-open')) popup.showPopover();
-    positionPopup();
+    positionAnchoredPopover(trigger, popup, close);
     searchInput?.focus();
     scrollActiveIntoView();
   }
@@ -201,30 +169,9 @@
     }
   }
 
-  // 收起契约不包含 focusout：点击选项区滚动条会把焦点交给可滚动祖先（Chromium 滚动容器聚焦），
-  // focusout 会把这次焦点转移误判为离开；弹层外点击由 document 级 pointerdown 捕获兜底，Tab 由搜索框显式收起。
   $effect(() => {
     if (!open) return;
-    function onPointerdown(event: PointerEvent) {
-      const path = event.composedPath();
-      if (!path.includes(trigger) && !path.includes(popup)) close();
-    }
-    function onScroll(event: Event) {
-      if (event.target !== popup) positionPopup();
-    }
-    document.addEventListener('pointerdown', onPointerdown, true);
-    document.addEventListener('scroll', onScroll, true);
-    window.addEventListener('resize', positionPopup);
-    window.visualViewport?.addEventListener('resize', positionPopup);
-    window.visualViewport?.addEventListener('scroll', positionPopup);
-    return () => {
-      document.removeEventListener('pointerdown', onPointerdown, true);
-      document.removeEventListener('scroll', onScroll, true);
-      window.removeEventListener('resize', positionPopup);
-      window.visualViewport?.removeEventListener('resize', positionPopup);
-      window.visualViewport?.removeEventListener('scroll', positionPopup);
-      if (typeof popup?.hidePopover === 'function' && popup.matches(':popover-open')) popup.hidePopover();
-    };
+    return observeAnchoredPopover(trigger, popup, close);
   });
 </script>
 

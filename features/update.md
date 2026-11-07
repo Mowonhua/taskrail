@@ -14,6 +14,10 @@
 |---|---|
 | 主入口 | src/lib/updater/tauri.ts::TauriUpdatePort |
 | 关键实现 | src/lib/updater/update-coordinator.ts::UpdateCoordinator |
+| 关键实现 | src/lib/errors.ts::errorMessage |
+| 关键实现 | scripts/release-policy.mjs::releaseArtifacts |
+| 关键实现 | scripts/release-policy.mjs::verifyReleaseFiles |
+| 关键实现 | scripts/release.mjs::prepareRelease |
 | 关键实现 | src-tauri/src/desktop_update.rs::desktop_update_check |
 | 关键实现 | src-tauri/src/desktop_update.rs::desktop_update_download |
 | 关键实现 | src-tauri/src/desktop_update.rs::download_once |
