@@ -52,6 +52,8 @@ export function validateAppConfig(value: unknown): AppConfig | null {
     if (p.themeId !== undefined && (typeof p.themeId !== 'string' || !themeIds.has(p.themeId))) return fail();
     if (p.fontFamily !== undefined && typeof p.fontFamily !== 'string') return fail();
     for (const number of [p.fontSize, p.contentWidth]) if (number !== undefined && (typeof number !== 'number' || !Number.isFinite(number) || number <= 0)) return fail();
+    // 段首缩进以字符为单位，0 表示关闭；负值会让正文首行超出段落左边界。
+    if (p.paragraphIndent !== undefined && (typeof p.paragraphIndent !== 'number' || !Number.isFinite(p.paragraphIndent) || p.paragraphIndent < 0)) return fail();
   }
   // 窗口几何为物理像素；坐标允许多显示器负值，尺寸必须为正。
   if (value.window !== undefined) {

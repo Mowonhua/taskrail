@@ -74,7 +74,7 @@ function disclosureRow(view: EditorView, className: string, action: 'toggleFold'
 /** 更新摘要的文字、层级与可访问状态，不替换按钮，保留连续键盘操作的焦点。 */
 function updateDisclosureRow(element: HTMLElement, from: number, depth: number, label: string, expanded: boolean, ariaLabel = label): void {
   element.dataset.disclosureFrom = String(from);
-  element.style.setProperty('--fm-disclosure-indent', `calc(var(--editor-font-size, 16px) * ${depth * 1.5})`);
+  element.style.setProperty('--fm-disclosure-indent', `calc(var(--editor-font-size, 16px) * ${depth * 2})`);
   element.querySelector('.fm-disclosure-label')!.textContent = label;
   element.setAttribute('aria-label', ariaLabel); element.setAttribute('aria-expanded', String(expanded));
 }
@@ -86,7 +86,7 @@ class ItemWidget extends WidgetType {
   toDOM(view: EditorView): HTMLElement {
     const wrapper = document.createElement('span');
     wrapper.dataset.itemFrom = String(this.item.from); wrapper.dataset.itemTo = String(this.item.to);
-    wrapper.className = `fm-item-controls${this.item.task ? ' fm-task-controls' : ''}${this.folded ? ' is-folded' : ''}`;
+    wrapper.className = `fm-item-controls${this.folded ? ' is-folded' : ''}`;
     const actions = view.state.facet(actionsFacet);
     const fold = document.createElement('button');
     fold.type = 'button';
@@ -652,7 +652,8 @@ function buildPreview(state: EditorState, composing = false): DecorationSet {
       let label = '•';
       if (/^\d/.test(marker)) { const number = orderedCounters.get(item.listFrom) ?? Number.parseInt(marker); orderedCounters.set(item.listFrom, number + 1); label = `${number}.`; }
       if (item.firstLineTo < window.from || overlapsHidden(item.from, item.firstLineTo)) continue;
-      ranges.push(Decoration.replace({ widget: new ItemWidget(item, folds.has(item.from), label) }).range(item.markerFrom, item.task ? item.contentFrom : item.markerTo));
+      // 标记连同其后的空白一起替换；文本列由标记列宽度决定，不随源码空格数变化。
+      ranges.push(Decoration.replace({ widget: new ItemWidget(item, folds.has(item.from), label) }).range(item.markerFrom, item.contentFrom));
       lineStyle(item.from, `fm-list-line${item.task?.checked ? ' fm-completed-line' : ''}`);
       if (folds.has(item.from)) ranges.push(Decoration.line({ attributes: { 'data-fold-line': String(item.from) } }).range(state.doc.lineAt(item.from).from));
     }
@@ -676,7 +677,7 @@ function buildPreview(state: EditorState, composing = false): DecorationSet {
       const heading = number === opening.number;
       const whitespace = line.text.match(/^[ \t]*/)?.[0].length ?? 0;
       const depth = item.depth + (heading ? 0 : 1);
-      layout.set(line.from, { margin: `calc(var(--editor-font-size, 16px) * ${depth * 1.5})`, prefixTo: line.from + Math.min(whitespace, heading ? item.markerFrom - line.from : continuation) });
+      layout.set(line.from, { margin: `calc(var(--editor-font-size, 16px) * ${depth * 2})`, prefixTo: line.from + Math.min(whitespace, heading ? item.markerFrom - line.from : continuation) });
     }
   }
   // 空正文及空续行尚不一定进入 ListItem.to；沿共享段落归属布局，输入首字不会再触发横移。
@@ -688,6 +689,8 @@ function buildPreview(state: EditorState, composing = false): DecorationSet {
     if (paragraph.kind === 'empty' && paragraph.to >= window.from && !overlapsHidden(paragraph.from, paragraph.to + 1)) {
       ranges.push(Decoration.line({ attributes: { 'data-empty-paragraph-from': String(paragraph.from) } }).range(paragraph.from));
     }
+    // 段首缩进只标记不属于列表项的顶层正文段落；任务正文、列表、标题、引用、公式、代码和表格保持各自的结构排版。
+    if (paragraph.kind === 'text' && !paragraph.item && paragraph.to >= window.from) lineStyle(paragraph.from, 'fm-paragraph');
     if (!paragraph.item || paragraph.kind === 'literal' || paragraph.to < window.from) continue;
     const first = state.doc.lineAt(Math.max(paragraph.from, window.from)).number;
     const last = state.doc.lineAt(Math.min(paragraph.to, window.to)).number;
@@ -696,7 +699,7 @@ function buildPreview(state: EditorState, composing = false): DecorationSet {
       if (line.from === paragraph.item.moveFrom) continue;
       const whitespace = line.text.match(/^[ \t]*/)?.[0].length ?? 0;
       layout.set(line.from, {
-        margin: `calc(var(--editor-font-size, 16px) * ${(paragraph.item.depth + 1) * 1.5})`,
+        margin: `calc(var(--editor-font-size, 16px) * ${(paragraph.item.depth + 1) * 2})`,
         prefixTo: line.from + Math.min(whitespace, paragraph.indent.length),
       });
     }

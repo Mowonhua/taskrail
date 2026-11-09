@@ -292,6 +292,7 @@
     document.documentElement.style.setProperty('--document-font', p.fontFamily);
     document.documentElement.style.setProperty('--document-size', `${p.fontSize}px`);
     document.documentElement.style.setProperty('--document-width', `${p.contentWidth}px`);
+    document.documentElement.style.setProperty('--paragraph-indent', `${p.paragraphIndent}em`);
     if (ready && configReady) scheduleConfig();
   });
   $effect(() => { void query; void includeArchived; if (ready && (searchOpen || screen === 'all')) scheduleIndex(); });

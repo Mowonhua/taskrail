@@ -4,6 +4,8 @@
 .cm-editor .cm-scroller { overflow: auto; scrollbar-gutter: stable; font-family: var(--editor-font, 'Segoe UI', 'Microsoft YaHei', sans-serif); line-height: 1.8; }
 .cm-editor .cm-scroller .cm-content { width: min(100%, var(--editor-width, 820px)); max-width: var(--editor-width, 820px); margin: 0 auto; padding: 36px 38px 160px; box-sizing: border-box; flex-shrink: 1; caret-color: var(--accent); }
 .cm-line { padding: 0 2px; }
+/* 段首缩进只作用于正文段落的首行；缩进量以正文字号为单位，段内续行和自动换行后的视觉行保持左端对齐。 */
+.cm-editor .cm-line.fm-paragraph { text-indent: var(--paragraph-indent, 0em); }
 /* CodeMirror 基础主题按生成的编辑器类名声明光标默认色（特异性高于单个 .cm-cursor），
    这里用同等深度的选择器覆盖，否则光标固定为黑色，在深色玻璃背景上无法分辨。 */
 .cm-editor .cm-scroller .cm-cursor { border-left-color: var(--accent); }
@@ -40,9 +42,9 @@
 .cm-editor .fm-quote { border-left: 3px solid var(--border); color: var(--muted); padding-left: 16px; }
 .fm-list-line { padding-top: 4px; padding-bottom: 4px; }
 .fm-completed-line { color: var(--muted); }
-.fm-item-controls { display: inline-flex; align-items: center; position: relative; vertical-align: text-bottom; line-height: 1; height: 1.35em; }
-/* 任务标题的标记列与所属正文共用 1.5 个编辑字号的缩进，源码标记后的空白由投影隐藏。 */
-.fm-task-controls { width: calc(var(--editor-font-size, 16px) * 1.5); }
+/* 标记列固定为两个编辑字号：文字列与两字缩进对齐，标记靠右停在半字空隙内，余下留白落在列首。 */
+.fm-item-controls { display: inline-flex; align-items: center; justify-content: flex-end; position: relative; vertical-align: text-bottom; line-height: 1; height: 1.35em; min-inline-size: calc(var(--editor-font-size, 16px) * 2); }
+.fm-item-controls > :is(.fm-task-checkbox, .fm-list-marker) { margin-inline-end: calc(var(--editor-font-size, 16px) * .5); }
 .fm-item-controls button { padding: 0; display: inline-flex; align-items: center; justify-content: center; flex: none; font-family: inherit; color: inherit; cursor: pointer; }
 .fm-item-controls .fm-fold-button { position: absolute; width: calc(var(--editor-font-size, 16px) * 1.5); min-width: 24px; height: max(28px, calc(var(--editor-font-size, 16px) * 1.75)); right: calc(100% + 2px); border: 0; border-radius: var(--control-radius, 4px); background: transparent; color: var(--muted); opacity: .65; transition: background-color 120ms, color 120ms, opacity 120ms; }
 .fm-fold-button:hover, .fm-item-controls:hover .fm-fold-button, .fm-item-controls:focus-within .fm-fold-button, .fm-item-controls.is-folded .fm-fold-button { opacity: 1; }
@@ -59,7 +61,7 @@
 .fm-hidden-note { font: inherit; font-size: .8em; color: var(--muted); background: transparent; border: 0; padding: 3px 8px; cursor: pointer; }
 /* 摘要共用箭头和交互状态；完成组占独立行，正文展开入口接在父行末尾。 */
 .fm-disclosure-row { display: flex; align-items: center; inline-size: calc(100% - var(--fm-disclosure-indent)); margin-inline-start: var(--fm-disclosure-indent); min-block-size: max(28px, calc(var(--editor-font-size, 16px) * 1.8)); padding: 0 2px 0 6px; box-sizing: border-box; border: 0; border-radius: var(--control-radius, 4px); background: transparent; color: var(--muted); font: inherit; font-size: .875em; line-height: 1.45; text-align: start; cursor: pointer; transition: background-color 120ms, color 120ms; }
-.fm-disclosure-marker { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 calc(var(--editor-font-size, 16px) * 1.5); align-self: flex-start; block-size: calc(var(--editor-font-size, 16px) * 1.75); }
+.fm-disclosure-marker { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 calc(var(--editor-font-size, 16px) * 2); align-self: flex-start; block-size: calc(var(--editor-font-size, 16px) * 1.75); }
 .fm-fold-expand { height: 1.35em; vertical-align: text-bottom; }
 .fm-fold-summary.fm-line-action-button { top: 50%; }
 .fm-fold-summary .fm-disclosure-marker { flex-basis: auto; align-self: center; block-size: auto; }

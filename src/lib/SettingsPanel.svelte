@@ -39,6 +39,8 @@
   const fontSlots = $derived(parseFontStack(preferences.fontFamily));
   /** 字体栈偏离默认值时提供一键恢复；空栈同样视为默认以外的状态。 */
   const fontStackModified = $derived(preferences.fontFamily !== DEFAULT_FONT_STACK);
+  /** 缩进量以字符为单位显示；0 关闭，避免把“0 字符”读成无效排版。 */
+  const paragraphIndentLabel = $derived(preferences.paragraphIndent > 0 ? `${preferences.paragraphIndent} ${$t('字符')}` : $t('关闭'));
 
   /**
    * 函数职责：替换字体栈指定槽位的具名字体并重组字符串。
@@ -181,6 +183,7 @@
     </details>
     <div class="settings-row"><label for="settings-font-size">{$t('字号')}</label><div class="settings-range-control"><input id="settings-font-size" type="range" min="13" max="24" step="1" bind:value={preferences.fontSize}/><output for="settings-font-size">{preferences.fontSize} px</output></div></div>
     <div class="settings-row"><label for="settings-content-width">{$t('正文宽度')}</label><div class="settings-range-control"><input id="settings-content-width" type="range" min="640" max="960" step="20" bind:value={preferences.contentWidth}/><output for="settings-content-width">{preferences.contentWidth} px</output></div></div>
+    <div class="settings-row"><label for="settings-paragraph-indent">{$t('段首缩进')}</label><div class="settings-range-control"><input id="settings-paragraph-indent" type="range" min="0" max="4" step="1" bind:value={preferences.paragraphIndent}/><output for="settings-paragraph-indent">{paragraphIndentLabel}</output></div></div>
   </section>
 
   <details class="settings-theme-manager">

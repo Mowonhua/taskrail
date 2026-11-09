@@ -22,6 +22,8 @@ export interface Preferences {
   /** 界面语言；旧配置缺省为简体中文，system 跟随操作系统语言。 */
   locale?: LocalePreference;
   theme: ThemeMode; themeId?: string; fontFamily: string; fontSize: number; contentWidth: number;
+  /** 正文段落首行的缩进字符数，以正文字号为单位；缺省为 2，0 关闭。不影响任务、列表、标题、引用、公式、代码和表格。 */
+  paragraphIndent: number;
   /** 缺省为 true；仅桌面版启动后检查，关闭后仍允许手动检查。 */
   autoCheckUpdates?: boolean;
   /** 缺省为 true；下载完成后仍需用户启动安装，以便先保存全部文档。 */

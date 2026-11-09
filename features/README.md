@@ -30,3 +30,4 @@
 | 项目导航 | [navigation.md](navigation.md) | 项目列表的标识、切换与排序 |
 | 任务编辑 | [task-editing.md](task-editing.md) | 子任务完成、排序与显示 |
 | 行内 Markdown | [markdown-inline.md](markdown-inline.md) | 行内语法排版与删除线定界符判定 |
+| 阅读排版 | [reading.md](reading.md) | 正文字体、字号、宽度与段首缩进等本机阅读参数 |

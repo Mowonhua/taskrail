@@ -818,6 +818,26 @@ describe('界面语言设置', () => {
   });
 });
 
+describe('正文段首缩进', () => {
+  it('默认两字符，修改后立即写入阅读样式并持久化，重启恢复且不改写正文', async () => {
+    const original = '# 阅读\n\n段落正文\n\n- [ ] 任务\n\n  任务正文\n';
+    await start([original]);
+    expect(document.documentElement.style.getPropertyValue('--paragraph-indent')).toBe('2em');
+    expect([...document.querySelectorAll('.cm-line.fm-paragraph')].map(line => line.textContent)).toEqual(['段落正文']);
+    button('设置').click(); await tick();
+    const slider = document.querySelector<HTMLInputElement>('#settings-paragraph-indent')!;
+    expect(slider.value).toBe('2');
+    slider.value = '0'; slider.dispatchEvent(new Event('input', { bubbles: true })); await tick();
+    expect(document.documentElement.style.getPropertyValue('--paragraph-indent')).toBe('0em');
+    expect(document.querySelector('#settings-paragraph-indent')!.nextElementSibling?.textContent).toBe('关闭');
+    await vi.waitFor(async () => expect((await files.loadConfig())?.preferences.paragraphIndent).toBe(0));
+    expect((await files.read(firstProject.path)).text).toBe(original);
+    await remount();
+    expect(document.documentElement.style.getPropertyValue('--paragraph-indent')).toBe('0em');
+    expect((await files.read(firstProject.path)).text).toBe(original);
+  });
+});
+
 /** jsdom 的 File 缺少 text；只补文件读取边界，仍通过生产文件输入事件执行导入与校验。 */
 async function importThemeFile(content: string): Promise<void> {
   await openThemeManager();
