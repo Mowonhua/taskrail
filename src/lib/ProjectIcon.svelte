@@ -37,10 +37,10 @@
 </script>
 
 {#snippet defaultIcon()}
-  <svg width={size} height={size} viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-    <path d="M5.5 3.5h5l3 3v10h-8z"/>
-    <path d="M10.5 3.5v3h3"/>
-    <path d="m8 10.7 1.2 1.2 2.4-2.6"/>
+  <!-- 折边画成直角折线：它与外轮廓的斜切边共用端点，改用弧线会与斜切边大面积重叠，在放大时出现双层描边。 -->
+  <svg width={size} height={size} viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M11 3H6a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V8z"/>
+    <path d="M11 3v3.8a1.2 1.2 0 0 0 1.2 1.2h3.8"/>
   </svg>
 {/snippet}
 
