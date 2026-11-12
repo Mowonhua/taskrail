@@ -1,6 +1,6 @@
 /**
  * 文件职责：定义成对符号表，并处理输入时的自动补齐与光标居中。
- * 定义范围：符号表、单个开符号补齐、桌面组合输入补齐、输入法整对提交居中、closeBrackets 与成对高亮的配对配置。
+ * 定义范围：符号表、单个开符号补齐、桌面组合输入补齐、闭引号方向修正、输入法整对提交居中、closeBrackets 与成对高亮的配对配置。
  */
 import { insertBracket } from '@codemirror/autocomplete';
 import { CharCategory, EditorState, Prec, Transaction, codePointAt, codePointSize } from '@codemirror/state';
@@ -16,6 +16,13 @@ const CLOSINGS: ReadonlyMap<string, string> = new Map([...OPENINGS].map(([open, 
 
 /** 输入法可能一次整体提交的成对文本到开符号；只有整段提交才会命中，逐个键入不受影响。 */
 const PAIRS: ReadonlyMap<string, string> = new Map([...OPENINGS].map(([open, close]) => [open + close, open]));
+
+/**
+ * 方向性引号的开闭对应，与 OPENINGS 中的中文引号条目一致，单独列出供方向修正反查。
+ * 说明：这两个符号的左右形状不同，输入法提交的闭引号不一定代表用户想收尾。
+ */
+const QUOTE_PAIRS: ReadonlyMap<string, string> = new Map([['“', '”'], ['‘', '’']]);
+const QUOTE_CLOSINGS: ReadonlyMap<string, string> = new Map([...QUOTE_PAIRS].map(([open, close]) => [close, open]));
 
 /**
  * 光标右侧是这些字符时仍然补齐闭符号：闭符号本身与右标点，说明插入点位于语句停顿处。
@@ -80,15 +87,26 @@ function completeComposingSymbol(view: EditorView): void {
   const { main } = state.selection;
   const start = main.head - text.length;
   if (!main.empty || start < 0 || state.sliceDoc(start, main.head) !== text) return;
-  const close = OPENINGS.get(text);
-  if (close !== undefined && close !== text) {
+  // 方向性闭引号：输入法在新位置仍会提交上一次补齐留下的闭引号，按行内配对深度改写成开符号。
+  const open = OPENINGS.has(text) ? text : quoteOpening(state, start, text);
+  const close = open === undefined ? undefined : OPENINGS.get(open);
+  if (open !== undefined && close !== undefined && close !== open) {
     // 去掉已提交的符号，让 insertBracket 按「符号尚未写入」的正文判断右侧能否补齐并生成成对事务；
     // 自配对引号走另一套词边界规则，这里不接管，避免打断撇号这类输入。
-    const pair = insertBracket(state.update({ changes: { from: start, to: main.head } }).state, text);
-    if (!pair) return;
+    const pair = insertBracket(state.update({ changes: { from: start, to: main.head } }).state, open);
+    if (!pair) {
+      // 右侧是普通文字，不补闭符号；但方向仍需修正，替换掉输入法提交的闭引号。
+      if (open === text) return;
+      view.dispatch(state.update({ changes: { from: start, to: main.head, insert: open }, selection: { anchor: start + open.length }, scrollIntoView: true, userEvent: 'input.type' }));
+      return;
+    }
+    // 方向被改写时同一笔事务替换已提交的字形并在其后补闭符号，避免先删后插产生中间的撤销步骤。
+    const changes = open === text
+      ? { from: main.head, insert: close }
+      : [{ from: start, to: main.head, insert: open }, { from: main.head, insert: close }];
     view.dispatch(state.update({
-      changes: { from: main.head, insert: close },
-      selection: { anchor: main.head },
+      changes,
+      selection: { anchor: start + open.length },
       effects: pair.effects,
       scrollIntoView: true,
       userEvent: 'input.type',
@@ -126,6 +144,45 @@ function isWordChar(state: EditorState, pos: number, char: string): boolean {
 /** 函数职责：判断字符是否为 ASCII 字母、数字或下划线，用于识别英文单词内部的撇号。 */
 function isAsciiWordChar(char: string): boolean {
   return /[0-9A-Za-z_]/.test(char);
+}
+
+/**
+ * 函数职责：判断插入点右侧是否允许补出闭符号。
+ * 输入说明：after 是插入点右侧的一个字符，行尾为空串。
+ * 输出说明：行尾、空白与停顿标点视为可插入位置；普通文字与单词字符不补，避免破坏已有的词。
+ */
+function pairableAfter(after: string): boolean {
+  return after === '' || /\s/.test(after) || PAIRABLE_BEFORE.has(after);
+}
+
+/**
+ * 函数职责：判断方向性闭引号所在的同一行是否还有未闭合的同类开引号。
+ * 输入说明：open、close 是同一族方向性引号的开闭字形，from 是插入点。
+ * 输出说明：仍有未闭合的开引号时返回 false，说明这次提交是在收尾；否则返回 true，说明要开始新的一对。
+ * 实现思路：输入法自己保存左右引号的翻转状态，编辑器自动补出的闭引号不会被它记入，
+ *   补对之后下一次按键仍会提交闭引号；文档中同一行的配对深度才反映用户真正的意图。
+ *   所以只数同一行、光标左侧的开闭符号差值，跨行的引号不参与判断。
+ */
+function startsNewQuote(state: EditorState, from: number, open: string, close: string): boolean {
+  let depth = 0;
+  for (const char of state.sliceDoc(state.doc.lineAt(from).from, from)) {
+    if (char === open) depth += 1;
+    else if (char === close) depth -= 1;
+  }
+  return depth <= 0;
+}
+
+/**
+ * 函数职责：解析方向性闭引号是否应改写为对应的开符号。
+ * 输入说明：text 是这次提交的单字符，from 是它的起始位置。
+ * 输出说明：text 是方向性闭引号、行内没有未闭合的同类开引号，且不是英文撇号时返回对应开符号；其余返回 undefined。
+ * 实现思路：紧跟 ASCII 字母、数字或下划线的右单引号是英文撇号（don’t），保持原样，不参与引号配对。
+ */
+function quoteOpening(state: EditorState, from: number, text: string): string | undefined {
+  const open = QUOTE_CLOSINGS.get(text);
+  if (open === undefined || !startsNewQuote(state, from, open, text)) return undefined;
+  if (text === '’' && isAsciiWordChar(prevChar(state, from))) return undefined;
+  return open;
 }
 
 /**
@@ -265,10 +322,30 @@ export const pairedSymbols = EditorView.inputHandler.of((view, from, to, text, i
 });
 
 /**
+ * 函数职责：桌面键盘或不在组合会话中的输入法把闭引号提交到新位置时，改写为开引号并补齐。
+ * 输入说明：只接管单光标、空选区的单字符提交；组合中的提交交给 compositionBracketCompletion 在组合结束后处理，
+ *   已补齐的闭符号前的同一枚符号交给 closeBrackets 跳过。
+ * 输出说明：命中时按 closeBrackets 的同一份配对表派发并返回 true；右侧是普通文字时只改方向、不补闭符号。
+ * 实现思路：复用 insertBracket 得到与键盘补齐相同的配对判断和成对删除效果，方向由 quoteOpening 按行内深度决定。
+ */
+export const quoteDirection = Prec.high(EditorView.inputHandler.of((view, from, to, text) => {
+  const state = view.state;
+  const { main } = state.selection;
+  if (state.readOnly || view.compositionStarted || text.length !== 1 || from !== to || !main.empty || main.from !== from) return false;
+  const opening = quoteOpening(state, from, text);
+  if (opening === undefined) return false;
+  const pair = insertBracket(state, opening);
+  if (pair) view.dispatch(pair);
+  else view.dispatch({ changes: { from, insert: opening }, selection: { anchor: from + opening.length }, scrollIntoView: true, userEvent: 'input.type' });
+  return true;
+}));
+
+/**
  * 函数职责：手机端输入单个开符号时补齐闭符号，并把光标放到两符号之间。
  * 输入说明：只接管单光标、空选区的单字符输入；整对提交由 pairedSymbols 处理，桌面键盘由 closeBrackets 处理。
  * 输出说明：补对时派发一笔事务并返回 true；右侧已是同一闭符号且输入的就是该闭符号时移过去，不产生新字符；
- *   在一对符号内部再次输入同一个开符号时补齐内层闭符号，右侧原有闭符号不受影响。
+ *   在一对符号内部再次输入同一个开符号时补齐内层闭符号，右侧原有闭符号不受影响；
+ *   在新位置提交方向性闭引号时按行内配对深度改写成一对开引号。
  * 实现思路：手机输入法不在编辑器内配对，其事务必须带上文本改动才能同步插入点，因此补齐的文本与居中选区同笔派发；
  *   引号自配对时只在词边界补齐，避免打断 don't 这类撇号输入；补齐后登记回发预期与保位，
  *   前者消化输入法把写回的闭符号当成新输入的回发，后者兜住只改选区的插入点同步。
@@ -281,6 +358,18 @@ export const singleSymbolPairs = EditorView.inputHandler.of((view, from, to, tex
   if (close === undefined && !CLOSINGS.has(text)) return false;
   const state = view.state;
   const after = nextChar(state, from);
+  // 方向性闭引号落在没有未闭合的开引号的位置时，输入法只是把上一次补齐后没有按下的闭引号带到了新位置：
+  // 按行内配对深度改写成开引号，右侧仍可插入时再补一枚闭引号，与补齐普通开符号的结局一致。
+  const quote = close === undefined ? quoteOpening(state, from, text) : undefined;
+  if (quote !== undefined) {
+    const pair = pairableAfter(after);
+    view.dispatch({ changes: { from, insert: quote + (pair ? text : '') }, selection: { anchor: from + quote.length }, scrollIntoView: true, userEvent });
+    if (pair) {
+      keepCaret(view, from + quote.length, from + quote.length + text.length);
+      echoExpectations.set(view, { from: from + quote.length, text, expiresAt: performance.now() + ECHO_WINDOW });
+    }
+    return true;
+  }
   if (close === undefined) {
     // 闭符号：右侧已是同一符号时只把光标移过去，避免插入重复的闭符号；否则交回默认插入，用户单独按闭符号照常输入。
     if (after !== text) return false;
@@ -296,7 +385,7 @@ export const singleSymbolPairs = EditorView.inputHandler.of((view, from, to, tex
   // 汉字之后是中文写作里输入引号的常见位置，照常补齐；右侧紧跟词字符（含汉字）时也不补，避免把词拆开。
   if (close === text) {
     if (isAsciiWordChar(prevChar(state, from)) || isWordChar(state, from, after)) return false;
-  } else if (after !== '' && !PAIRABLE_BEFORE.has(after) && !/\s/.test(after)) return false;
+  } else if (!pairableAfter(after)) return false;
   // 走到这里的开符号一律补齐：右侧为空、空白或停顿标点（含闭符号）都算可插入位置，
   // 后者覆盖在一对符号内部再次输入同一个开符号的情况（`(|)` 输入 `(` 得到 `(())`），右侧原有闭符号保持不动。
   view.dispatch({ changes: { from, insert: text + close }, selection: { anchor: from + text.length }, scrollIntoView: true, userEvent });

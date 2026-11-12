@@ -138,6 +138,53 @@ describe('成对符号补全', () => {
     expect(insideWord.text).toBe("- [ ] don'");
   });
 
+  it('桌面输入法在成对引号之后换到新行提交闭引号时重新开一对左引号', async () => {
+    const instance = editor('- [ ] 第一句“”\n- [ ] 第二句');
+    instance.focusAt(instance.text.length);
+    await typeComposing(instance, '”');
+    expect(instance.text).toBe('- [ ] 第一句“”\n- [ ] 第二句“”');
+    expect(instance.state.selection.main.head).toBe(instance.text.length - 1);
+  });
+
+  it('桌面输入法在同一行未闭合的引号之后提交闭引号时照常收尾', async () => {
+    const instance = editor('- [ ] 他说“你好');
+    instance.focusAt(instance.text.length);
+    await typeComposing(instance, '”');
+    expect(instance.text).toBe('- [ ] 他说“你好”');
+    expect(instance.state.selection.main.head).toBe(instance.text.length);
+  });
+
+  it('桌面键盘直接输入闭引号时同样按行内引号深度重新开引号', async () => {
+    const instance = editor('- [ ] 第一句“”\n- [ ] 第二句');
+    instance.focusAt(instance.text.length);
+    await type(instance, '”');
+    expect(instance.text).toBe('- [ ] 第一句“”\n- [ ] 第二句“”');
+    expect(instance.state.selection.main.head).toBe(instance.text.length - 1);
+  });
+
+  it('引号方向修正不影响英文撇号', async () => {
+    const instance = editor('- [ ] don');
+    instance.focusAt(instance.text.length);
+    await typeComposing(instance, '’');
+    expect(instance.text).toBe('- [ ] don’');
+  });
+
+  it('手机在别处输入闭引号时重新开一对左引号', async () => {
+    const instance = editor('- [ ] 任务“”', true);
+    instance.focusAt(instance.text.length);
+    await type(instance, '”');
+    expect(instance.text).toBe('- [ ] 任务“”“”');
+    expect(instance.state.selection.main.head).toBe('- [ ] 任务“”“'.length);
+  });
+
+  it('手机在同一行未闭合的引号之后输入闭引号时照常收尾', async () => {
+    const instance = editor('- [ ] 他说“你好', true);
+    instance.focusAt(instance.text.length);
+    await type(instance, '”');
+    expect(instance.text).toBe('- [ ] 他说“你好”');
+    expect(instance.state.selection.main.head).toBe(instance.text.length);
+  });
+
   it.each([['(', '()'], ['（', '（）'], ['“', '“”']])('手机输入单个 %s 同样补齐为 %s 并把光标放到中间', async (inserted, pair) => {
     const instance = editor('- [ ] 任务', true);
     instance.focusAt(instance.text.length);
