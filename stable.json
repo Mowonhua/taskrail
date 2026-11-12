@@ -1,11 +1,11 @@
 {
-  "version": "0.8.7",
-  "notes": "# Taskrail v0.8.7\r\n\r\n相较于 v0.8.6：\r\n\r\n- 支持自定义左侧边栏项目图标，可选择表情或图标，也可恢复默认图标。\r\n- 修复电脑和手机解除配对后另一端未及时更新的问题，重新配对后保留原有同步选择。\r\n- 改进手机导航手势，在屏幕中心区域滑动可打开或关闭导航，快速滑动正文时不再意外唤起光标。\r\n- 修复部分主题下编辑器光标颜色不明显的问题。\r\n- 修复子任务操作和完成组摘要后出现多余空行的问题。\r\n\r\n0.8.7 沿用 0.8.6 的应用标识，可覆盖升级。Windows 下载 `Taskrail_0.8.7_x64-setup.exe` 安装，Android 下载 `Taskrail-0.8.7-arm64.apk` 安装。\r\n\r\n局域网同步兼容范围与 v0.8.6 相同。含画布图片的文档需要两端都运行 0.8.0 或更新版本。与 v0.7.2 及更早版本不兼容，两端需一起升级。\r\n",
-  "pub_date": "2026-11-01T10:38:38.345Z",
+  "version": "0.8.8",
+  "notes": "# Taskrail v0.8.8\r\n\r\n相较于 v0.8.7：\r\n\r\n- 新增“段首缩进”阅读设置：正文段落默认缩进两字符，也可关闭并随字号缩放；列表标记列同步与正文首行缩进对齐。\r\n- 修复中文括号紧邻删除线时删除线无法生效的问题。\r\n- 修复切换项目后阅读位置持续下移的问题。\r\n- 修正输入法在新位置提交闭引号的方向。\r\n- 重绘默认项目图标，使轮廓与留白更清晰。\r\n\r\n0.8.8 沿用 0.8.7 的应用标识，可覆盖升级。Windows 下载 `Taskrail_0.8.8_x64-setup.exe` 安装，Android 下载 `Taskrail-0.8.8-arm64.apk` 安装。\r\n\r\n局域网同步协议未变，兼容范围与 v0.8.7 相同。含画布图片的文档需要两端都运行 0.8.0 或更新版本。与 v0.7.2 及更早版本不兼容，两端需一起升级。\r\n",
+  "pub_date": "2026-11-12T03:07:02.566Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTZmRrb1VuY0F4NS9Sc2d1ZzJoeGszVG5MNjRFNS9hL1BlOG5oTll1WFdPblFzM24wSDVKM3cvdWpqOWdtU2NsMUdReVVaQ0VxcFdDSnhNU0VNaUlyeU1sdUhobkxmNWdZPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzNTI5NTE1CWZpbGU6VGFza3JhaWxfMC44LjdfeDY0LXNldHVwLmV4ZQl2ZXJzaW9uOjAuOC43CnZRaEFMTXBkVy9OQ0lJMnNwZ3Q2UC9KY2IxV0lmT1IvVlRIaXlLR1l2SzFSYWpWTG9ZQS96dG1QRDdMNTloaVZOcEt6bUNPRnVkQkFNYTMwMXlKa0NBPT0K",
-      "url": "https://github.com/Mowonhua/taskrail/releases/download/v0.8.7/Taskrail_0.8.7_x64-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTZmRrb1VuY0F4NTJHRkZ6bjJIeGVNWURNYXlsdlFaQVNua09ncWM0cTBKY3QrcFRPcmVkcE1FU1RIbzAwamRWQnFTZkE0elIvNXhXV1JDRlRmdVRXcjRmQlZKZUxTZ3c4PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0NDUyODE4CWZpbGU6VGFza3JhaWxfMC44LjhfeDY0LXNldHVwLmV4ZQl2ZXJzaW9uOjAuOC44CnF5WjVySTlxdGFUVS9GOGhlMGVMUzR3c1pIYyt1TnNKbWFUWFpjWVV1dVIvaFFMcUJpbTJKVHZpdEQ0UGVLWXl6VkE4aldjSTNFeSt1ai9tbVVoN0RnPT0K",
+      "url": "https://github.com/Mowonhua/taskrail/releases/download/v0.8.8/Taskrail_0.8.8_x64-setup.exe"
     }
   }
 }
