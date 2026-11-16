@@ -42,6 +42,12 @@ export interface Preferences {
   workspaceSection?: WorkspaceSection;
   /** 无关联项目时使用的默认项目图标（格式同 Project.icon）。 */
   defaultProjectIcon?: string;
+  /** 悬赏服务连接模式：embedded 使用桌面内嵌服务，remote 连接独立远程服务。 */
+  serviceMode?: 'embedded' | 'remote';
+  /** 远程悬赏服务根地址（http:// 或 https://，去除末尾斜杠）。 */
+  remoteServerUrl?: string;
+  /** 远程悬赏服务管理员 Bearer Token。 */
+  remoteAdminToken?: string;
   autoCheckUpdates?: boolean;
   autoDownloadUpdates?: boolean;
 }

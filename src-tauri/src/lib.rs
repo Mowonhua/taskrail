@@ -3,6 +3,8 @@
 #[cfg(not(target_os = "android"))]
 mod desktop_update;
 mod external_link;
+#[cfg(not(target_os = "android"))]
+pub mod server;
 #[cfg(target_os = "windows")]
 mod single_instance;
 mod storage;
@@ -23,6 +25,21 @@ use tauri_plugin_opener::OpenerExt;
 #[derive(Default)]
 struct FileState {
     gate: Arc<Mutex<()>>,
+}
+
+/// 服务句柄存活至应用退出；关闭时先停止接入，再等待在途事务完成。
+#[cfg(not(target_os = "android"))]
+struct EmbeddedServerState {
+    info: server::models::EmbeddedServerInfo,
+    handle: Mutex<Option<server::RunningServer>>,
+}
+
+#[cfg(not(target_os = "android"))]
+#[tauri::command]
+fn get_embedded_server_info(
+    state: State<'_, EmbeddedServerState>,
+) -> server::models::EmbeddedServerInfo {
+    state.info.clone()
 }
 
 /// 文件 IO 与等待互斥锁都在阻塞线程池中执行，避免阻塞 WebView 输入事件。
@@ -133,6 +150,20 @@ pub fn run() {
     let window_key = _instance.window_key();
     // 互斥锁已先于 Tauri 初始化获取，并保持到事件循环退出。
     let builder = tauri::Builder::default().setup(move |app| {
+        #[cfg(not(target_os = "android"))]
+        {
+            let config = server::ServerConfig {
+                bind: "127.0.0.1:0".parse()?,
+                db_path: app.path().app_data_dir()?.join("taskrail.db"),
+                admin_token: server::random_admin_token()?,
+                mode: server::ServerMode::Embedded,
+            };
+            let handle = tauri::async_runtime::block_on(server::start(config))?;
+            app.manage(EmbeddedServerState {
+                info: handle.info.clone(),
+                handle: Mutex::new(Some(handle)),
+            });
+        }
         #[cfg(target_os = "windows")]
         single_instance::mark_window(app, &window_key)?;
         // 窗口此时尚未显示，恢复上次几何不会露出移动过程。
@@ -159,13 +190,33 @@ pub fn run() {
             load_config,
             save_config,
             export_theme_file,
-            #[cfg(not(target_os = "android"))] desktop_update::desktop_update_check,
-            #[cfg(not(target_os = "android"))] desktop_update::desktop_update_download,
-            #[cfg(not(target_os = "android"))] desktop_update::desktop_update_install,
-            #[cfg(not(target_os = "android"))] desktop_update::desktop_update_close,
+            #[cfg(not(target_os = "android"))]
+            get_embedded_server_info,
+            #[cfg(not(target_os = "android"))]
+            desktop_update::desktop_update_check,
+            #[cfg(not(target_os = "android"))]
+            desktop_update::desktop_update_download,
+            #[cfg(not(target_os = "android"))]
+            desktop_update::desktop_update_install,
+            #[cfg(not(target_os = "android"))]
+            desktop_update::desktop_update_close,
             system_fonts::list_system_fonts,
             window_material::set_window_material
         ])
-        .run(context)
-        .expect("无法启动 Taskrail 桌面窗口");
+        .build(context)
+        .expect("无法启动 Taskrail 桌面窗口")
+        .run(|app, event| {
+            #[cfg(not(target_os = "android"))]
+            if matches!(event, tauri::RunEvent::Exit) {
+                let state = app.state::<EmbeddedServerState>();
+                let handle = state.handle.lock().expect("服务状态锁不可用").take();
+                if let Some(handle) = handle {
+                    if let Err(error) = tauri::async_runtime::block_on(handle.shutdown()) {
+                        eprintln!("{error}");
+                    }
+                }
+            }
+            #[cfg(target_os = "android")]
+            let _ = (app, event);
+        });
 }

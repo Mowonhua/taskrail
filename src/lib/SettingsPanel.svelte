@@ -1,8 +1,17 @@
 <script lang="ts">
   /**
-   * 文件职责：承载工作台外观、阅读排版、自定义主题导入导出及工作台扩展分组预留设置。
-   * 定义范围：界面语言、主题与明暗模式、桌面窗口失焦保持透明、字体栈与正文排版、主题管理及扩展预留。
+   * 文件职责：承载工作台外观、阅读排版、自定义主题导入导出、同构服务连接模式及项目管理设置。
+   * 定义范围：界面语言、主题与明暗模式、桌面窗口失焦保持透明、字体栈与正文排版、主题管理、本地/远端服务连接与项目管理。
    */
+  import { HttpBountyClient, normalizeServerUrl } from './api/bounty-client';
+  import type {
+    BountyProject,
+    CreateProjectInput,
+    ServiceMode,
+    UpdateProjectInput,
+  } from './api/types';
+  import { formatServiceError } from './bounty/helpers';
+  import ProjectManagementPanel from './bounty/ProjectManagementPanel.svelte';
   import { composeFontStack, DEFAULT_FONT_STACK, GENERIC_FAMILIES, parseFontStack } from './font-stack';
   import FontSelect from './FontSelect.svelte';
   import { t, type LocalePreference } from './i18n';
@@ -19,6 +28,13 @@
     desktopMaterialSupported: boolean;
     importingTheme: boolean;
     themeError: string;
+    serviceConnected?: boolean;
+    serviceUrl?: string;
+    serviceConnectionError?: string;
+    bountyProjects?: BountyProject[];
+    showArchivedProjects?: boolean;
+    desktop?: boolean;
+    mobile?: boolean;
     onSelectLanguage: (language: LocalePreference) => void;
     onSelectThemeId: (id: string) => void;
     onSelectThemeMode: (mode: ThemeMode) => void;
@@ -30,6 +46,15 @@
     onImportThemeFile: (event: Event) => void;
     onExportThemeTemplate: () => void;
     onRemoveActiveTheme: () => void;
+    onSaveServiceConnection?: (
+      mode: ServiceMode,
+      remoteServerUrl: string,
+      remoteAdminToken: string,
+    ) => Promise<void>;
+    onToggleShowArchivedProjects?: (show: boolean) => Promise<void> | void;
+    onCreateBountyProject?: (input: CreateProjectInput) => Promise<BountyProject>;
+    onUpdateBountyProject?: (id: string, input: UpdateProjectInput) => Promise<BountyProject>;
+    onDeleteBountyProject?: (id: string) => Promise<void>;
   }
 
   let {
@@ -40,6 +65,13 @@
     desktopMaterialSupported,
     importingTheme,
     themeError,
+    serviceConnected = true,
+    serviceUrl = '',
+    serviceConnectionError = '',
+    bountyProjects = [],
+    showArchivedProjects = false,
+    desktop = false,
+    mobile = false,
     onSelectLanguage,
     onSelectThemeId,
     onSelectThemeMode,
@@ -51,12 +83,36 @@
     onImportThemeFile,
     onExportThemeTemplate,
     onRemoveActiveTheme,
+    onSaveServiceConnection,
+    onToggleShowArchivedProjects = () => {},
+    onCreateBountyProject = async () => {
+      throw new Error('Not configured');
+    },
+    onUpdateBountyProject = async () => {
+      throw new Error('Not configured');
+    },
+    onDeleteBountyProject = async () => {
+      throw new Error('Not configured');
+    },
   }: Props = $props();
 
   let helpButton: HTMLButtonElement;
   let helpBubble: HTMLDivElement;
   let helpOpen = $state(false);
   let customFontDraft = $state('');
+
+  let serviceModeDraft = $state<ServiceMode>('embedded');
+  let remoteUrlDraft = $state('');
+  let remoteTokenDraft = $state('');
+  let testingConnection = $state(false);
+  let savingConnection = $state(false);
+  let connectionFeedback = $state<{ kind: 'success' | 'error'; message: string } | null>(null);
+
+  $effect(() => {
+    serviceModeDraft = preferences.serviceMode ?? 'embedded';
+    remoteUrlDraft = preferences.remoteServerUrl ?? '';
+    remoteTokenDraft = preferences.remoteAdminToken ?? '';
+  });
 
   function themeSupportsBlur(theme: ThemeDefinition): boolean {
     if (theme.monochrome) return false;
@@ -162,6 +218,106 @@
     if (!helpOpen) return;
     return observeAnchoredPopover(helpButton, helpBubble, closeHelp);
   });
+
+  async function handleSelectServiceMode(nextMode: ServiceMode): Promise<void> {
+    serviceModeDraft = nextMode;
+    connectionFeedback = null;
+    if (nextMode === 'embedded' && (preferences.serviceMode ?? 'embedded') !== 'embedded') {
+      savingConnection = true;
+      try {
+        await onSaveServiceConnection?.('embedded', remoteUrlDraft.trim(), remoteTokenDraft.trim());
+      } catch (error) {
+        serviceModeDraft = preferences.serviceMode ?? 'embedded';
+        connectionFeedback = { kind: 'error', message: formatServiceError(error) };
+      } finally {
+        savingConnection = false;
+      }
+    }
+  }
+
+  async function handleTestRemoteConnection(): Promise<void> {
+    if (testingConnection) return;
+    connectionFeedback = null;
+    let normalizedUrl: string;
+    try {
+      normalizedUrl = normalizeServerUrl(remoteUrlDraft);
+    } catch {
+      connectionFeedback = {
+        kind: 'error',
+        message: $t('请输入合法的 http:// 或 https:// 远端服务地址。'),
+      };
+      return;
+    }
+    testingConnection = true;
+    try {
+      const client = new HttpBountyClient(normalizedUrl, remoteTokenDraft.trim());
+      const [health, status] = await Promise.all([client.health(), client.adminStatus()]);
+      connectionFeedback = {
+        kind: 'success',
+        message: $t('连接成功：{mode} (v{version})', {
+          mode: status.mode || health.mode,
+          version: status.version || health.version,
+        }),
+      };
+    } catch (error) {
+      connectionFeedback = {
+        kind: 'error',
+        message: formatServiceError(error),
+      };
+    } finally {
+      testingConnection = false;
+    }
+  }
+
+  async function handleSaveAndReconnect(): Promise<void> {
+    if (savingConnection) return;
+    connectionFeedback = null;
+    if (serviceModeDraft === 'remote') {
+      let normalizedUrl: string;
+      try {
+        normalizedUrl = normalizeServerUrl(remoteUrlDraft);
+      } catch {
+        connectionFeedback = {
+          kind: 'error',
+          message: $t('请输入合法的 http:// 或 https:// 远端服务地址。'),
+        };
+        return;
+      }
+      savingConnection = true;
+      try {
+        await onSaveServiceConnection?.('remote', normalizedUrl, remoteTokenDraft.trim());
+        connectionFeedback = {
+          kind: 'success',
+          message: $t('已保存并连接到远端服务。'),
+        };
+      } catch (error) {
+        serviceModeDraft = preferences.serviceMode ?? 'embedded';
+        connectionFeedback = {
+          kind: 'error',
+          message: formatServiceError(error),
+        };
+      } finally {
+        savingConnection = false;
+      }
+    } else {
+      savingConnection = true;
+      try {
+        await onSaveServiceConnection?.('embedded', remoteUrlDraft.trim(), remoteTokenDraft.trim());
+        connectionFeedback = {
+          kind: 'success',
+          message: $t('已切换回个人内嵌模式。'),
+        };
+      } catch (error) {
+        serviceModeDraft = preferences.serviceMode ?? 'embedded';
+        connectionFeedback = {
+          kind: 'error',
+          message: formatServiceError(error),
+        };
+      } finally {
+        savingConnection = false;
+      }
+    }
+  }
 </script>
 
 <div class="settings-panel">
@@ -419,20 +575,139 @@
     data-extension-group="workspace"
   >
     <h3 class="settings-section-title" id="settings-extensions-heading">{$t('工作台与服务扩展')}</h3>
-    <div class="settings-row settings-extension-row">
-      <div class="settings-extension-copy">
-        <span class="settings-row-label">{$t('本地服务与连接')}</span>
-        <span class="settings-extension-desc">{$t('管理本地服务端口与局域网访问监听')}</span>
+
+    <div class="service-connection-card" data-section="service-connection">
+      <div class="service-connection-header">
+        <div class="settings-extension-copy">
+          <span class="settings-row-label">{$t('本地服务与连接')}</span>
+          <span class="settings-extension-desc">
+            {$t('切换个人内嵌服务或接入团队远端独立守护进程')}
+          </span>
+        </div>
+
+        <div class="segmented-group" role="group" aria-label={$t('本地服务与连接')}>
+          <button
+            type="button"
+            class="segmented-button"
+            class:active={serviceModeDraft === 'embedded'}
+            aria-pressed={serviceModeDraft === 'embedded'}
+            data-service-mode="embedded"
+            onclick={() => void handleSelectServiceMode('embedded')}
+          >
+            {$t('个人内嵌模式')}
+          </button>
+          <button
+            type="button"
+            class="segmented-button"
+            class:active={serviceModeDraft === 'remote'}
+            aria-pressed={serviceModeDraft === 'remote'}
+            data-service-mode="remote"
+            onclick={() => void handleSelectServiceMode('remote')}
+          >
+            {$t('团队远端模式')}
+          </button>
+        </div>
       </div>
-      <span class="settings-tag">{$t('即将推出')}</span>
+
+      {#if serviceModeDraft === 'embedded'}
+        <div class="service-status-row" data-slot="embedded-service-status">
+          <div class="service-status-meta">
+            <span
+              class="status-pill"
+              data-status={serviceConnected ? 'COMPLETED' : 'CANCELLED'}
+            >
+              {serviceConnected ? $t('已连接') : $t('未连接')}
+            </span>
+            <span class="service-url-text">
+              {serviceUrl || $t('本地内嵌服务内核')}
+            </span>
+          </div>
+          {#if !serviceConnected}
+            <button
+              type="button"
+              class="secondary-action"
+              data-action="reconnect-embedded"
+              disabled={savingConnection}
+              onclick={() => void handleSaveAndReconnect()}
+            >
+              {$t('重新连接')}
+            </button>
+          {/if}
+        </div>
+        {#if serviceConnectionError && !connectionFeedback}
+          <p class="dialog-error settings-error" role="alert">{serviceConnectionError}</p>
+        {/if}
+      {:else}
+        <div class="remote-service-form" data-slot="remote-service-form">
+          <div class="project-form-field">
+            <label class="composer-label" for="remote-server-url-input">{$t('远端服务地址')}</label>
+            <input
+              id="remote-server-url-input"
+              type="url"
+              class="settings-text-input"
+              aria-label={$t('远端服务地址')}
+              placeholder="http://127.0.0.1:8420"
+              bind:value={remoteUrlDraft}
+            />
+          </div>
+
+          <div class="project-form-field">
+            <label class="composer-label" for="remote-admin-token-input">{$t('管理员凭证')}</label>
+            <input
+              id="remote-admin-token-input"
+              type="password"
+              class="settings-text-input"
+              aria-label={$t('管理员凭证')}
+              placeholder={$t('输入服务端管理员 Bearer Token')}
+              bind:value={remoteTokenDraft}
+            />
+          </div>
+
+          <div class="inline-project-actions">
+            <button
+              type="button"
+              class="secondary-action"
+              data-action="test-connection"
+              disabled={testingConnection || savingConnection}
+              onclick={() => void handleTestRemoteConnection()}
+            >
+              {$t(testingConnection ? '正在测试…' : '测试连接')}
+            </button>
+            <button
+              type="button"
+              class="primary secondary-action"
+              data-action="save-reconnect"
+              disabled={testingConnection || savingConnection}
+              onclick={() => void handleSaveAndReconnect()}
+            >
+              {$t(savingConnection ? '正在连接…' : '保存并重连')}
+            </button>
+          </div>
+        </div>
+      {/if}
+
+      {#if connectionFeedback}
+        <p
+          class={connectionFeedback.kind === 'error' ? 'dialog-error settings-error' : 'service-feedback-success'}
+          role={connectionFeedback.kind === 'error' ? 'alert' : 'status'}
+          data-status="connection-feedback"
+        >
+          {connectionFeedback.message}
+        </p>
+      {/if}
     </div>
-    <div class="settings-row settings-extension-row">
-      <div class="settings-extension-copy">
-        <span class="settings-row-label">{$t('项目管理与默认图标')}</span>
-        <span class="settings-extension-desc">{$t('支持为悬赏所属项目配置 Emoji 或 Lucide 图标标识')}</span>
-      </div>
-      <span class="settings-tag">{$t('项目标识')}</span>
-    </div>
+
+    <ProjectManagementPanel
+      projects={bountyProjects}
+      showArchived={showArchivedProjects}
+      {desktop}
+      {mobile}
+      onToggleShowArchived={onToggleShowArchivedProjects}
+      onCreateProject={onCreateBountyProject}
+      onUpdateProject={onUpdateBountyProject}
+      onDeleteProject={onDeleteBountyProject}
+    />
+
     <div class="settings-row settings-extension-row">
       <div class="settings-extension-copy">
         <span class="settings-row-label">{$t('Agent 准入与协议')}</span>

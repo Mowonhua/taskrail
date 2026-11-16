@@ -7,11 +7,12 @@ fn main() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
         && std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc")
     {
-        // Tauri 的应用资源只附加到主程序；Rust 单元测试也使用命名导出的窗口子类 API，
+        // Rust 单元测试也使用命名导出的窗口子类 API，
         // 因此所有 Windows 链接目标都需要 Common Controls v6 的激活清单。
         println!("cargo:rustc-link-arg=/MANIFEST:EMBED");
         println!("cargo:rustc-link-arg=/MANIFESTDEPENDENCY:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'");
-        // 主程序已由 Tauri 嵌入清单；禁止链接器重复生成，保留 Tauri 原有清单与 v6 依赖。
+        // 两个二进制均链接 Tauri 应用资源中的清单；禁止重复生成 MANIFEST 资源。
         println!("cargo:rustc-link-arg-bin=taskrail=/MANIFEST:NO");
+        println!("cargo:rustc-link-arg-bin=taskrail-server=/MANIFEST:NO");
     }
 }

@@ -1,14 +1,35 @@
 <script lang="ts">
   /**
-   * 文件职责：承载 Taskrail 悬赏板工作台外壳（左侧四入口紧凑导航 + 右侧多视图主工作区）。
-   * 定义范围：顶层导航切换、主题与原生窗口材质协调、配置持久化、应用更新面板及项目图标选择器承载。
+   * 文件职责：承载 Taskrail 悬赏板工作台外壳（左侧四入口紧凑导航 + 右侧多视图主工作区 + 详情抽屉与发布弹窗）。
+   * 定义范围：顶层导航切换、同构悬赏服务连接与筛选、项目管理、主题与原生窗口材质协调、配置持久化及应用更新面板。
    */
   import { onDestroy, onMount, tick, untrack } from 'svelte';
-  import type { Action } from 'svelte/action';
   import { getVersion } from '@tauri-apps/api/app';
   import { invoke } from '@tauri-apps/api/core';
   import { listen } from '@tauri-apps/api/event';
   import { getCurrentWindow } from '@tauri-apps/api/window';
+  import {
+    createMemoryBountyClient,
+    fetchEmbeddedServerInfo,
+    HttpBountyClient,
+    type BountyApiPort,
+  } from './lib/api/bounty-client';
+  import type {
+    BountyDetail,
+    BountyProject,
+    BountyQuery,
+    BountyStatus,
+    BountyTask,
+    CreateBountyInput,
+    CreateProjectInput,
+    ServiceMode,
+    UpdateBountyInput,
+    UpdateProjectInput,
+  } from './lib/api/types';
+  import BountyCard from './lib/bounty/BountyCard.svelte';
+  import BountyComposerModal from './lib/bounty/BountyComposerModal.svelte';
+  import BountyDetailDrawer from './lib/bounty/BountyDetailDrawer.svelte';
+  import { formatServiceError, renderMarkdownAction } from './lib/bounty/helpers';
   import { BrowserFilePort } from './lib/browser-files';
   import { defaultPreferences, defaultThemeId, emptyAppConfig } from './lib/config-defaults';
   import type {
@@ -23,7 +44,6 @@
   import { AndroidFilePort } from './lib/files/android';
   import { TauriFilePort } from './lib/files/tauri';
   import { locale, setLocalePreference, t, type LocalePreference } from './lib/i18n';
-  import { renderMarkdown } from './lib/markdown';
   import { registerDrawerGestures } from './lib/mobile-navigation';
   import { platformCapabilities } from './lib/platform';
   import {
@@ -60,15 +80,23 @@
     files?: FilePort;
     updater?: UpdatePort;
     setWindowMaterial?: ApplyWindowMaterial;
+    bountyApi?: BountyApiPort;
     onready?: () => void;
   }
 
-  let { files: injectedFiles, updater: injectedUpdater, setWindowMaterial, onready }: Props = $props();
+  let {
+    files: injectedFiles,
+    updater: injectedUpdater,
+    setWindowMaterial,
+    bountyApi: injectedBountyApi,
+    onready,
+  }: Props = $props();
 
   const capabilities = platformCapabilities();
   const initialFiles = untrack(() => injectedFiles);
   const initialUpdater = untrack(() => injectedUpdater);
   const initialSetWindowMaterial = untrack(() => setWindowMaterial);
+  const initialBountyApi = untrack(() => injectedBountyApi);
 
   const files: FilePort =
     initialFiles ??
@@ -95,6 +123,12 @@
           invoke<boolean>('set_window_material', { material, theme, keepTransparentOnBlur })
       : async () => false);
 
+  const fallbackMemoryBountyClient = createMemoryBountyClient();
+  let activeBountyApi = $state<BountyApiPort>(initialBountyApi ?? fallbackMemoryBountyClient);
+  let serviceConnected = $state(true);
+  let serviceUrl = $state('');
+  let serviceConnectionError = $state('');
+
   let loading = $state(true);
   let booted = $state(false);
   let configResolved = $state(false);
@@ -107,10 +141,20 @@
   let windowPlacement = $state<WindowPlacement | undefined>(undefined);
   let activeSection = $state<WorkspaceSection>(defaultPreferences.workspaceSection ?? 'bounties');
 
-  let bountyStateFilter = $state<'all' | 'OPEN' | 'CLAIMED' | 'WAITING_INFO' | 'SUBMITTED' | 'APPROVED'>('all');
+  // 悬赏板与项目状态
+  let allBountyProjects = $state<BountyProject[]>([]);
+  let showArchivedProjects = $state(false);
+  let bountyProjectFilter = $state<string>('ALL');
+  let bountyStatusFilter = $state<'ALL' | BountyStatus>('ALL');
   let bountySearchQuery = $state('');
-  let inboxFilter = $state<'all' | 'WAITING_INFO' | 'SUBMITTED' | 'expiring'>('all');
+  let bounties = $state<BountyTask[]>([]);
+  let actionableBounties = $state<BountyTask[]>([]);
+  let inboxFilter = $state<'ALL' | 'DRAFT' | 'WAITING_INFO' | 'PENDING_ARBITRATION'>('ALL');
   let agentFilter = $state<'all' | 'idle' | 'busy'>('all');
+
+  let composerOpen = $state(false);
+  let editingBounty = $state<BountyTask | null>(null);
+  let activeDetail = $state<BountyDetail | null>(null);
 
   let iconPickerOpen = $state(false);
   let updateDialogOpen = $state(false);
@@ -142,18 +186,39 @@
   const desktopMaterialSupported =
     Boolean(initialSetWindowMaterial) || (capabilities.desktop && !files.isBrowser && !files.isMobile);
 
+  const activeBountyProjects = $derived(allBountyProjects.filter(project => !project.archived));
+  const settingsBountyProjects = $derived(
+    showArchivedProjects ? allBountyProjects : activeBountyProjects,
+  );
+  const bountyProjectsById = $derived(
+    new Map(allBountyProjects.map(project => [project.id, project])),
+  );
+
   const activeProject = $derived(
     projects.length > 0
       ? (projects.find(project => project.id === activeProjectId) ?? projects[0])
       : null,
   );
+  const selectedBountyProject = $derived(
+    bountyProjectFilter !== 'ALL' ? (bountyProjectsById.get(bountyProjectFilter) ?? null) : null,
+  );
   const currentProjectIcon = $derived(
-    activeProject ? activeProject.icon : preferences.defaultProjectIcon,
+    activeProject
+      ? activeProject.icon
+      : selectedBountyProject?.icon
+        ? selectedBountyProject.icon
+        : preferences.defaultProjectIcon,
   );
   const sidebarCollapsed = $derived(
     preferences.sidebarOpen !== undefined
       ? !preferences.sidebarOpen
       : Boolean(preferences.sidebarCollapsed),
+  );
+
+  const visibleInboxBounties = $derived(
+    actionableBounties.filter(item =>
+      inboxFilter === 'ALL' ? true : item.status === inboxFilter,
+    ),
   );
 
   function resolveWindowMaterial(
@@ -234,17 +299,9 @@
 
   const sampleCriteriaMarkdown = $derived(
     $locale === 'en'
-      ? '- [x] Passes `cargo test` & `npm test`\n- [ ] Complexity bound $O(n \\log n)$ verified\n\n$$\n\\text{Score} = \\sum_{i=1}^{k} w_i \\cdot \\mathbb{I}(\\text{check}_i)\n$$'
-      : '- [x] 通过 `cargo test` 与 `npm test`\n- [ ] 验证复杂度上界 $O(n \\log n)$\n\n$$\n\\text{Score} = \\sum_{i=1}^{k} w_i \\cdot \\mathbb{I}(\\text{check}_i)\n$$',
+      ? '- [x] Passes `cargo test` & `npm test`\n- [ ] Complexity bound $O(n \\log n)$ verified'
+      : '- [x] 通过 `cargo test` 与 `npm test`\n- [ ] 验证复杂度上界 $O(n \\log n)$',
   );
-
-  const renderMarkdownAction: Action<HTMLElement, string> = (node, source) => {
-    const update = (next: string) => {
-      node.replaceChildren(renderMarkdown(next));
-    };
-    update(source);
-    return { update };
-  };
 
   function showToast(message: string): void {
     toast = message;
@@ -254,36 +311,393 @@
     }, 4000);
   }
 
-  function snapshotConfig(): AppConfig {
+  function snapshotConfig(preferencesPatch?: Partial<Preferences>): AppConfig {
     return $state.snapshot({
       projects,
       activeProjectId,
       customThemes,
       preferences: {
         ...preferences,
+        ...(preferencesPatch ?? {}),
         workspaceSection: activeSection,
       },
       ...(windowPlacement ? { window: windowPlacement } : {}),
     });
   }
 
+  let lastConfigSaveError = '';
   let configSaveChain: Promise<void> = Promise.resolve();
-  async function persistConfig(): Promise<boolean> {
-    if (configLoadFailed) return false;
-    const config = snapshotConfig();
+  async function persistConfig(preferencesPatch?: Partial<Preferences>): Promise<boolean> {
+    if (configLoadFailed) {
+      lastConfigSaveError = configLoadError || $t('配置尚未加载成功，无法保存配置。');
+      return false;
+    }
     const task = configSaveChain.then(async () => {
+      const config = snapshotConfig(preferencesPatch);
       await files.saveConfig(config);
+      if (preferencesPatch) {
+        preferences = { ...preferences, ...preferencesPatch };
+      }
     });
     configSaveChain = task.catch(() => {});
     try {
       await task;
       configSaveFailed = false;
+      lastConfigSaveError = '';
       return true;
     } catch (error) {
       configSaveFailed = true;
-      showToast($t('配置保存失败：{error}', { error: errorMessage(error) }));
+      lastConfigSaveError = errorMessage(error);
+      showToast($t('配置保存失败：{error}', { error: lastConfigSaveError }));
       return false;
     }
+  }
+
+  let bountyListRequestSeq = 0;
+  let workspaceRequestSeq = 0;
+  let detailRequestSeq = 0;
+  let serviceReconnectSeq = 0;
+  let connectionStatusSeq = 0;
+
+  function buildBountyQuery(): BountyQuery {
+    const query: BountyQuery = {};
+    if (bountyProjectFilter !== 'ALL') {
+      query.project_id = bountyProjectFilter;
+    }
+    if (bountyStatusFilter !== 'ALL') {
+      query.status = bountyStatusFilter;
+    }
+    const trimmedQ = bountySearchQuery.trim();
+    if (trimmedQ) {
+      query.q = trimmedQ;
+    }
+    if (bountyStatusFilter === 'ALL' || bountyStatusFilter === 'DRAFT') {
+      query.include_drafts = true;
+    }
+    return query;
+  }
+
+  async function refreshBountiesOnly(): Promise<void> {
+    const statusSeq = ++connectionStatusSeq;
+    const listSeq = ++bountyListRequestSeq;
+    const serviceSeq = serviceReconnectSeq;
+    const api = activeBountyApi;
+    const query = buildBountyQuery();
+    try {
+      const [filteredList, fullList] = await Promise.all([
+        api.listBounties(query),
+        api.listBounties({ include_drafts: true }),
+      ]);
+      if (serviceSeq !== serviceReconnectSeq || api !== activeBountyApi) {
+        return;
+      }
+      if (listSeq === bountyListRequestSeq) {
+        bounties = filteredList;
+        actionableBounties = fullList.filter(
+          item =>
+            item.status === 'DRAFT' ||
+            item.status === 'WAITING_INFO' ||
+            item.status === 'PENDING_ARBITRATION',
+        );
+      }
+      if (statusSeq === connectionStatusSeq) {
+        serviceConnected = true;
+        serviceConnectionError = '';
+      }
+    } catch (error) {
+      if (
+        statusSeq === connectionStatusSeq &&
+        serviceSeq === serviceReconnectSeq &&
+        api === activeBountyApi
+      ) {
+        serviceConnected = false;
+        serviceConnectionError = formatServiceError(error);
+      }
+    }
+  }
+
+  async function refreshBountyWorkspace(
+    throwOnError = false,
+    inheritedStatusSeq?: number,
+  ): Promise<void> {
+    const workspaceSeq = ++workspaceRequestSeq;
+    const listSeq = ++bountyListRequestSeq;
+    const statusSeq = inheritedStatusSeq ?? ++connectionStatusSeq;
+    const serviceSeq = serviceReconnectSeq;
+    const api = activeBountyApi;
+    const query = buildBountyQuery();
+    try {
+      const [projectsList, filteredList, fullList] = await Promise.all([
+        api.listProjects(true),
+        api.listBounties(query),
+        api.listBounties({ include_drafts: true }),
+      ]);
+      if (
+        workspaceSeq !== workspaceRequestSeq ||
+        serviceSeq !== serviceReconnectSeq ||
+        api !== activeBountyApi
+      ) {
+        return;
+      }
+      allBountyProjects = projectsList;
+      if (
+        bountyProjectFilter !== 'ALL' &&
+        !projectsList.some(p => p.id === bountyProjectFilter && !p.archived)
+      ) {
+        bountyProjectFilter = 'ALL';
+      }
+      if (listSeq === bountyListRequestSeq) {
+        bounties = filteredList;
+        actionableBounties = fullList.filter(
+          item =>
+            item.status === 'DRAFT' ||
+            item.status === 'WAITING_INFO' ||
+            item.status === 'PENDING_ARBITRATION',
+        );
+      }
+      if (statusSeq === connectionStatusSeq) {
+        serviceConnected = true;
+        serviceConnectionError = '';
+      }
+    } catch (error) {
+      if (
+        statusSeq === connectionStatusSeq &&
+        workspaceSeq === workspaceRequestSeq &&
+        serviceSeq === serviceReconnectSeq &&
+        api === activeBountyApi
+      ) {
+        serviceConnected = false;
+        serviceConnectionError = formatServiceError(error);
+      }
+      if (throwOnError) throw error;
+    }
+  }
+
+  async function resolveBountyApiInstance(
+    prefs: Preferences,
+    preferInjected: boolean,
+  ): Promise<{ api: BountyApiPort; url: string }> {
+    if (preferInjected && initialBountyApi) {
+      return { api: initialBountyApi, url: '' };
+    }
+    if (prefs.serviceMode === 'remote' && prefs.remoteServerUrl?.trim()) {
+      const client = new HttpBountyClient(
+        prefs.remoteServerUrl,
+        prefs.remoteAdminToken ?? '',
+      );
+      return { api: client, url: client.baseUrl };
+    }
+    if (initialBountyApi) {
+      return { api: initialBountyApi, url: '' };
+    }
+    if (capabilities.desktop) {
+      const info = await fetchEmbeddedServerInfo();
+      const client = new HttpBountyClient(info.base_url, info.admin_token);
+      return { api: client, url: client.baseUrl };
+    }
+    return { api: fallbackMemoryBountyClient, url: '' };
+  }
+
+  async function reconnectBountyService(preferInjected = false, throwOnError = false): Promise<void> {
+    const serviceSeq = ++serviceReconnectSeq;
+    let statusSeq = ++connectionStatusSeq;
+    try {
+      const resolved = await resolveBountyApiInstance(preferences, preferInjected);
+      if (serviceSeq !== serviceReconnectSeq) {
+        return;
+      }
+      activeBountyApi = resolved.api;
+      serviceUrl = resolved.url;
+      statusSeq = ++connectionStatusSeq;
+      await refreshBountyWorkspace(true, statusSeq);
+    } catch (error) {
+      if (serviceSeq === serviceReconnectSeq && statusSeq === connectionStatusSeq) {
+        serviceConnected = false;
+        serviceConnectionError = formatServiceError(error);
+      }
+      if (throwOnError) throw error;
+    }
+  }
+
+  async function handleSaveServiceConnection(
+    mode: ServiceMode,
+    remoteServerUrl: string,
+    remoteAdminToken: string,
+  ): Promise<void> {
+    const persisted = await persistConfig({
+      serviceMode: mode,
+      remoteServerUrl,
+      remoteAdminToken,
+    });
+    if (!persisted) {
+      throw new Error(lastConfigSaveError || $t('配置保存失败，未应用服务连接更改。'));
+    }
+    await reconnectBountyService(false, true);
+  }
+
+  async function handleCreateBountyProject(input: CreateProjectInput): Promise<BountyProject> {
+    const created = await activeBountyApi.createProject(input);
+    await refreshBountyWorkspace();
+    return created;
+  }
+
+  async function handleUpdateBountyProject(
+    id: string,
+    input: UpdateProjectInput,
+  ): Promise<BountyProject> {
+    const updated = await activeBountyApi.updateProject(id, input);
+    await refreshBountyWorkspace();
+    return updated;
+  }
+
+  async function handleDeleteBountyProject(id: string): Promise<void> {
+    await activeBountyApi.deleteProject(id);
+    await refreshBountyWorkspace();
+  }
+
+  async function handleCreateBounty(input: CreateBountyInput): Promise<BountyTask> {
+    const created = await activeBountyApi.createBounty(input);
+    await refreshBountyWorkspace();
+    showToast(created.status === 'OPEN' ? $t('悬赏已发布') : $t('草稿已保存'));
+    return created;
+  }
+
+  async function handleUpdateDraft(
+    id: string,
+    input: UpdateBountyInput,
+    publishAfter: boolean,
+  ): Promise<BountyTask> {
+    const serviceSeq = serviceReconnectSeq;
+    const api = activeBountyApi;
+    let updated = await api.updateBounty(id, input);
+    if (publishAfter) {
+      updated = await api.publishBounty(id);
+    }
+    await refreshBountyWorkspace();
+    if (
+      activeDetail &&
+      activeDetail.bounty.id === id &&
+      serviceSeq === serviceReconnectSeq &&
+      api === activeBountyApi
+    ) {
+      const detailSeq = ++detailRequestSeq;
+      const refreshedDetail = await api.getBountyDetail(id);
+      if (
+        detailSeq === detailRequestSeq &&
+        serviceSeq === serviceReconnectSeq &&
+        api === activeBountyApi &&
+        activeDetail?.bounty.id === id
+      ) {
+        activeDetail = refreshedDetail;
+      }
+    }
+    showToast(publishAfter ? $t('悬赏已发布') : $t('草稿已保存'));
+    return updated;
+  }
+
+  async function openBountyDetail(bountyId: string): Promise<void> {
+    const detailSeq = ++detailRequestSeq;
+    const serviceSeq = serviceReconnectSeq;
+    const api = activeBountyApi;
+    try {
+      const detail = await api.getBountyDetail(bountyId);
+      if (
+        detailSeq !== detailRequestSeq ||
+        serviceSeq !== serviceReconnectSeq ||
+        api !== activeBountyApi
+      ) {
+        return;
+      }
+      activeDetail = detail;
+    } catch (error) {
+      if (
+        detailSeq !== detailRequestSeq ||
+        serviceSeq !== serviceReconnectSeq ||
+        api !== activeBountyApi
+      ) {
+        return;
+      }
+      showToast(formatServiceError(error));
+    }
+  }
+
+  async function handlePublishFromDrawer(bountyId: string): Promise<void> {
+    const detailSeq = ++detailRequestSeq;
+    const serviceSeq = serviceReconnectSeq;
+    const api = activeBountyApi;
+    await api.publishBounty(bountyId);
+    const refreshedDetail = await api.getBountyDetail(bountyId);
+    if (
+      detailSeq === detailRequestSeq &&
+      serviceSeq === serviceReconnectSeq &&
+      api === activeBountyApi
+    ) {
+      activeDetail = refreshedDetail;
+    }
+    await refreshBountyWorkspace();
+    showToast($t('悬赏已发布'));
+  }
+
+  async function handleWithdrawFromDrawer(bountyId: string): Promise<void> {
+    const detailSeq = ++detailRequestSeq;
+    const serviceSeq = serviceReconnectSeq;
+    const api = activeBountyApi;
+    try {
+      await api.withdrawBounty(bountyId);
+      const refreshedDetail = await api.getBountyDetail(bountyId);
+      if (
+        detailSeq === detailRequestSeq &&
+        serviceSeq === serviceReconnectSeq &&
+        api === activeBountyApi
+      ) {
+        activeDetail = refreshedDetail;
+      }
+      await refreshBountyWorkspace();
+      showToast($t('已撤回为草稿'));
+    } catch (error) {
+      showToast(formatServiceError(error));
+      try {
+        const refreshedDetail = await api.getBountyDetail(bountyId);
+        if (
+          detailSeq === detailRequestSeq &&
+          serviceSeq === serviceReconnectSeq &&
+          api === activeBountyApi
+        ) {
+          activeDetail = refreshedDetail;
+        }
+      } catch {
+        /* 忽略刷新详情失败 */
+      }
+      await refreshBountyWorkspace();
+      throw error;
+    }
+  }
+
+  async function handleCancelFromDrawer(bountyId: string): Promise<void> {
+    const detailSeq = ++detailRequestSeq;
+    const serviceSeq = serviceReconnectSeq;
+    const api = activeBountyApi;
+    await api.cancelBounty(bountyId);
+    const refreshedDetail = await api.getBountyDetail(bountyId);
+    if (
+      detailSeq === detailRequestSeq &&
+      serviceSeq === serviceReconnectSeq &&
+      api === activeBountyApi
+    ) {
+      activeDetail = refreshedDetail;
+    }
+    await refreshBountyWorkspace();
+    showToast($t('任务已取消'));
+  }
+
+  function openCreateComposer(): void {
+    editingBounty = null;
+    composerOpen = true;
+  }
+
+  function openEditDraftComposer(bounty: BountyTask): void {
+    editingBounty = bounty;
+    composerOpen = true;
   }
 
   async function applyVisualPreferences(): Promise<void> {
@@ -410,6 +824,7 @@
       configLoadError = '';
       applyLoadedConfig(loaded);
       await applyVisualPreferences();
+      void reconnectBountyService(true);
     } catch (error) {
       configLoadFailed = true;
       configLoadError = errorMessage(error);
@@ -542,6 +957,9 @@
     } else {
       preferences = { ...preferences, defaultProjectIcon: serialized };
     }
+    if (selectedBountyProject) {
+      void handleUpdateBountyProject(selectedBountyProject.id, { icon: serialized });
+    }
     void persistConfig();
     iconPickerOpen = false;
   }
@@ -557,6 +975,9 @@
     } else {
       const { defaultProjectIcon: _removed, ...rest } = preferences;
       preferences = rest;
+    }
+    if (selectedBountyProject) {
+      void handleUpdateBountyProject(selectedBountyProject.id, { icon: null });
     }
     void persistConfig();
     iconPickerOpen = false;
@@ -612,7 +1033,8 @@
       cleanups.push(
         registerDrawerGestures({
           isOpen: () => mobileSidebarOpen,
-          blocked: () => iconPickerOpen || updateDialogOpen,
+          blocked: () =>
+            iconPickerOpen || updateDialogOpen || composerOpen || activeDetail !== null,
           setOpen: open => {
             mobileSidebarOpen = open;
             preferences = { ...preferences, sidebarOpen: open, sidebarCollapsed: !open };
@@ -706,6 +1128,7 @@
 
       if (disposed) return;
       loading = false;
+      void reconnectBountyService(true);
       await applyVisualPreferences();
       if (disposed) return;
       configResolved = true;
@@ -919,6 +1342,26 @@
         <span>{$t('配置保存失败：{error}', { error: $t('未保存') })}</span>
         <button type="button" onclick={() => void persistConfig()}>{$t('重试配置保存')}</button>
       </div>
+    {:else if !serviceConnected && serviceConnectionError}
+      <div class="status-banner" role="alert" data-status="service-connection-failed">
+        <span>{$t('悬赏服务连接失败：{error}', { error: serviceConnectionError })}</span>
+        <div class="status-banner-actions">
+          <button
+            type="button"
+            data-action="retry-service-connection"
+            onclick={() => void reconnectBountyService()}
+          >
+            {$t('重试连接')}
+          </button>
+          <button
+            type="button"
+            data-action="open-service-settings"
+            onclick={() => selectSection('settings')}
+          >
+            {$t('前往设置')}
+          </button>
+        </div>
+      </div>
     {/if}
 
     <div class="workspace-body" data-active-section={activeSection}>
@@ -960,90 +1403,113 @@
                 }}
               >
                 <ProjectIcon icon={currentProjectIcon} />
-                <span>{activeProject?.name ?? $t('全部项目')}</span>
+                <span>{activeProject?.name ?? selectedBountyProject?.name ?? $t('全部项目')}</span>
               </button>
-              <button type="button" class="primary" disabled title={$t('发布悬赏')}>
+              <button
+                type="button"
+                class="primary"
+                data-action="open-composer"
+                title={$t('发布悬赏')}
+                onclick={openCreateComposer}
+              >
                 + {$t('发布悬赏')}
               </button>
             </div>
           </header>
 
           <div class="workspace-toolbar" data-slot="bounty-toolbar">
-            <div class="filter-pills" role="group" aria-label={$t('全部状态')}>
-              {#each [
-                { id: 'all', label: $t('全部状态') },
-                { id: 'OPEN', label: $t('悬赏中') },
-                { id: 'CLAIMED', label: $t('进行中') },
-                { id: 'WAITING_INFO', label: $t('待补充信息') },
-                { id: 'SUBMITTED', label: $t('待验收') },
-                { id: 'APPROVED', label: $t('已通过') },
-              ] as item (item.id)}
-                <button
-                  type="button"
-                  class="filter-pill"
-                  class:active={bountyStateFilter === item.id}
-                  onclick={() => {
-                    bountyStateFilter = item.id as typeof bountyStateFilter;
-                  }}
-                >
-                  {item.label}
-                </button>
-              {/each}
+            <div class="toolbar-filters-group">
+              <select
+                id="bounty-project-filter"
+                class="toolbar-project-select"
+                data-filter="project"
+                aria-label={$t('按项目筛选')}
+                value={bountyProjectFilter}
+                onchange={event => {
+                  bountyProjectFilter = (event.currentTarget as HTMLSelectElement).value;
+                  void refreshBountiesOnly();
+                }}
+              >
+                <option value="ALL">{$t('全部项目')}</option>
+                {#each activeBountyProjects as project (project.id)}
+                  <option value={project.id}>{project.name}</option>
+                {/each}
+              </select>
+
+              <div class="filter-pills" role="group" aria-label={$t('全部状态')}>
+                {#each [
+                  { id: 'ALL', label: $t('全部状态') },
+                  { id: 'DRAFT', label: $t('[草稿]') },
+                  { id: 'OPEN', label: $t('待接单') },
+                  { id: 'IN_PROGRESS', label: $t('执行中') },
+                  { id: 'WAITING_INFO', label: $t('待回复') },
+                  { id: 'PENDING_ARBITRATION', label: $t('待仲裁') },
+                  { id: 'COMPLETED', label: $t('已完成') },
+                  { id: 'CANCELLED', label: $t('已取消') },
+                ] as item (item.id)}
+                  <button
+                    type="button"
+                    class="filter-pill"
+                    class:active={bountyStatusFilter === item.id}
+                    data-status-filter={item.id}
+                    onclick={() => {
+                      bountyStatusFilter = item.id as typeof bountyStatusFilter;
+                      void refreshBountiesOnly();
+                    }}
+                  >
+                    {item.label}
+                  </button>
+                {/each}
+              </div>
             </div>
 
             <div class="toolbar-search">
               <input
                 type="search"
                 class="toolbar-search-input"
+                data-filter="search"
                 aria-label={$t('搜索悬赏标题、编号或标签…')}
                 placeholder={$t('搜索悬赏标题、编号或标签…')}
-                bind:value={bountySearchQuery}
+                value={bountySearchQuery}
+                oninput={event => {
+                  bountySearchQuery = (event.currentTarget as HTMLInputElement).value;
+                  void refreshBountiesOnly();
+                }}
               />
             </div>
           </div>
 
           <div class="skeleton-stage" data-slot="bounty-list-region">
-            <div class="empty-state-card">
-              <div class="empty-state-icon" aria-hidden="true">
-                <ProjectIcon icon={currentProjectIcon} large />
-              </div>
-              <h2 class="empty-state-title">{$t('暂无悬赏任务')}</h2>
-              <p class="empty-state-copy">
-                {$t('发布新悬赏后，将在这里按项目与状态筛选浏览任务详情、验收条件和交付记录。')}
-              </p>
-            </div>
-
-            <div class="skeleton-grid">
-              <article class="skeleton-card">
-                <span class="skeleton-badge">{$t('任务流转')}</span>
-                <h3>{$t('生命周期状态流转')}</h3>
-                <p>{$t('支持从悬赏发布、认领执行、提问澄清、提交交付到验收通过或驳回重开的完整流转及超时自动释放。')}</p>
-              </article>
-
-              <article class="skeleton-card">
-                <span class="skeleton-badge">{$t('排版与公式')}</span>
-                <h3>{$t('结构化交付与验收')}</h3>
-                <div class="markdown-preview-sample" use:renderMarkdownAction={sampleCriteriaMarkdown}></div>
-              </article>
-
-              <article class="skeleton-card">
-                <span class="skeleton-badge">{$t('项目图标')}</span>
-                <h3>{$t('项目归属与图标标识')}</h3>
-                <p>{$t('通过卡片与详情头部标识所属项目，侧栏保持极简顶层入口。')}</p>
-                <div class="skeleton-card-footer">
-                  <button
-                    type="button"
-                    class="secondary-action"
-                    onclick={() => {
-                      iconPickerOpen = true;
-                    }}
-                  >
-                    <ProjectIcon icon={currentProjectIcon} />
-                    <span>{$t('选择项目图标')}</span>
-                  </button>
+            {#if bounties.length === 0}
+              <div class="empty-state-card">
+                <div class="empty-state-icon" aria-hidden="true">
+                  <ProjectIcon icon={currentProjectIcon} large />
                 </div>
-              </article>
-            </div>
+                <h2 class="empty-state-title">{$t('暂无悬赏任务')}</h2>
+                <p class="empty-state-copy">
+                  {$t('发布新悬赏后，将在这里按项目与状态筛选浏览任务详情、验收条件和交付记录。')}
+                </p>
+                <div class="markdown-preview-sample" use:renderMarkdownAction={sampleCriteriaMarkdown}></div>
+                <button
+                  type="button"
+                  class="primary"
+                  data-action="empty-post-bounty"
+                  onclick={openCreateComposer}
+                >
+                  + {$t('发布悬赏')}
+                </button>
+              </div>
+            {:else}
+              <div class="bounty-card-grid" data-slot="bounty-card-grid">
+                {#each bounties as bounty (bounty.id)}
+                  <BountyCard
+                    {bounty}
+                    project={bountyProjectsById.get(bounty.project_id)}
+                    onSelect={id => void openBountyDetail(id)}
+                  />
+                {/each}
+              </div>
+            {/if}
           </div>
         </section>
       {:else if activeSection === 'inbox'}
@@ -1058,15 +1524,16 @@
           <div class="workspace-toolbar" data-slot="inbox-toolbar">
             <div class="filter-pills" role="group" aria-label={$t('待我处理')}>
               {#each [
-                { id: 'all', label: $t('全部待办项') },
-                { id: 'WAITING_INFO', label: $t('待回答提问') },
-                { id: 'SUBMITTED', label: $t('待验收交付') },
-                { id: 'expiring', label: $t('即将超时') },
+                { id: 'ALL', label: $t('全部待办') },
+                { id: 'DRAFT', label: $t('待发布草稿') },
+                { id: 'WAITING_INFO', label: $t('待回复') },
+                { id: 'PENDING_ARBITRATION', label: $t('待仲裁') },
               ] as item (item.id)}
                 <button
                   type="button"
                   class="filter-pill"
                   class:active={inboxFilter === item.id}
+                  data-inbox-filter={item.id}
                   onclick={() => {
                     inboxFilter = item.id as typeof inboxFilter;
                   }}
@@ -1078,26 +1545,24 @@
           </div>
 
           <div class="skeleton-stage" data-slot="inbox-region">
-            <div class="empty-state-card">
-              <h2 class="empty-state-title">{$t('当前没有待处理事项')}</h2>
-              <p class="empty-state-copy">
-                {$t('当 Agent 请求补充信息（租约计时暂停）或提交交付等待验收时，相关任务会自动汇聚到此视图。')}
-              </p>
-            </div>
-
-            <div class="skeleton-grid two-columns">
-              <article class="skeleton-card">
-                <span class="skeleton-badge">{$t('提问澄清')}</span>
-                <h3>{$t('提问期间租约暂停')}</h3>
-                <p>{$t('Agent 请求补充信息期间自动暂停租约倒计时，回复后恢复计时。')}</p>
-              </article>
-
-              <article class="skeleton-card">
-                <span class="skeleton-badge">{$t('待验收')}</span>
-                <h3>{$t('交付验收与重开')}</h3>
-                <p>{$t('支持一键通过验收或附带反馈意见驳回重开。')}</p>
-              </article>
-            </div>
+            {#if visibleInboxBounties.length === 0}
+              <div class="empty-state-card">
+                <h2 class="empty-state-title">{$t('当前没有待处理事项')}</h2>
+                <p class="empty-state-copy">
+                  {$t('当 Agent 请求补充信息（租约计时暂停）或提交交付等待验收时，相关任务会自动汇聚到此视图。')}
+                </p>
+              </div>
+            {:else}
+              <div class="bounty-card-grid" data-slot="inbox-card-grid">
+                {#each visibleInboxBounties as bounty (bounty.id)}
+                  <BountyCard
+                    {bounty}
+                    project={bountyProjectsById.get(bounty.project_id)}
+                    onSelect={id => void openBountyDetail(id)}
+                  />
+                {/each}
+              </div>
+            {/if}
           </div>
         </section>
       {:else if activeSection === 'agents'}
@@ -1174,6 +1639,13 @@
               {desktopMaterialSupported}
               {importingTheme}
               {themeError}
+              {serviceConnected}
+              {serviceUrl}
+              {serviceConnectionError}
+              bountyProjects={settingsBountyProjects}
+              {showArchivedProjects}
+              desktop={capabilities.desktop}
+              mobile={Boolean(files.isMobile)}
               onSelectLanguage={handleSelectLanguage}
               onSelectThemeId={handleSelectThemeId}
               onSelectThemeMode={handleSelectThemeMode}
@@ -1185,12 +1657,51 @@
               onImportThemeFile={handleImportThemeFile}
               onExportThemeTemplate={handleExportThemeTemplate}
               onRemoveActiveTheme={handleRemoveActiveTheme}
+              onSaveServiceConnection={handleSaveServiceConnection}
+              onToggleShowArchivedProjects={show => {
+                showArchivedProjects = show;
+              }}
+              onCreateBountyProject={handleCreateBountyProject}
+              onUpdateBountyProject={handleUpdateBountyProject}
+              onDeleteBountyProject={handleDeleteBountyProject}
             />
           </div>
         </section>
       {/if}
     </div>
   </main>
+
+  {#if activeDetail}
+    <BountyDetailDrawer
+      detail={activeDetail}
+      project={bountyProjectsById.get(activeDetail.bounty.project_id)}
+      onClose={() => {
+        detailRequestSeq += 1;
+        activeDetail = null;
+      }}
+      onEditDraft={openEditDraftComposer}
+      onPublish={handlePublishFromDrawer}
+      onWithdraw={handleWithdrawFromDrawer}
+      onCancel={handleCancelFromDrawer}
+    />
+  {/if}
+
+  {#if composerOpen}
+    <BountyComposerModal
+      projects={allBountyProjects}
+      initialProjectId={bountyProjectFilter !== 'ALL' ? bountyProjectFilter : null}
+      {editingBounty}
+      desktop={capabilities.desktop}
+      mobile={Boolean(files.isMobile)}
+      onClose={() => {
+        composerOpen = false;
+        editingBounty = null;
+      }}
+      onCreateProject={handleCreateBountyProject}
+      onCreateBounty={handleCreateBounty}
+      onUpdateDraft={handleUpdateDraft}
+    />
+  {/if}
 
   {#if iconPickerOpen}
     <div
@@ -1215,7 +1726,7 @@
           </button>
         </div>
         <ProjectIconPicker
-          projectName={activeProject?.name ?? $t('全部项目')}
+          projectName={activeProject?.name ?? selectedBountyProject?.name ?? $t('全部项目')}
           icon={currentProjectIcon}
           mobile={Boolean(files.isMobile)}
           onSelect={handlePickProjectIcon}

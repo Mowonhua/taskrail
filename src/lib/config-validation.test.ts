@@ -178,4 +178,69 @@ describe('应用配置校验', () => {
       expect(() => validateAppConfig(item)).toThrow('STATE_CONFIG_INVALID');
     }
   });
+
+  it('校验悬赏服务连接模式、远程服务地址与管理员令牌', () => {
+    expect(validateAppConfig({ projects: [] })?.preferences.serviceMode).toBe('embedded');
+
+    for (const serviceMode of ['embedded', 'remote'] as const) {
+      expect(
+        validateAppConfig({ projects: [], preferences: { serviceMode } })?.preferences.serviceMode,
+      ).toBe(serviceMode);
+    }
+
+    expect(
+      validateAppConfig({
+        projects: [],
+        preferences: {
+          serviceMode: 'remote',
+          remoteServerUrl: '  https://bounty.example.com:8420///  ',
+          remoteAdminToken: '  secret-token-123  ',
+        },
+      })?.preferences,
+    ).toMatchObject({
+      serviceMode: 'remote',
+      remoteServerUrl: 'https://bounty.example.com:8420',
+      remoteAdminToken: 'secret-token-123',
+    });
+
+    expect(
+      validateAppConfig({
+        projects: [],
+        preferences: {
+          remoteServerUrl: 'http://127.0.0.1:8420/subpath/',
+          remoteAdminToken: '',
+        },
+      })?.preferences,
+    ).toMatchObject({
+      remoteServerUrl: 'http://127.0.0.1:8420/subpath',
+      remoteAdminToken: '',
+    });
+
+    expect(
+      validateAppConfig({
+        projects: [],
+        preferences: { remoteServerUrl: '   ' },
+      })?.preferences.remoteServerUrl,
+    ).toBe('');
+
+    for (const badPreferences of [
+      { serviceMode: 'standalone' },
+      { serviceMode: 123 },
+      { serviceMode: null },
+      { remoteServerUrl: 'ftp://example.com' },
+      { remoteServerUrl: 'javascript:alert(1)' },
+      { remoteServerUrl: 'ws://127.0.0.1:8420' },
+      { remoteServerUrl: 'not-a-url' },
+      { remoteServerUrl: 'http://' },
+      { remoteServerUrl: 42 },
+      { remoteServerUrl: null },
+      { remoteAdminToken: 123 },
+      { remoteAdminToken: null },
+      { remoteAdminToken: {} },
+    ]) {
+      expect(() => validateAppConfig({ projects: [], preferences: badPreferences })).toThrow(
+        'STATE_CONFIG_INVALID',
+      );
+    }
+  });
 });

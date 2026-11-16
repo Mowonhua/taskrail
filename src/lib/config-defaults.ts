@@ -22,6 +22,7 @@ export const defaultPreferences: Preferences = {
   sidebarOpen: true,
   sidebarCollapsed: false,
   workspaceSection: 'bounties',
+  serviceMode: 'embedded',
   autoCheckUpdates: true,
   autoDownloadUpdates: true,
 };

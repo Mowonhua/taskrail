@@ -2,6 +2,8 @@
  * 文件职责：验证应用持久化配置的边界与字段契约。
  * 定义范围：项目元数据（含项目图标）、自定义主题、界面/排版/工作台分区偏好与桌面窗口坐标校验。
  */
+import { normalizeServerUrl } from './api/bounty-client';
+import type { ServiceMode } from './api/types';
 import { defaultPreferences, defaultThemeId } from './config-defaults';
 import type { AppConfig, Preferences, Project, WindowPlacement, WorkspaceSection } from './contracts';
 import { translate } from './i18n';
@@ -10,6 +12,7 @@ import { parseProjectIcon, serializeProjectIcon } from './project-icons';
 import { builtInThemes, validateTheme, type ThemeDefinition, type ThemeMode } from './themes';
 
 const WORKSPACE_SECTIONS = new Set<WorkspaceSection>(['bounties', 'inbox', 'agents', 'settings']);
+const SERVICE_MODES = new Set<ServiceMode>(['embedded', 'remote']);
 
 function invalidConfig(): never {
   throw new Error(
@@ -138,7 +141,7 @@ function validateSidebarOpen(value: Record<string, unknown>): boolean {
   return defaultPreferences.sidebarOpen ?? true;
 }
 
-function validatePreferences(value: unknown, customThemes: ThemeDefinition[]): Preferences {
+export function validatePreferences(value: unknown, customThemes: ThemeDefinition[] = []): Preferences {
   if (value === undefined) return { ...defaultPreferences };
   if (!isRecord(value)) invalidConfig();
   const locale = validateLocalePreference(value);
@@ -157,6 +160,33 @@ function validatePreferences(value: unknown, customThemes: ThemeDefinition[]): P
     !WORKSPACE_SECTIONS.has(workspaceSectionValue as WorkspaceSection)
   ) {
     invalidConfig();
+  }
+
+  const serviceModeValue =
+    value.serviceMode === undefined ? (defaultPreferences.serviceMode ?? 'embedded') : value.serviceMode;
+  if (typeof serviceModeValue !== 'string' || !SERVICE_MODES.has(serviceModeValue as ServiceMode)) {
+    invalidConfig();
+  }
+
+  let remoteServerUrl: string | undefined;
+  if (value.remoteServerUrl !== undefined) {
+    if (typeof value.remoteServerUrl !== 'string') invalidConfig();
+    const trimmed = value.remoteServerUrl.trim();
+    if (trimmed === '') {
+      remoteServerUrl = '';
+    } else {
+      try {
+        remoteServerUrl = normalizeServerUrl(trimmed);
+      } catch {
+        invalidConfig();
+      }
+    }
+  }
+
+  let remoteAdminToken: string | undefined;
+  if (value.remoteAdminToken !== undefined) {
+    if (typeof value.remoteAdminToken !== 'string') invalidConfig();
+    remoteAdminToken = value.remoteAdminToken.trim();
   }
 
   let defaultProjectIcon: string | undefined;
@@ -188,6 +218,9 @@ function validatePreferences(value: unknown, customThemes: ThemeDefinition[]): P
     sidebarCollapsed: !sidebarOpen,
     workspaceSection: workspaceSectionValue as WorkspaceSection,
     ...(defaultProjectIcon !== undefined ? { defaultProjectIcon } : {}),
+    serviceMode: serviceModeValue as ServiceMode,
+    ...(remoteServerUrl !== undefined ? { remoteServerUrl } : {}),
+    ...(remoteAdminToken !== undefined ? { remoteAdminToken } : {}),
     autoCheckUpdates: booleanOrDefault(value.autoCheckUpdates, defaultPreferences.autoCheckUpdates ?? true),
     autoDownloadUpdates: booleanOrDefault(
       value.autoDownloadUpdates,

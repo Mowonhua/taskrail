@@ -122,7 +122,7 @@
   .download-label {flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .download-size {color:var(--ink);font-variant-numeric:tabular-nums;white-space:nowrap}
   .download-speed {color:var(--accent);font-variant-numeric:tabular-nums;white-space:nowrap}
-  .download-bar {height:6px;border-radius:var(--control-radius,6px);background:var(--field-background,var(--surface-alt));box-shadow:var(--field-shadow,none);overflow:hidden}
+  .download-bar {height:6px;border-radius:var(--control-radius,6px);background:var(--field-background,var(--sidebar));box-shadow:var(--field-shadow,none);overflow:hidden}
   .download-bar-fill {display:block;height:100%;border-radius:inherit;background:var(--accent);transition:width .2s ease}
   /* 服务器未给出总大小时进度不可定量，用往返滑动表达进行中状态。 */
   .download-bar-pending {animation:download-pending 1.2s ease-in-out infinite alternate}
@@ -147,8 +147,8 @@
   .release-notes-body :global(a) {color:var(--accent);text-decoration:none}
   .release-notes-body :global(a:hover) {text-decoration:underline;text-underline-offset:3px}
   .release-notes-body :global(:is(strong,em)) {color:var(--ink)}
-  .release-notes-body :global(code) {font-family:ui-monospace,Consolas,monospace;font-size:11px;background:var(--surface-alt);border-radius:4px;padding:1px 4px}
-  .release-notes-body :global(pre) {margin:0 0 8px;padding:10px 12px;overflow:auto;background:var(--surface-alt);border-radius:var(--control-radius,6px)}
+  .release-notes-body :global(code) {font-family:ui-monospace,Consolas,monospace;font-size:11px;background:var(--code);border-radius:4px;padding:1px 4px}
+  .release-notes-body :global(pre) {margin:0 0 8px;padding:10px 12px;overflow:auto;background:var(--code);border-radius:var(--control-radius,6px)}
   .release-notes-body :global(pre code) {padding:0;background:none}
   .release-notes-body :global(blockquote) {margin:0 0 8px;padding-left:10px;border-left:2px solid var(--line)}
   .release-notes-body :global(hr) {border:0;border-top:1px solid var(--line);margin:12px 0}

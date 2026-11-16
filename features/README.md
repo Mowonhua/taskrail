@@ -28,3 +28,5 @@
 | 项目导航 | [navigation.md](navigation.md) | 项目标识与图标选择器 |
 | 行内 Markdown | [markdown-inline.md](markdown-inline.md) | 行内语法、KaTeX 公式与删除线定界符判定 |
 | 阅读排版 | [reading.md](reading.md) | 正文字体、字号、宽度与段首缩进等本机阅读参数 |
+| 服务内核 | [service-kernel.md](service-kernel.md) | 同构服务内核、SQLite 迁移、Bearer 鉴权与前端远端/内嵌切换 |
+| 悬赏板 | [bounty-board.md](bounty-board.md) | 项目管理、内联创建、悬赏草稿、发布与未接取撤回生命周期 |
