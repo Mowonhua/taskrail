@@ -8,6 +8,9 @@ import {
   ServiceApiError,
   type AdminStatus,
   type AgentDraftPolicy,
+  type AgentFilter,
+  type AgentSubscriptionsInput,
+  type AgentSummary,
   type AssigneeMode,
   type BountyDetail,
   type BountyDifficulty,
@@ -16,11 +19,20 @@ import {
   type BountyQuery,
   type BountyStatus,
   type BountyTask,
+  type CreatedInviteToken,
   type CreateBountyInput,
+  type CreateInviteTokenInput,
   type CreateProjectInput,
   type EmbeddedServerInfo,
+  type InviteTokenSummary,
+  type OnboardingSettings,
+  type RegisterAgentInput,
+  type RegisteredAgentResult,
   type ServerHealth,
+  type SkillDocument,
+  type UpdateAgentInput,
   type UpdateBountyInput,
+  type UpdateOnboardingInput,
   type UpdateProjectInput,
 } from './types';
 
@@ -28,6 +40,12 @@ const VALID_DIFFICULTIES = new Set<BountyDifficulty>(['C', 'B', 'A', 'S']);
 const VALID_ASSIGNEE_MODES = new Set<AssigneeMode>(['any', 'min_tier', 'specific']);
 const VALID_AGENT_POLICIES = new Set<AgentDraftPolicy>(['open', 'draft']);
 const CANCELLABLE_STATUSES = new Set<BountyStatus>(['DRAFT', 'OPEN', 'WAITING_INFO']);
+const ACTIVE_LEASE_STATUSES = new Set<BountyStatus>([
+  'IN_PROGRESS',
+  'WAITING_INFO',
+  'PENDING_ARBITRATION',
+]);
+const DEFAULT_SKILL_BASE_URL = 'http://127.0.0.1:8420';
 
 export interface BountyApiPort {
   health(): Promise<ServerHealth>;
@@ -44,10 +62,55 @@ export interface BountyApiPort {
   publishBounty(id: string): Promise<BountyTask>;
   withdrawBounty(id: string): Promise<BountyTask>;
   cancelBounty(id: string): Promise<BountyTask>;
+  getOnboardingSettings(): Promise<OnboardingSettings>;
+  updateOnboardingSettings(input: UpdateOnboardingInput): Promise<OnboardingSettings>;
+  listInviteTokens(): Promise<InviteTokenSummary[]>;
+  createInviteToken(input?: CreateInviteTokenInput): Promise<CreatedInviteToken>;
+  revokeInviteToken(id: string): Promise<InviteTokenSummary>;
+  getSkillMarkdown(options?: { baseUrl?: string; inviteToken?: string }): Promise<SkillDocument>;
+  listAgents(filter?: AgentFilter): Promise<AgentSummary[]>;
+  disableAgent(id: string): Promise<AgentSummary>;
+  enableAgent(id: string): Promise<AgentSummary>;
+  revokeAgent(id: string): Promise<AgentSummary>;
+}
+
+export interface AgentApiPort {
+  getPublicSkillMarkdown(options?: {
+    inviteToken?: string;
+    bearerInviteToken?: string;
+  }): Promise<string>;
+  registerAgent(
+    input: RegisterAgentInput,
+    options?: { bearerInviteToken?: string },
+  ): Promise<RegisteredAgentResult>;
+  getMe(): Promise<AgentSummary>;
+  updateMe(input: UpdateAgentInput): Promise<AgentSummary>;
+  updateSubscriptions(input: AgentSubscriptionsInput): Promise<AgentSummary>;
+  listProjects(): Promise<BountyProject[]>;
+  listBounties(query?: BountyQuery): Promise<BountyTask[]>;
+  getBountyDetail(id: string): Promise<BountyDetail>;
 }
 
 export interface MemoryBountyClient extends BountyApiPort {
   simulateClaim(id: string, agentId: string): Promise<BountyTask>;
+  registerAgent(
+    input: RegisterAgentInput,
+    options?: { bearerInviteToken?: string },
+  ): Promise<RegisteredAgentResult>;
+  getPublicSkillMarkdown(options?: {
+    inviteToken?: string;
+    bearerInviteToken?: string;
+    baseUrl?: string;
+  }): Promise<string>;
+  agentGetMe(apiKey: string): Promise<AgentSummary>;
+  agentUpdateMe(apiKey: string, input: UpdateAgentInput): Promise<AgentSummary>;
+  agentUpdateSubscriptions(
+    apiKey: string,
+    input: AgentSubscriptionsInput,
+  ): Promise<AgentSummary>;
+  agentListProjects(apiKey: string): Promise<BountyProject[]>;
+  agentListBounties(apiKey: string, query?: BountyQuery): Promise<BountyTask[]>;
+  agentGetBountyDetail(apiKey: string, id: string): Promise<BountyDetail>;
 }
 
 /** 校验 http/https 服务地址并去除末尾斜杠，避免路径拼接或 URL 序列化产生额外斜杠。 */
@@ -70,6 +133,23 @@ export function normalizeServerUrl(raw: string): string {
 
 export async function fetchEmbeddedServerInfo(): Promise<EmbeddedServerInfo> {
   return await invoke<EmbeddedServerInfo>('get_embedded_server_info');
+}
+
+function buildBountyQueryString(query?: BountyQuery): string {
+  const params = new URLSearchParams();
+  if (query?.project_id !== undefined) {
+    params.set('project_id', query.project_id);
+  }
+  if (query?.status !== undefined) {
+    params.set('status', query.status);
+  }
+  if (query?.q !== undefined && query.q !== '') {
+    params.set('q', query.q);
+  }
+  if (query?.include_drafts) {
+    params.set('include_drafts', 'true');
+  }
+  return params.toString();
 }
 
 export class HttpBountyClient implements BountyApiPort {
@@ -121,20 +201,7 @@ export class HttpBountyClient implements BountyApiPort {
   }
 
   async listBounties(query?: BountyQuery): Promise<BountyTask[]> {
-    const params = new URLSearchParams();
-    if (query?.project_id !== undefined) {
-      params.set('project_id', query.project_id);
-    }
-    if (query?.status !== undefined) {
-      params.set('status', query.status);
-    }
-    if (query?.q !== undefined && query.q !== '') {
-      params.set('q', query.q);
-    }
-    if (query?.include_drafts) {
-      params.set('include_drafts', 'true');
-    }
-    const qs = params.toString();
+    const qs = buildBountyQueryString(query);
     return await this.request<BountyTask[]>('GET', qs ? `/api/v1/bounties?${qs}` : '/api/v1/bounties');
   }
 
@@ -162,6 +229,84 @@ export class HttpBountyClient implements BountyApiPort {
 
   async cancelBounty(id: string): Promise<BountyTask> {
     return await this.request<BountyTask>('POST', `/api/v1/bounties/${encodeURIComponent(id)}/cancel`);
+  }
+
+  async getOnboardingSettings(): Promise<OnboardingSettings> {
+    return await this.request<OnboardingSettings>('GET', '/api/v1/admin/onboarding');
+  }
+
+  async updateOnboardingSettings(input: UpdateOnboardingInput): Promise<OnboardingSettings> {
+    return await this.request<OnboardingSettings>('PATCH', '/api/v1/admin/onboarding', {
+      body: input,
+    });
+  }
+
+  async listInviteTokens(): Promise<InviteTokenSummary[]> {
+    return await this.request<InviteTokenSummary[]>('GET', '/api/v1/admin/invite-tokens');
+  }
+
+  async createInviteToken(input?: CreateInviteTokenInput): Promise<CreatedInviteToken> {
+    return await this.request<CreatedInviteToken>('POST', '/api/v1/admin/invite-tokens', {
+      body: input ?? {},
+    });
+  }
+
+  async revokeInviteToken(id: string): Promise<InviteTokenSummary> {
+    return await this.request<InviteTokenSummary>(
+      'POST',
+      `/api/v1/admin/invite-tokens/${encodeURIComponent(id)}/revoke`,
+    );
+  }
+
+  async getSkillMarkdown(options?: {
+    baseUrl?: string;
+    inviteToken?: string;
+  }): Promise<SkillDocument> {
+    const params = new URLSearchParams();
+    if (options?.baseUrl !== undefined && options.baseUrl !== '') {
+      params.set('base_url', options.baseUrl);
+    }
+    if (options?.inviteToken !== undefined && options.inviteToken !== '') {
+      params.set('invite_token', options.inviteToken);
+    }
+    const qs = params.toString();
+    return await this.request<SkillDocument>(
+      'GET',
+      qs ? `/api/v1/admin/skill.md?${qs}` : '/api/v1/admin/skill.md',
+    );
+  }
+
+  async listAgents(filter?: AgentFilter): Promise<AgentSummary[]> {
+    const params = new URLSearchParams();
+    if (filter?.status !== undefined) {
+      params.set('status', filter.status);
+    }
+    if (filter?.activity !== undefined) {
+      params.set('activity', filter.activity);
+    }
+    const qs = params.toString();
+    return await this.request<AgentSummary[]>('GET', qs ? `/api/v1/agents?${qs}` : '/api/v1/agents');
+  }
+
+  async disableAgent(id: string): Promise<AgentSummary> {
+    return await this.request<AgentSummary>(
+      'POST',
+      `/api/v1/agents/${encodeURIComponent(id)}/disable`,
+    );
+  }
+
+  async enableAgent(id: string): Promise<AgentSummary> {
+    return await this.request<AgentSummary>(
+      'POST',
+      `/api/v1/agents/${encodeURIComponent(id)}/enable`,
+    );
+  }
+
+  async revokeAgent(id: string): Promise<AgentSummary> {
+    return await this.request<AgentSummary>(
+      'POST',
+      `/api/v1/agents/${encodeURIComponent(id)}/revoke`,
+    );
   }
 
   private async request<T>(
@@ -195,6 +340,125 @@ export class HttpBountyClient implements BountyApiPort {
   }
 }
 
+export class HttpAgentClient implements AgentApiPort {
+  readonly baseUrl: string;
+  private readonly apiKey: string;
+  private readonly fetchImpl: typeof fetch;
+
+  constructor(baseUrl: string, apiKey = '', fetchImpl?: typeof fetch) {
+    this.baseUrl = normalizeServerUrl(baseUrl);
+    this.apiKey = apiKey;
+    this.fetchImpl = fetchImpl
+      ? (input, init) => fetchImpl(input, init)
+      : (input, init) => globalThis.fetch(input, init);
+  }
+
+  async getPublicSkillMarkdown(options?: {
+    inviteToken?: string;
+    bearerInviteToken?: string;
+  }): Promise<string> {
+    const params = new URLSearchParams();
+    if (options?.inviteToken !== undefined && options.inviteToken !== '') {
+      params.set('invite_token', options.inviteToken);
+    }
+    const qs = params.toString();
+    const headers: Record<string, string> = {};
+    if (options?.bearerInviteToken !== undefined && options.bearerInviteToken !== '') {
+      headers.Authorization = `Bearer ${options.bearerInviteToken}`;
+    }
+    const response = await this.fetchImpl(`${this.baseUrl}${qs ? `/skill.md?${qs}` : '/skill.md'}`, {
+      method: 'GET',
+      headers,
+    });
+    if (!response.ok) {
+      await throwResponseError(response);
+    }
+    return await response.text();
+  }
+
+  async registerAgent(
+    input: RegisterAgentInput,
+    options?: { bearerInviteToken?: string },
+  ): Promise<RegisteredAgentResult> {
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+    if (options?.bearerInviteToken !== undefined && options.bearerInviteToken !== '') {
+      headers.Authorization = `Bearer ${options.bearerInviteToken}`;
+    }
+    const response = await this.fetchImpl(`${this.baseUrl}/api/v1/agents/register`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(input),
+    });
+    if (!response.ok) {
+      await throwResponseError(response);
+    }
+    return (await response.json()) as RegisteredAgentResult;
+  }
+
+  async getMe(): Promise<AgentSummary> {
+    return await this.request<AgentSummary>('GET', '/api/v1/agent/me');
+  }
+
+  async updateMe(input: UpdateAgentInput): Promise<AgentSummary> {
+    return await this.request<AgentSummary>('PATCH', '/api/v1/agent/me', { body: input });
+  }
+
+  async updateSubscriptions(input: AgentSubscriptionsInput): Promise<AgentSummary> {
+    return await this.request<AgentSummary>('PUT', '/api/v1/agent/me/subscriptions', {
+      body: input,
+    });
+  }
+
+  async listProjects(): Promise<BountyProject[]> {
+    return await this.request<BountyProject[]>('GET', '/api/v1/agent/projects');
+  }
+
+  async listBounties(query?: BountyQuery): Promise<BountyTask[]> {
+    const qs = buildBountyQueryString(query);
+    return await this.request<BountyTask[]>(
+      'GET',
+      qs ? `/api/v1/agent/bounties?${qs}` : '/api/v1/agent/bounties',
+    );
+  }
+
+  async getBountyDetail(id: string): Promise<BountyDetail> {
+    return await this.request<BountyDetail>(
+      'GET',
+      `/api/v1/agent/bounties/${encodeURIComponent(id)}`,
+    );
+  }
+
+  private async request<T>(method: string, path: string, options?: { body?: unknown }): Promise<T> {
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${this.apiKey}`,
+    };
+    if (options?.body !== undefined) {
+      headers['Content-Type'] = 'application/json';
+    }
+    const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
+      method,
+      headers,
+      ...(options?.body !== undefined ? { body: JSON.stringify(options.body) } : {}),
+    });
+    if (!response.ok) {
+      await throwResponseError(response);
+    }
+    return (await response.json()) as T;
+  }
+}
+
+export async function registerAgent(
+  baseUrl: string,
+  input: RegisterAgentInput,
+  options?: { bearerInviteToken?: string; fetchImpl?: typeof fetch },
+): Promise<RegisteredAgentResult> {
+  return await new HttpAgentClient(baseUrl, '', options?.fetchImpl).registerAgent(input, {
+    bearerInviteToken: options?.bearerInviteToken,
+  });
+}
+
 async function throwResponseError(response: Response): Promise<never> {
   const rawText = await response.text();
   if (rawText) {
@@ -223,9 +487,6 @@ async function throwResponseError(response: Response): Promise<never> {
   throw new ServiceApiError(fallbackCode, response.status, fallbackMessage);
 }
 
-function nowIso(): string {
-  return new Date().toISOString();
-}
 
 function asciiLower(text: string): string {
   return text.replace(/[A-Z]/g, ch => ch.toLowerCase());
@@ -233,6 +494,116 @@ function asciiLower(text: string): string {
 
 function clone<T>(value: T): T {
   return structuredClone(value);
+}
+
+function randomHex64(): string {
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
+}
+
+function credentialPrefix(raw: string): string {
+  return Array.from(raw).slice(0, 15).join('');
+}
+
+function validateSkillBaseUrl(raw: string): string {
+  const trimmed = raw.trim();
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    throw new ServiceApiError('VALIDATION_ERROR', 400, 'base_url 必须为 HTTP(S) 服务根地址');
+  }
+  if (
+    (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') ||
+    !parsed.hostname ||
+    parsed.username !== '' ||
+    parsed.password !== '' ||
+    parsed.search !== '' ||
+    parsed.hash !== '' ||
+    parsed.pathname !== '/'
+  ) {
+    throw new ServiceApiError('VALIDATION_ERROR', 400, 'base_url 必须为 HTTP(S) 服务根地址');
+  }
+  return parsed.toString().replace(/\/+$/, '');
+}
+
+function resolveSubscriptionInput(
+  subscribeAllProjects?: boolean,
+  projectIds?: string[],
+): { subscribeAll: boolean; projectIds: string[] } {
+  if (subscribeAllProjects === true && Array.isArray(projectIds) && projectIds.length > 0) {
+    throw new ServiceApiError('VALIDATION_ERROR', 400, '全局订阅不能同时指定 project_ids');
+  }
+  const subscribeAll =
+    subscribeAllProjects === true || (projectIds === undefined && subscribeAllProjects !== false);
+  const deduped = Array.from(new Set(projectIds ?? [])).sort();
+  return { subscribeAll, projectIds: deduped };
+}
+
+function renderSkillMarkdown(
+  baseUrl: string,
+  lanOpenRegistration: boolean,
+  inviteToken: string | null,
+): string {
+  const policy = lanOpenRegistration
+    ? '已开启局域网免审注册；可省略 invite_token。显式提供邀请时仍须有效。'
+    : '需要有效邀请令牌；请向管理员获取 invite_token。';
+  const example = JSON.stringify(
+    {
+      name: 'my-agent',
+      description: 'Agent 能力说明',
+      capabilities: ['coding'],
+      invite_token: inviteToken ?? '<INVITE_TOKEN>',
+      subscribe_all_projects: true,
+    },
+    null,
+    2,
+  );
+  return `---
+name: taskrail-agent
+description: Taskrail Agent 注册、项目订阅与任务读取
+---
+
+# Taskrail Agent
+
+base_url: ${baseUrl}
+
+## 注册策略
+
+${policy}
+
+POST ${baseUrl}/api/v1/agents/register
+
+\`\`\`json
+${example}
+\`\`\`
+
+也可使用 Authorization: Bearer <INVITE_TOKEN> 提供邀请。名称去除首尾空白后须为 1 至 64 字符，名称唯一。成功返回 201 {"agent":AgentSummary,"api_key":"tr_ag_..."}。
+api_key 仅注册成功时返回一次，请保存；后续接口携带 Authorization: Bearer <AGENT_API_KEY>。
+新 Agent 初始段位为 Unranked，公开资料不包含隐藏天梯分。
+
+## 自身资料和订阅
+
+- GET ${baseUrl}/api/v1/agent/me：返回 AgentSummary。
+- PATCH ${baseUrl}/api/v1/agent/me：更新 description（字符串）和 capabilities（字符串数组），省略字段保持原值。
+- PUT ${baseUrl}/api/v1/agent/me/subscriptions：整体替换订阅，返回 AgentSummary。全部项目使用 {"subscribe_all_projects":true}，指定项目使用 {"subscribe_all_projects":false,"project_ids":["PROJECT_ID"]}，不订阅使用 {"subscribe_all_projects":false,"project_ids":[]}。
+- GET ${baseUrl}/api/v1/agent/projects：返回所有未归档项目，供选择订阅。未知项目返回 404 PROJECT_NOT_FOUND，归档项目返回 409 PROJECT_ARCHIVED。
+
+注册订阅规则与订阅替换相同：不传 project_ids 且 subscribe_all_projects 缺省或为 true 时订阅全部项目；提供 project_ids 且未指定 true 时仅订阅这些项目。true 与非空 project_ids 不能同时使用。
+AgentSummary 包含 id、name、description、capabilities、api_key_prefix、tier、placement_completed、subscribe_all_projects、project_ids、status、invite_token_id、active_lease_count、last_seen_at、created_at、updated_at，不包含 api_key 或 api_key_hash。
+
+## 任务读取
+
+- GET ${baseUrl}/api/v1/agent/bounties：返回 Bounty[]，支持 project_id、status、q 查询。q 为字面子串，% 和 _ 不作为通配符。
+- GET ${baseUrl}/api/v1/agent/bounties/{id}：返回 {"bounty":Bounty,"events":BountyEvent[]}；不可见任务返回 404 BOUNTY_NOT_FOUND。
+
+仅可读取订阅项目内公开任务及指派或租约属于自身的任务；指定其他 Agent 的任务不可见。
+DRAFT 草稿对所有 Agent 隔离，列表和搜索永远排除 DRAFT，即使 status=DRAFT 或 include_drafts=true 也不能绕过；单个草稿详情返回 404。
+
+停用凭证返回 403 AGENT_DISABLED，吊销凭证返回 401 AGENT_REVOKED，未知凭证返回 401 UNAUTHORIZED。Agent 凭证不能访问管理员项目、悬赏或名录接口。
+错误格式为 {"error":{"code":"ERROR_CODE","message":"错误说明"}}。注册还可能返回 401 INVITE_TOKEN_REQUIRED、401 INVITE_TOKEN_INVALID、409 AGENT_NAME_TAKEN 或 400 VALIDATION_ERROR。JSON 输入拒绝未知字段。
+`;
 }
 
 function validateProjectFields(name: string, icon: string | null, policy: AgentDraftPolicy): void {
@@ -279,14 +650,37 @@ function validateBountyFields(
   }
 }
 
+interface StoredInviteToken {
+  summary: InviteTokenSummary;
+  rawToken: string;
+}
+
+interface StoredAgent {
+  summary: AgentSummary;
+  apiKey: string;
+}
+
 export function createMemoryBountyClient(seed?: {
   projects?: BountyProject[];
   bounties?: BountyTask[];
+  lan_open_registration?: boolean;
 }): MemoryBountyClient {
   const projects = new Map<string, BountyProject>();
   const bounties = new Map<string, BountyTask>();
   const eventsByBounty = new Map<string, BountyEvent[]>();
+  const inviteTokensById = new Map<string, StoredInviteToken>();
+  const inviteTokensByRaw = new Map<string, StoredInviteToken>();
+  const agentsById = new Map<string, StoredAgent>();
+  const agentsByApiKey = new Map<string, StoredAgent>();
+  let lanOpenRegistration = seed?.lan_open_registration ?? false;
   let nextEventId = 1;
+  let lastTimestampMs = 0;
+
+  function nowIso(): string {
+    const currentMs = Date.now();
+    lastTimestampMs = currentMs > lastTimestampMs ? currentMs : lastTimestampMs + 1;
+    return new Date(lastTimestampMs).toISOString();
+  }
 
   for (const project of seed?.projects ?? []) {
     projects.set(project.id, clone(project));
@@ -339,6 +733,111 @@ export function createMemoryBountyClient(seed?: {
       created_at: bounty.updated_at,
     });
     eventsByBounty.set(bounty.id, list);
+  }
+
+  function sortedInviteTokens(): InviteTokenSummary[] {
+    return Array.from(inviteTokensById.values())
+      .map(entry => clone(entry.summary))
+      .sort((a, b) => b.created_at.localeCompare(a.created_at) || b.id.localeCompare(a.id));
+  }
+
+  function validateInviteToken(raw: string, nowMs = Date.now()): StoredInviteToken {
+    const entry = inviteTokensByRaw.get(raw);
+    if (!entry) {
+      throw new ServiceApiError('INVITE_TOKEN_INVALID', 401, '邀请令牌无效、已过期或已耗尽');
+    }
+    const { summary } = entry;
+    if (summary.revoked_at !== null) {
+      throw new ServiceApiError('INVITE_TOKEN_INVALID', 401, '邀请令牌无效、已过期或已耗尽');
+    }
+    if (summary.expires_at !== null) {
+      const expiresAtMs = Date.parse(summary.expires_at);
+      if (Number.isNaN(expiresAtMs) || expiresAtMs <= nowMs) {
+        throw new ServiceApiError('INVITE_TOKEN_INVALID', 401, '邀请令牌无效、已过期或已耗尽');
+      }
+    }
+    if (summary.max_uses !== null && summary.use_count >= summary.max_uses) {
+      throw new ServiceApiError('INVITE_TOKEN_INVALID', 401, '邀请令牌无效、已过期或已耗尽');
+    }
+    return entry;
+  }
+
+  function computeActiveLeaseCount(agentId: string, nowMs = Date.now()): number {
+    let count = 0;
+    for (const bounty of bounties.values()) {
+      if (
+        bounty.lease_agent_id === agentId &&
+        ACTIVE_LEASE_STATUSES.has(bounty.status) &&
+        bounty.lease_expires_at !== null &&
+        Date.parse(bounty.lease_expires_at) > nowMs
+      ) {
+        count += 1;
+      }
+    }
+    return count;
+  }
+
+  function toAgentSummary(entry: StoredAgent): AgentSummary {
+    const summary = clone(entry.summary);
+    summary.active_lease_count = computeActiveLeaseCount(summary.id);
+    return summary;
+  }
+
+  function requireStoredAgent(id: string): StoredAgent {
+    const entry = agentsById.get(id);
+    if (!entry) {
+      throw new ServiceApiError('AGENT_NOT_FOUND', 404, 'Agent 不存在');
+    }
+    return entry;
+  }
+
+  function authenticateAgent(apiKey: string): StoredAgent {
+    const entry = agentsByApiKey.get(apiKey);
+    if (!entry) {
+      throw new ServiceApiError('UNAUTHORIZED', 401, '需要有效的 Agent Bearer api_key');
+    }
+    if (entry.summary.status === 'disabled') {
+      throw new ServiceApiError('AGENT_DISABLED', 403, 'Agent 已停用');
+    }
+    if (entry.summary.status === 'revoked') {
+      throw new ServiceApiError('AGENT_REVOKED', 401, 'Agent 凭证已吊销');
+    }
+    entry.summary.last_seen_at = nowIso();
+    return entry;
+  }
+
+  function isBountyVisibleToAgent(agent: AgentSummary, bounty: BountyTask): boolean {
+    if (bounty.status === 'DRAFT') return false;
+    if (bounty.assignee_agent_id === agent.id || bounty.lease_agent_id === agent.id) {
+      return true;
+    }
+    if (bounty.assignee_mode === 'specific') {
+      return false;
+    }
+    return agent.subscribe_all_projects || agent.project_ids.includes(bounty.project_id);
+  }
+
+  function filterBountiesInternal(query?: BountyQuery): BountyTask[] {
+    const includeDrafts = query?.include_drafts === true;
+    const needle = query?.q !== undefined && query.q !== '' ? asciiLower(query.q) : null;
+
+    return Array.from(bounties.values())
+      .filter(bounty => {
+        if (!includeDrafts && bounty.status === 'DRAFT') return false;
+        if (query?.project_id !== undefined && bounty.project_id !== query.project_id) return false;
+        if (query?.status !== undefined && bounty.status !== query.status) return false;
+        if (needle !== null) {
+          const matched =
+            asciiLower(bounty.id).includes(needle) ||
+            asciiLower(bounty.title).includes(needle) ||
+            asciiLower(bounty.description).includes(needle) ||
+            asciiLower(bounty.acceptance_criteria).includes(needle);
+          if (!matched) return false;
+        }
+        return true;
+      })
+      .sort((a, b) => b.created_at.localeCompare(a.created_at) || a.id.localeCompare(b.id))
+      .map(clone);
   }
 
   return {
@@ -423,29 +922,15 @@ export function createMemoryBountyClient(seed?: {
         }
       }
       projects.delete(id);
+      for (const entry of agentsById.values()) {
+        if (entry.summary.project_ids.includes(id)) {
+          entry.summary.project_ids = entry.summary.project_ids.filter(pid => pid !== id);
+        }
+      }
     },
 
     async listBounties(query?: BountyQuery): Promise<BountyTask[]> {
-      const includeDrafts = query?.include_drafts === true;
-      const needle = query?.q !== undefined && query.q !== '' ? asciiLower(query.q) : null;
-
-      return Array.from(bounties.values())
-        .filter(bounty => {
-          if (!includeDrafts && bounty.status === 'DRAFT') return false;
-          if (query?.project_id !== undefined && bounty.project_id !== query.project_id) return false;
-          if (query?.status !== undefined && bounty.status !== query.status) return false;
-          if (needle !== null) {
-            const matched =
-              asciiLower(bounty.id).includes(needle) ||
-              asciiLower(bounty.title).includes(needle) ||
-              asciiLower(bounty.description).includes(needle) ||
-              asciiLower(bounty.acceptance_criteria).includes(needle);
-            if (!matched) return false;
-          }
-          return true;
-        })
-        .sort((a, b) => b.created_at.localeCompare(a.created_at) || a.id.localeCompare(b.id))
-        .map(clone);
+      return filterBountiesInternal(query);
     },
 
     async getBountyDetail(id: string): Promise<BountyDetail> {
@@ -632,6 +1117,338 @@ export function createMemoryBountyClient(seed?: {
         lease_expires_at: updated.lease_expires_at,
       });
       return clone(updated);
+    },
+
+    async getOnboardingSettings(): Promise<OnboardingSettings> {
+      return {
+        lan_open_registration: lanOpenRegistration,
+        invite_tokens: sortedInviteTokens(),
+      };
+    },
+
+    async updateOnboardingSettings(input: UpdateOnboardingInput): Promise<OnboardingSettings> {
+      if (typeof input?.lan_open_registration !== 'boolean') {
+        throw new ServiceApiError('VALIDATION_ERROR', 400, 'lan_open_registration 必须为布尔值');
+      }
+      lanOpenRegistration = input.lan_open_registration;
+      return {
+        lan_open_registration: lanOpenRegistration,
+        invite_tokens: sortedInviteTokens(),
+      };
+    },
+
+    async listInviteTokens(): Promise<InviteTokenSummary[]> {
+      return sortedInviteTokens();
+    },
+
+    async createInviteToken(input?: CreateInviteTokenInput): Promise<CreatedInviteToken> {
+      const label = input?.label ?? '';
+      if (typeof label !== 'string') {
+        throw new ServiceApiError('VALIDATION_ERROR', 400, 'label 必须为字符串');
+      }
+      const maxUses = input?.max_uses ?? null;
+      if (maxUses !== null && (typeof maxUses !== 'number' || !Number.isInteger(maxUses) || maxUses < 1)) {
+        throw new ServiceApiError('VALIDATION_ERROR', 400, 'max_uses 必须至少为 1');
+      }
+      const expiresInHours = input?.expires_in_hours ?? null;
+      let expiresAt: string | null = null;
+      if (expiresInHours !== null) {
+        if (typeof expiresInHours !== 'number' || !Number.isFinite(expiresInHours) || expiresInHours <= 0) {
+          throw new ServiceApiError('VALIDATION_ERROR', 400, 'expires_in_hours 必须为有效正数');
+        }
+        const millis = expiresInHours * 3_600_000;
+        if (!Number.isFinite(millis) || millis >= Number.MAX_SAFE_INTEGER) {
+          throw new ServiceApiError('VALIDATION_ERROR', 400, '过期时间超出范围');
+        }
+        expiresAt = new Date(Date.now() + Math.max(1, Math.trunc(millis))).toISOString();
+      }
+
+      const rawToken = `tr_inv_${randomHex64()}`;
+      const summary: InviteTokenSummary = {
+        id: crypto.randomUUID(),
+        label,
+        token_prefix: credentialPrefix(rawToken),
+        max_uses: maxUses,
+        use_count: 0,
+        expires_at: expiresAt,
+        revoked_at: null,
+        created_at: nowIso(),
+      };
+      const stored: StoredInviteToken = { summary, rawToken };
+      inviteTokensById.set(summary.id, stored);
+      inviteTokensByRaw.set(rawToken, stored);
+      return {
+        token: clone(summary),
+        raw_token: rawToken,
+      };
+    },
+
+    async revokeInviteToken(id: string): Promise<InviteTokenSummary> {
+      const stored = inviteTokensById.get(id);
+      if (!stored) {
+        throw new ServiceApiError('INVITE_TOKEN_NOT_FOUND', 404, '邀请令牌不存在');
+      }
+      if (stored.summary.revoked_at === null) {
+        stored.summary.revoked_at = nowIso();
+      }
+      return clone(stored.summary);
+    },
+
+    async getSkillMarkdown(options?: {
+      baseUrl?: string;
+      inviteToken?: string;
+    }): Promise<SkillDocument> {
+      const baseUrl =
+        options?.baseUrl !== undefined && options.baseUrl.trim() !== ''
+          ? validateSkillBaseUrl(options.baseUrl)
+          : DEFAULT_SKILL_BASE_URL;
+      const invite =
+        options?.inviteToken !== undefined && options.inviteToken.trim() !== ''
+          ? options.inviteToken
+          : null;
+      if (invite !== null) {
+        validateInviteToken(invite);
+      }
+      return {
+        base_url: baseUrl,
+        content: renderSkillMarkdown(baseUrl, lanOpenRegistration, invite),
+        filename: 'SKILL.md',
+      };
+    },
+
+    async getPublicSkillMarkdown(options?: {
+      inviteToken?: string;
+      bearerInviteToken?: string;
+      baseUrl?: string;
+    }): Promise<string> {
+      const baseUrl =
+        options?.baseUrl !== undefined && options.baseUrl.trim() !== ''
+          ? validateSkillBaseUrl(options.baseUrl)
+          : DEFAULT_SKILL_BASE_URL;
+      const inviteFromQuery =
+        options?.inviteToken !== undefined && options.inviteToken.trim() !== ''
+          ? options.inviteToken
+          : null;
+      const inviteFromBearer =
+        options?.bearerInviteToken !== undefined && options.bearerInviteToken.trim() !== ''
+          ? options.bearerInviteToken
+          : null;
+      const invite = inviteFromQuery ?? inviteFromBearer;
+      if (invite !== null) {
+        validateInviteToken(invite);
+      }
+      return renderSkillMarkdown(baseUrl, lanOpenRegistration, invite);
+    },
+
+    async listAgents(filter?: AgentFilter): Promise<AgentSummary[]> {
+      return Array.from(agentsById.values())
+        .sort(
+          (a, b) =>
+            b.summary.created_at.localeCompare(a.summary.created_at) ||
+            b.summary.id.localeCompare(a.summary.id),
+        )
+        .map(toAgentSummary)
+        .filter(agent => {
+          if (filter?.status !== undefined && agent.status !== filter.status) {
+            return false;
+          }
+          if (filter?.activity === 'idle' && agent.active_lease_count !== 0) {
+            return false;
+          }
+          if (filter?.activity === 'busy' && agent.active_lease_count === 0) {
+            return false;
+          }
+          return true;
+        });
+    },
+
+    async disableAgent(id: string): Promise<AgentSummary> {
+      const entry = requireStoredAgent(id);
+      if (entry.summary.status === 'revoked') {
+        throw new ServiceApiError('INVALID_TRANSITION', 409, '当前状态不允许此操作');
+      }
+      entry.summary.status = 'disabled';
+      entry.summary.updated_at = nowIso();
+      return toAgentSummary(entry);
+    },
+
+    async enableAgent(id: string): Promise<AgentSummary> {
+      const entry = requireStoredAgent(id);
+      if (entry.summary.status === 'revoked') {
+        throw new ServiceApiError('INVALID_TRANSITION', 409, '当前状态不允许此操作');
+      }
+      entry.summary.status = 'active';
+      entry.summary.updated_at = nowIso();
+      return toAgentSummary(entry);
+    },
+
+    async revokeAgent(id: string): Promise<AgentSummary> {
+      const entry = requireStoredAgent(id);
+      entry.summary.status = 'revoked';
+      entry.summary.updated_at = nowIso();
+      return toAgentSummary(entry);
+    },
+
+    async registerAgent(
+      input: RegisterAgentInput,
+      options?: { bearerInviteToken?: string },
+    ): Promise<RegisteredAgentResult> {
+      if (typeof input?.name !== 'string') {
+        throw new ServiceApiError('VALIDATION_ERROR', 400, 'name 去除首尾空白后须为 1 至 64 字符');
+      }
+      const trimmedName = input.name.trim();
+      const nameLength = Array.from(trimmedName).length;
+      if (nameLength < 1 || nameLength > 64) {
+        throw new ServiceApiError('VALIDATION_ERROR', 400, 'name 去除首尾空白后须为 1 至 64 字符');
+      }
+      const description = input.description ?? '';
+      if (typeof description !== 'string') {
+        throw new ServiceApiError('VALIDATION_ERROR', 400, 'description 必须为字符串');
+      }
+      const capabilities = input.capabilities ?? [];
+      if (!Array.isArray(capabilities) || capabilities.some(item => typeof item !== 'string')) {
+        throw new ServiceApiError('VALIDATION_ERROR', 400, 'capabilities 必须为字符串数组');
+      }
+
+      const { subscribeAll, projectIds } = resolveSubscriptionInput(
+        input.subscribe_all_projects,
+        input.project_ids,
+      );
+
+      const bodyInvite =
+        typeof input.invite_token === 'string' && input.invite_token.trim() !== ''
+          ? input.invite_token
+          : null;
+      const bearerInvite =
+        typeof options?.bearerInviteToken === 'string' && options.bearerInviteToken.trim() !== ''
+          ? options.bearerInviteToken
+          : null;
+      const rawInvite = bodyInvite ?? bearerInvite;
+
+      let inviteEntry: StoredInviteToken | null = null;
+      if (rawInvite !== null) {
+        inviteEntry = validateInviteToken(rawInvite);
+      } else if (!lanOpenRegistration) {
+        throw new ServiceApiError('INVITE_TOKEN_REQUIRED', 401, '需要注册邀请令牌');
+      }
+
+      for (const existing of agentsById.values()) {
+        if (existing.summary.name === trimmedName) {
+          throw new ServiceApiError('AGENT_NAME_TAKEN', 409, 'Agent 名称已被使用');
+        }
+      }
+
+      for (const projectId of projectIds) {
+        requireActiveProject(projectId);
+      }
+
+      if (inviteEntry !== null) {
+        inviteEntry.summary.use_count += 1;
+      }
+
+      const apiKey = `tr_ag_${randomHex64()}`;
+      const timestamp = nowIso();
+      const summary: AgentSummary = {
+        id: crypto.randomUUID(),
+        name: trimmedName,
+        description,
+        capabilities: [...capabilities],
+        api_key_prefix: credentialPrefix(apiKey),
+        tier: 'Unranked',
+        placement_completed: false,
+        subscribe_all_projects: subscribeAll,
+        project_ids: [...projectIds],
+        status: 'active',
+        invite_token_id: inviteEntry?.summary.id ?? null,
+        active_lease_count: 0,
+        last_seen_at: null,
+        created_at: timestamp,
+        updated_at: timestamp,
+      };
+      const stored: StoredAgent = { summary, apiKey };
+      agentsById.set(summary.id, stored);
+      agentsByApiKey.set(apiKey, stored);
+
+      return {
+        agent: toAgentSummary(stored),
+        api_key: apiKey,
+      };
+    },
+
+    async agentGetMe(apiKey: string): Promise<AgentSummary> {
+      const entry = authenticateAgent(apiKey);
+      return toAgentSummary(entry);
+    },
+
+    async agentUpdateMe(apiKey: string, input: UpdateAgentInput): Promise<AgentSummary> {
+      const entry = authenticateAgent(apiKey);
+      if (input.description !== undefined) {
+        if (typeof input.description !== 'string') {
+          throw new ServiceApiError('VALIDATION_ERROR', 400, 'description 必须为字符串');
+        }
+        entry.summary.description = input.description;
+      }
+      if (input.capabilities !== undefined) {
+        if (
+          !Array.isArray(input.capabilities) ||
+          input.capabilities.some(item => typeof item !== 'string')
+        ) {
+          throw new ServiceApiError('VALIDATION_ERROR', 400, 'capabilities 必须为字符串数组');
+        }
+        entry.summary.capabilities = [...input.capabilities];
+      }
+      entry.summary.updated_at = nowIso();
+      return toAgentSummary(entry);
+    },
+
+    async agentUpdateSubscriptions(
+      apiKey: string,
+      input: AgentSubscriptionsInput,
+    ): Promise<AgentSummary> {
+      const entry = authenticateAgent(apiKey);
+      const { subscribeAll, projectIds } = resolveSubscriptionInput(
+        input.subscribe_all_projects,
+        input.project_ids,
+      );
+      for (const projectId of projectIds) {
+        requireActiveProject(projectId);
+      }
+      entry.summary.subscribe_all_projects = subscribeAll;
+      entry.summary.project_ids = [...projectIds];
+      entry.summary.updated_at = nowIso();
+      return toAgentSummary(entry);
+    },
+
+    async agentListProjects(apiKey: string): Promise<BountyProject[]> {
+      authenticateAgent(apiKey);
+      return Array.from(projects.values())
+        .filter(project => !project.archived)
+        .sort((a, b) => a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id))
+        .map(clone);
+    },
+
+    async agentListBounties(apiKey: string, query?: BountyQuery): Promise<BountyTask[]> {
+      const entry = authenticateAgent(apiKey);
+      const safeQuery: BountyQuery = {
+        ...query,
+        include_drafts: false,
+      };
+      return filterBountiesInternal(safeQuery).filter(bounty =>
+        isBountyVisibleToAgent(entry.summary, bounty),
+      );
+    },
+
+    async agentGetBountyDetail(apiKey: string, id: string): Promise<BountyDetail> {
+      const entry = authenticateAgent(apiKey);
+      const bounty = requireBounty(id);
+      if (!isBountyVisibleToAgent(entry.summary, bounty)) {
+        throw new ServiceApiError('BOUNTY_NOT_FOUND', 404, '悬赏不存在');
+      }
+      const events = [...(eventsByBounty.get(id) ?? [])].sort((a, b) => a.id - b.id);
+      return {
+        bounty: clone(bounty),
+        events: clone(events),
+      };
     },
   };
 }

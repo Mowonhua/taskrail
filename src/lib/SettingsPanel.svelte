@@ -6,10 +6,16 @@
   import { HttpBountyClient, normalizeServerUrl } from './api/bounty-client';
   import type {
     BountyProject,
+    CreatedInviteToken,
+    CreateInviteTokenInput,
     CreateProjectInput,
+    InviteTokenSummary,
+    OnboardingSettings,
     ServiceMode,
+    SkillDocument,
     UpdateProjectInput,
   } from './api/types';
+  import AgentOnboardingPanel from './bounty/AgentOnboardingPanel.svelte';
   import { formatServiceError } from './bounty/helpers';
   import ProjectManagementPanel from './bounty/ProjectManagementPanel.svelte';
   import { composeFontStack, DEFAULT_FONT_STACK, GENERIC_FAMILIES, parseFontStack } from './font-stack';
@@ -30,9 +36,14 @@
     themeError: string;
     serviceConnected?: boolean;
     serviceUrl?: string;
+    serviceEpoch?: number;
     serviceConnectionError?: string;
     bountyProjects?: BountyProject[];
     showArchivedProjects?: boolean;
+    onboardingSettings?: OnboardingSettings;
+    onboardingLoaded?: boolean;
+    onboardingLoadError?: string;
+    skillDocument?: SkillDocument | null;
     desktop?: boolean;
     mobile?: boolean;
     onSelectLanguage: (language: LocalePreference) => void;
@@ -55,6 +66,16 @@
     onCreateBountyProject?: (input: CreateProjectInput) => Promise<BountyProject>;
     onUpdateBountyProject?: (id: string, input: UpdateProjectInput) => Promise<BountyProject>;
     onDeleteBountyProject?: (id: string) => Promise<void>;
+    onRetryLoadOnboarding?: () => Promise<OnboardingSettings | null | void> | void;
+    onToggleLanRegistration?: (enabled: boolean) => Promise<OnboardingSettings>;
+    onCreateInviteToken?: (input?: CreateInviteTokenInput) => Promise<CreatedInviteToken>;
+    onRevokeInviteToken?: (id: string) => Promise<InviteTokenSummary>;
+    onLoadSkillMarkdown?: (options?: {
+      baseUrl?: string;
+      inviteToken?: string;
+    }) => Promise<SkillDocument>;
+    onExportSkillMarkdown?: (doc: SkillDocument) => Promise<boolean>;
+    onNotify?: (message: string) => void;
   }
 
   let {
@@ -67,9 +88,14 @@
     themeError,
     serviceConnected = true,
     serviceUrl = '',
+    serviceEpoch = 0,
     serviceConnectionError = '',
     bountyProjects = [],
     showArchivedProjects = false,
+    onboardingSettings = { lan_open_registration: false, invite_tokens: [] },
+    onboardingLoaded = true,
+    onboardingLoadError = '',
+    skillDocument = null,
     desktop = false,
     mobile = false,
     onSelectLanguage,
@@ -94,6 +120,21 @@
     onDeleteBountyProject = async () => {
       throw new Error('Not configured');
     },
+    onRetryLoadOnboarding,
+    onToggleLanRegistration = async () => {
+      throw new Error('Not configured');
+    },
+    onCreateInviteToken = async () => {
+      throw new Error('Not configured');
+    },
+    onRevokeInviteToken = async () => {
+      throw new Error('Not configured');
+    },
+    onLoadSkillMarkdown = async () => {
+      throw new Error('Not configured');
+    },
+    onExportSkillMarkdown,
+    onNotify,
   }: Props = $props();
 
   let helpButton: HTMLButtonElement;
@@ -708,12 +749,21 @@
       onDeleteProject={onDeleteBountyProject}
     />
 
-    <div class="settings-row settings-extension-row">
-      <div class="settings-extension-copy">
-        <span class="settings-row-label">{$t('Agent 准入与协议')}</span>
-        <span class="settings-extension-desc">{$t('提供接入说明文档与 Agent 令牌管理入口')}</span>
-      </div>
-      <span class="settings-tag">{$t('协作接入')}</span>
-    </div>
+    <AgentOnboardingPanel
+      onboarding={onboardingSettings}
+      {onboardingLoaded}
+      {onboardingLoadError}
+      {serviceUrl}
+      {serviceEpoch}
+      {skillDocument}
+      {onRetryLoadOnboarding}
+      {onToggleLanRegistration}
+      {onCreateInviteToken}
+      {onRevokeInviteToken}
+      {onLoadSkillMarkdown}
+      {onExportSkillMarkdown}
+      {onNotify}
+    />
   </section>
 </div>
+

@@ -6,11 +6,9 @@ import { TauriFilePort } from './tauri';
 const native = vi.hoisted(() => ({
   invoke: vi.fn(),
   save: vi.fn(),
-  writeTextFile: vi.fn(),
 }));
 vi.mock('@tauri-apps/api/core', () => ({ invoke: native.invoke }));
 vi.mock('@tauri-apps/plugin-dialog', () => ({ save: native.save }));
-vi.mock('@tauri-apps/plugin-fs', () => ({ writeTextFile: native.writeTextFile }));
 
 beforeEach(() => {
   vi.resetAllMocks();
@@ -67,6 +65,50 @@ describe('桌面平台端口边界', () => {
     expect(native.invoke).toHaveBeenCalledWith('export_theme_file', {
       path: 'D:/custom-theme.json',
       text: '{"version":1}',
+    });
+  });
+
+  it('使用系统保存对话框与受控原生命令 export_markdown_file 导出 SKILL.md，取消时不写入且透传翻译 Coded Error', async () => {
+    const port = new TauriFilePort();
+    native.save.mockResolvedValueOnce(null);
+    expect(await port.exportText('# Taskrail Agent', 'SKILL.md')).toBe(false);
+    expect(native.invoke).not.toHaveBeenCalled();
+
+    native.save.mockResolvedValueOnce('D:/docs/SKILL.md');
+    native.invoke.mockResolvedValueOnce(undefined);
+    expect(await port.exportText('# Taskrail Agent', 'SKILL.md')).toBe(true);
+    expect(native.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: 'Save a copy',
+        defaultPath: 'SKILL.md',
+        filters: [{ name: 'Markdown', extensions: ['md', 'markdown', 'txt'] }],
+      }),
+    );
+    expect(native.invoke).toHaveBeenCalledWith('export_markdown_file', {
+      path: 'D:/docs/SKILL.md',
+      text: '# Taskrail Agent',
+    });
+    expect(native.invoke).not.toHaveBeenCalledWith('export_theme_file', expect.anything());
+
+    native.save.mockResolvedValueOnce('D:/docs/SKILL.md');
+    native.invoke.mockRejectedValueOnce({
+      code: 'FILE_NAME_INVALID',
+      message: '文件名无效。',
+    });
+    await expect(port.exportText('# Taskrail Agent', 'SKILL.md')).rejects.toMatchObject({
+      code: 'FILE_NAME_INVALID',
+      message: 'Invalid filename.',
+    });
+
+    setLocalePreference('zh-CN');
+    native.save.mockResolvedValueOnce('D:/docs/SKILL.md');
+    native.invoke.mockRejectedValueOnce({
+      code: 'FILE_NAME_INVALID',
+      message: '文件名无效。',
+    });
+    await expect(port.exportText('# Taskrail Agent', 'SKILL.md')).rejects.toMatchObject({
+      code: 'FILE_NAME_INVALID',
+      message: '文件名无效。',
     });
   });
 

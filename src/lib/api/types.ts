@@ -150,16 +150,111 @@ export interface BountyQuery {
   include_drafts?: boolean;
 }
 
+export type AgentTier = 'Unranked' | 'C' | 'B' | 'A' | 'S';
+export type AgentStatus = 'active' | 'disabled' | 'revoked';
+export type AgentActivity = 'idle' | 'busy';
+
+export interface InviteTokenSummary {
+  id: string;
+  label: string;
+  token_prefix: string;
+  max_uses: number | null;
+  use_count: number;
+  expires_at: string | null;
+  revoked_at: string | null;
+  created_at: string;
+}
+
+export interface CreateInviteTokenInput {
+  label?: string;
+  max_uses?: number | null;
+  expires_in_hours?: number | null;
+}
+
+export interface CreatedInviteToken {
+  token: InviteTokenSummary;
+  raw_token: string;
+}
+
+export interface OnboardingSettings {
+  lan_open_registration: boolean;
+  invite_tokens: InviteTokenSummary[];
+}
+
+export interface UpdateOnboardingInput {
+  lan_open_registration: boolean;
+}
+
+export interface SkillDocument {
+  base_url: string;
+  content: string;
+  filename: string;
+}
+
+export interface AgentSummary {
+  id: string;
+  name: string;
+  description: string;
+  capabilities: string[];
+  api_key_prefix: string;
+  tier: AgentTier;
+  placement_completed: boolean;
+  subscribe_all_projects: boolean;
+  project_ids: string[];
+  status: AgentStatus;
+  invite_token_id: string | null;
+  active_lease_count: number;
+  last_seen_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AgentFilter {
+  status?: AgentStatus;
+  activity?: AgentActivity;
+}
+
+export interface RegisterAgentInput {
+  name: string;
+  description?: string;
+  capabilities?: string[];
+  invite_token?: string | null;
+  subscribe_all_projects?: boolean;
+  project_ids?: string[];
+}
+
+export interface RegisteredAgentResult {
+  agent: AgentSummary;
+  api_key: string;
+}
+
+export interface UpdateAgentInput {
+  description?: string;
+  capabilities?: string[];
+}
+
+export interface AgentSubscriptionsInput {
+  subscribe_all_projects?: boolean;
+  project_ids?: string[];
+}
+
 export type ServiceErrorCode =
   | 'VALIDATION_ERROR'
   | 'UNAUTHORIZED'
+  | 'INVITE_TOKEN_REQUIRED'
+  | 'INVITE_TOKEN_INVALID'
+  | 'AGENT_REVOKED'
+  | 'AGENT_DISABLED'
   | 'PROJECT_NOT_FOUND'
   | 'BOUNTY_NOT_FOUND'
+  | 'AGENT_NOT_FOUND'
+  | 'INVITE_TOKEN_NOT_FOUND'
   | 'NOT_FOUND'
   | 'METHOD_NOT_ALLOWED'
   | 'PROJECT_HAS_BOUNTIES'
   | 'PROJECT_ARCHIVED'
   | 'INVALID_TRANSITION'
+  | 'AGENT_NAME_TAKEN'
   | 'BOUNTY_ALREADY_CLAIMED'
   | 'INTERNAL_ERROR';
 

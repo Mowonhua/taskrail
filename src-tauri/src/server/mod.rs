@@ -33,10 +33,26 @@ pub(crate) struct AppState {
     pub repository: Repository,
     pub token_digest: [u8; 32],
     pub mode: ServerMode,
+    /// 无 Host 请求的文档使用实际监听地址；直接构造 Router 时使用缺省地址。
+    pub base_url: String,
 }
 
 /// 函数职责：创建共享路由；管理员凭证比较固定长度摘要，避免按首个不同字节提前退出。
 pub fn router(repository: Repository, admin_token: &str, mode: ServerMode) -> Result<axum::Router> {
+    router_at(
+        repository,
+        admin_token,
+        mode,
+        "http://127.0.0.1:8420".into(),
+    )
+}
+
+fn router_at(
+    repository: Repository,
+    admin_token: &str,
+    mode: ServerMode,
+    base_url: String,
+) -> Result<axum::Router> {
     if admin_token.trim().is_empty() {
         return Err(ApiError::invalid("admin_token 不能为空"));
     }
@@ -44,6 +60,7 @@ pub fn router(repository: Repository, admin_token: &str, mode: ServerMode) -> Re
         repository,
         token_digest: Sha256::digest(admin_token.as_bytes()).into(),
         mode,
+        base_url,
     };
     Ok(routes::router(state))
 }
@@ -93,11 +110,16 @@ pub async fn start(config: ServerConfig) -> Result<RunningServer> {
     let repository = tokio::task::spawn_blocking(move || Repository::open(config.db_path))
         .await
         .map_err(ApiError::internal)??;
-    let app = router(repository.clone(), &config.admin_token, config.mode)?;
     let listener = TcpListener::bind(config.bind)
         .await
         .map_err(ApiError::internal)?;
     let address = listener.local_addr().map_err(ApiError::internal)?;
+    let app = router_at(
+        repository.clone(),
+        &config.admin_token,
+        config.mode,
+        format!("http://{address}"),
+    )?;
     let info = EmbeddedServerInfo {
         base_url: format!("http://{address}"),
         admin_token: config.admin_token,

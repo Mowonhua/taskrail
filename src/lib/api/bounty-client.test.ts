@@ -8,10 +8,26 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: native.invoke }));
 import {
   createMemoryBountyClient,
   fetchEmbeddedServerInfo,
+  HttpAgentClient,
   HttpBountyClient,
   normalizeServerUrl,
+  registerAgent,
 } from './bounty-client';
-import { ServiceApiError, type BountyProject, type BountyTask } from './types';
+import {
+  formatAgentStatus,
+  formatAgentSubscriptionSummary,
+  formatAgentTier,
+  formatInviteTokenStatus,
+  formatServiceError,
+} from '../bounty/helpers';
+import { setLocalePreference } from '../i18n';
+import {
+  ServiceApiError,
+  type AgentSummary,
+  type BountyProject,
+  type BountyTask,
+  type InviteTokenSummary,
+} from './types';
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -406,3 +422,477 @@ describe('createMemoryBountyClient', () => {
     });
   });
 });
+
+describe('Issue 03 HTTP 客户端（管理员准入/名录 + Agent 门户）', () => {
+  it('HttpBountyClient 正确构造准入设置、邀请令牌、SKILL.md 与 Agent 名录管控请求', async () => {
+    const calls: Array<{ url: string; method?: string; headers: Record<string, string>; body?: string }> = [];
+    const fetchMock: typeof fetch = async (input, init) => {
+      calls.push({
+        url: String(input),
+        method: init?.method,
+        headers: (init?.headers ?? {}) as Record<string, string>,
+        body: typeof init?.body === 'string' ? init.body : undefined,
+      });
+      return jsonResponse({});
+    };
+
+    const client = new HttpBountyClient('http://127.0.0.1:8420/', 'admin-tok', fetchMock);
+    await client.getOnboardingSettings();
+    await client.updateOnboardingSettings({ lan_open_registration: true });
+    await client.listInviteTokens();
+    await client.createInviteToken({ label: 'CI', max_uses: 3, expires_in_hours: 12 });
+    await client.revokeInviteToken('tok/1');
+    await client.getSkillMarkdown({ baseUrl: 'http://192.168.1.5:8420', inviteToken: 'tr_inv_abc' });
+    await client.listAgents({ status: 'active', activity: 'busy' });
+    await client.disableAgent('ag/1');
+    await client.enableAgent('ag/1');
+    await client.revokeAgent('ag/1');
+
+    expect(calls.map(c => `${c.method} ${c.url}`)).toEqual([
+      'GET http://127.0.0.1:8420/api/v1/admin/onboarding',
+      'PATCH http://127.0.0.1:8420/api/v1/admin/onboarding',
+      'GET http://127.0.0.1:8420/api/v1/admin/invite-tokens',
+      'POST http://127.0.0.1:8420/api/v1/admin/invite-tokens',
+      'POST http://127.0.0.1:8420/api/v1/admin/invite-tokens/tok%2F1/revoke',
+      'GET http://127.0.0.1:8420/api/v1/admin/skill.md?base_url=http%3A%2F%2F192.168.1.5%3A8420&invite_token=tr_inv_abc',
+      'GET http://127.0.0.1:8420/api/v1/agents?status=active&activity=busy',
+      'POST http://127.0.0.1:8420/api/v1/agents/ag%2F1/disable',
+      'POST http://127.0.0.1:8420/api/v1/agents/ag%2F1/enable',
+      'POST http://127.0.0.1:8420/api/v1/agents/ag%2F1/revoke',
+    ]);
+    for (const call of calls) {
+      expect(call.headers.Authorization).toBe('Bearer admin-tok');
+    }
+    expect(JSON.parse(calls[1].body!)).toEqual({ lan_open_registration: true });
+    expect(JSON.parse(calls[3].body!)).toEqual({ label: 'CI', max_uses: 3, expires_in_hours: 12 });
+    expect(calls[4].body).toBeUndefined();
+    expect(calls[7].body).toBeUndefined();
+  });
+
+  it('HttpAgentClient 与 registerAgent 正确构造公开文档、注册及 Agent 鉴权请求', async () => {
+    const calls: Array<{ url: string; method?: string; headers: Record<string, string>; body?: string }> = [];
+    const fetchMock: typeof fetch = async (input, init) => {
+      const url = String(input);
+      calls.push({
+        url,
+        method: init?.method,
+        headers: (init?.headers ?? {}) as Record<string, string>,
+        body: typeof init?.body === 'string' ? init.body : undefined,
+      });
+      if (url.includes('/skill.md')) {
+        return new Response('# Taskrail Agent', {
+          status: 200,
+          headers: { 'Content-Type': 'text/markdown; charset=utf-8' },
+        });
+      }
+      return jsonResponse({});
+    };
+
+    await registerAgent(
+      'http://127.0.0.1:8420/',
+      { name: 'agent-1', subscribe_all_projects: true },
+      { bearerInviteToken: 'tr_inv_header', fetchImpl: fetchMock },
+    );
+
+    const agentClient = new HttpAgentClient('http://127.0.0.1:8420/', 'tr_ag_secret', fetchMock);
+    const md = await agentClient.getPublicSkillMarkdown({ inviteToken: 'tr_inv_q' });
+    expect(md).toBe('# Taskrail Agent');
+    await agentClient.getMe();
+    await agentClient.updateMe({ description: 'Rust & TS', capabilities: ['rust', 'ts'] });
+    await agentClient.updateSubscriptions({ subscribe_all_projects: false, project_ids: ['p1'] });
+    await agentClient.listProjects();
+    await agentClient.listBounties({ project_id: 'p1', status: 'OPEN', q: 'fix%_bug' });
+    await agentClient.getBountyDetail('b/1');
+
+    expect(calls.map(c => `${c.method} ${c.url}`)).toEqual([
+      'POST http://127.0.0.1:8420/api/v1/agents/register',
+      'GET http://127.0.0.1:8420/skill.md?invite_token=tr_inv_q',
+      'GET http://127.0.0.1:8420/api/v1/agent/me',
+      'PATCH http://127.0.0.1:8420/api/v1/agent/me',
+      'PUT http://127.0.0.1:8420/api/v1/agent/me/subscriptions',
+      'GET http://127.0.0.1:8420/api/v1/agent/projects',
+      'GET http://127.0.0.1:8420/api/v1/agent/bounties?project_id=p1&status=OPEN&q=fix%25_bug',
+      'GET http://127.0.0.1:8420/api/v1/agent/bounties/b%2F1',
+    ]);
+    expect(calls[0].headers.Authorization).toBe('Bearer tr_inv_header');
+    expect(JSON.parse(calls[0].body!)).toEqual({ name: 'agent-1', subscribe_all_projects: true });
+    expect(calls[1].headers.Authorization).toBeUndefined();
+    for (const call of calls.slice(2)) {
+      expect(call.headers.Authorization).toBe('Bearer tr_ag_secret');
+    }
+    expect(JSON.parse(calls[3].body!)).toEqual({ description: 'Rust & TS', capabilities: ['rust', 'ts'] });
+    expect(JSON.parse(calls[4].body!)).toEqual({ subscribe_all_projects: false, project_ids: ['p1'] });
+  });
+});
+
+describe('createMemoryBountyClient (Issue 03 Agent 准入、订阅与隔离)', () => {
+  it('支持邀请令牌门控、局域网免审开关、重名拦截与 SKILL.md 动态生成', async () => {
+    const client = createMemoryBountyClient();
+
+    // 默认关闭免审
+    const initial = await client.getOnboardingSettings();
+    expect(initial.lan_open_registration).toBe(false);
+    expect(initial.invite_tokens).toEqual([]);
+
+    // 无邀请且免审关闭时拒绝注册
+    await expect(client.registerAgent({ name: 'alpha' })).rejects.toMatchObject({
+      code: 'INVITE_TOKEN_REQUIRED',
+      status: 401,
+    });
+
+    // 创建一次性邀请令牌，检查前缀与明文分离
+    const createdInvite = await client.createInviteToken({
+      label: '单次测试',
+      max_uses: 1,
+      expires_in_hours: 24,
+    });
+    expect(createdInvite.raw_token.startsWith('tr_inv_')).toBe(true);
+    expect(createdInvite.token.token_prefix).toBe(createdInvite.raw_token.slice(0, 15));
+    expect(createdInvite.token.use_count).toBe(0);
+    expect(createdInvite.token.max_uses).toBe(1);
+
+    // 导出 SKILL.md 带有效邀请不消耗次数
+    const skillWithInvite = await client.getSkillMarkdown({
+      baseUrl: 'http://192.168.1.10:8420/',
+      inviteToken: createdInvite.raw_token,
+    });
+    expect(skillWithInvite.filename).toBe('SKILL.md');
+    expect(skillWithInvite.base_url).toBe('http://192.168.1.10:8420');
+    expect(skillWithInvite.content).toContain(createdInvite.raw_token);
+    expect(skillWithInvite.content).toContain('需要有效邀请令牌');
+    expect((await client.listInviteTokens())[0].use_count).toBe(0);
+
+    // 非法 base_url 被拒绝
+    await expect(client.getSkillMarkdown({ baseUrl: 'http://127.0.0.1:8420/subpath' })).rejects.toMatchObject({
+      code: 'VALIDATION_ERROR',
+      status: 400,
+    });
+
+    // 通过 Bearer 头使用一次性邀请注册成功，返回 Unranked 与一次性 api_key
+    const reg1 = await client.registerAgent(
+      { name: '  agent-alpha  ', description: 'Primary coder', capabilities: ['rust', 'ts'] },
+      { bearerInviteToken: createdInvite.raw_token },
+    );
+    expect(reg1.api_key.startsWith('tr_ag_')).toBe(true);
+    expect(reg1.agent.name).toBe('agent-alpha');
+    expect(reg1.agent.tier).toBe('Unranked');
+    expect(reg1.agent.placement_completed).toBe(false);
+    expect(reg1.agent.subscribe_all_projects).toBe(true);
+    expect(reg1.agent.status).toBe('active');
+    expect(reg1.agent.invite_token_id).toBe(createdInvite.token.id);
+    expect('mmr' in reg1.agent).toBe(false);
+    expect('api_key' in reg1.agent).toBe(false);
+    expect('api_key_hash' in reg1.agent).toBe(false);
+
+    // 一次性邀请已耗尽，第二次注册失败
+    await expect(
+      client.registerAgent({ name: 'agent-beta', invite_token: createdInvite.raw_token }),
+    ).rejects.toMatchObject({ code: 'INVITE_TOKEN_INVALID', status: 401 });
+
+    // 作废另一个邀请令牌后不可用于文档或注册
+    const invite2 = await client.createInviteToken({ label: 'To revoke' });
+    const revokedInvite = await client.revokeInviteToken(invite2.token.id);
+    expect(revokedInvite.revoked_at).not.toBeNull();
+    await expect(
+      client.getPublicSkillMarkdown({ inviteToken: invite2.raw_token }),
+    ).rejects.toMatchObject({ code: 'INVITE_TOKEN_INVALID', status: 401 });
+
+    // 开启免审注册后可无邀请注册，且公开 SKILL.md 反映策略；但显式传入无效邀请仍被拒绝
+    const updatedOnboarding = await client.updateOnboardingSettings({ lan_open_registration: true });
+    expect(updatedOnboarding.lan_open_registration).toBe(true);
+    const openSkill = await client.getPublicSkillMarkdown();
+    expect(openSkill).toContain('已开启局域网免审注册');
+    expect(openSkill).toContain('<INVITE_TOKEN>');
+
+    await expect(
+      client.registerAgent({ name: 'agent-beta', invite_token: invite2.raw_token }),
+    ).rejects.toMatchObject({ code: 'INVITE_TOKEN_INVALID', status: 401 });
+
+    // 重名冲突
+    await expect(client.registerAgent({ name: 'agent-alpha' })).rejects.toMatchObject({
+      code: 'AGENT_NAME_TAKEN',
+      status: 409,
+    });
+
+    const reg2 = await client.registerAgent({ name: 'agent-beta' });
+    expect(reg2.agent.invite_token_id).toBeNull();
+    expect(reg2.agent.tier).toBe('Unranked');
+  });
+
+  it('支持订阅替换校验、项目归档拒绝、停用/启用/吊销鉴权拦截与名录活跃度筛选', async () => {
+    const client = createMemoryBountyClient({ lan_open_registration: true });
+    const p1 = await client.createProject({ name: 'P1' });
+    const p2 = await client.createProject({ name: 'P2' });
+    const pArchived = await client.createProject({ name: 'Archived' });
+    await client.updateProject(pArchived.id, { archived: true });
+
+    const { agent, api_key: apiKey } = await client.registerAgent({
+      name: 'sub-agent',
+      project_ids: [p2.id, p1.id, p1.id],
+    });
+    expect(agent.subscribe_all_projects).toBe(false);
+    expect(agent.project_ids).toEqual([p1.id, p2.id].sort());
+
+    // subscribe_all_projects: true 与非空 project_ids 冲突
+    await expect(
+      client.agentUpdateSubscriptions(apiKey, {
+        subscribe_all_projects: true,
+        project_ids: [p1.id],
+      }),
+    ).rejects.toMatchObject({ code: 'VALIDATION_ERROR', status: 400 });
+
+    // 订阅归档项目被拒绝并保留原有订阅
+    await expect(
+      client.agentUpdateSubscriptions(apiKey, {
+        subscribe_all_projects: false,
+        project_ids: [pArchived.id],
+      }),
+    ).rejects.toMatchObject({ code: 'PROJECT_ARCHIVED', status: 409 });
+    expect((await client.agentGetMe(apiKey)).project_ids).toEqual([p1.id, p2.id].sort());
+
+    // 切换为全部项目与空订阅
+    const allSub = await client.agentUpdateSubscriptions(apiKey, { subscribe_all_projects: true });
+    expect(allSub.subscribe_all_projects).toBe(true);
+    expect(allSub.project_ids).toEqual([]);
+
+    const noneSub = await client.agentUpdateSubscriptions(apiKey, {
+      subscribe_all_projects: false,
+      project_ids: [],
+    });
+    expect(noneSub.subscribe_all_projects).toBe(false);
+    expect(noneSub.project_ids).toEqual([]);
+
+    // agentListProjects 只返回未归档项目，且按 created_at 升序稳定排列（不依赖随机 UUID）
+    expect(p1.created_at < p2.created_at).toBe(true);
+    const listedProjects = await client.agentListProjects(apiKey);
+    expect(listedProjects.map(p => p.id)).toEqual([p1.id, p2.id]);
+    expect(listedProjects.map(p => p.name)).toEqual(['P1', 'P2']);
+
+    // 模拟持有租约使名录识别为 busy
+    const openBounty = await client.createBounty({
+      project_id: p1.id,
+      title: 'Claimable',
+      difficulty: 'C',
+      assignee_mode: 'any',
+      status: 'OPEN',
+    });
+    await client.simulateClaim(openBounty.id, agent.id);
+    expect((await client.listAgents({ activity: 'busy' })).map(a => a.id)).toEqual([agent.id]);
+    expect(await client.listAgents({ activity: 'idle' })).toEqual([]);
+
+    // 停用后返回 403 AGENT_DISABLED，启用后恢复原密钥可用
+    const disabled = await client.disableAgent(agent.id);
+    expect(disabled.status).toBe('disabled');
+    await expect(client.agentGetMe(apiKey)).rejects.toMatchObject({
+      code: 'AGENT_DISABLED',
+      status: 403,
+    });
+    const enabled = await client.enableAgent(agent.id);
+    expect(enabled.status).toBe('active');
+    const meAfterEnable = await client.agentUpdateMe(apiKey, {
+      description: 'Updated desc',
+      capabilities: ['go'],
+    });
+    expect(meAfterEnable.description).toBe('Updated desc');
+    expect(meAfterEnable.capabilities).toEqual(['go']);
+    expect(meAfterEnable.last_seen_at).not.toBeNull();
+
+    // 吊销后返回 401 AGENT_REVOKED，不可启用或停用，重复吊销幂等
+    const revoked = await client.revokeAgent(agent.id);
+    expect(revoked.status).toBe('revoked');
+    await expect(client.agentGetMe(apiKey)).rejects.toMatchObject({
+      code: 'AGENT_REVOKED',
+      status: 401,
+    });
+    await expect(client.enableAgent(agent.id)).rejects.toMatchObject({
+      code: 'INVALID_TRANSITION',
+      status: 409,
+    });
+    await expect(client.disableAgent(agent.id)).rejects.toMatchObject({
+      code: 'INVALID_TRANSITION',
+      status: 409,
+    });
+    expect((await client.revokeAgent(agent.id)).status).toBe('revoked');
+  });
+
+  it('严格隔离 DRAFT 任务与定向任务可见性', async () => {
+    const client = createMemoryBountyClient({ lan_open_registration: true });
+    const pSub = await client.createProject({ name: 'Subscribed' });
+    const pOther = await client.createProject({ name: 'Unsubscribed' });
+
+    const { agent: a1, api_key: k1 } = await client.registerAgent({
+      name: 'agent-1',
+      project_ids: [pSub.id],
+    });
+    const { agent: a2 } = await client.registerAgent({
+      name: 'agent-2',
+      project_ids: [pSub.id],
+    });
+
+    // 1. 订阅项目内的公开悬赏（可见）
+    const openSub = await client.createBounty({
+      project_id: pSub.id,
+      title: 'Public in subscribed',
+      difficulty: 'B',
+      assignee_mode: 'any',
+      status: 'OPEN',
+    });
+    // 2. 订阅项目内的草稿（不可见，即使指派给自己）
+    const draftSelf = await client.createBounty({
+      project_id: pSub.id,
+      title: 'Draft assigned to self',
+      difficulty: 'B',
+      assignee_mode: 'specific',
+      assignee_agent_id: a1.id,
+      status: 'DRAFT',
+    });
+    // 3. 订阅项目内指派给其他 Agent 的公开悬赏（不可见）
+    const openOtherSpecific = await client.createBounty({
+      project_id: pSub.id,
+      title: 'Assigned to agent-2',
+      difficulty: 'B',
+      assignee_mode: 'specific',
+      assignee_agent_id: a2.id,
+      status: 'OPEN',
+    });
+    // 4. 未订阅项目内的公开悬赏（不可见）
+    const openUnsub = await client.createBounty({
+      project_id: pOther.id,
+      title: 'Public in unsubscribed',
+      difficulty: 'B',
+      assignee_mode: 'any',
+      status: 'OPEN',
+    });
+    // 5. 未订阅项目内指派给自己的公开悬赏（可见）
+    const openUnsubSelf = await client.createBounty({
+      project_id: pOther.id,
+      title: 'Assigned to self in unsubscribed',
+      difficulty: 'B',
+      assignee_mode: 'specific',
+      assignee_agent_id: a1.id,
+      status: 'OPEN',
+    });
+
+    const visibleIds = (await client.agentListBounties(k1, { include_drafts: true })).map(b => b.id);
+    expect(visibleIds.sort()).toEqual([openSub.id, openUnsubSelf.id].sort());
+
+    // 传 status=DRAFT 也返回空列表
+    expect(await client.agentListBounties(k1, { status: 'DRAFT', include_drafts: true })).toEqual([]);
+
+    // 单个草稿、他人定向任务、未订阅公开任务详情均返回 404 BOUNTY_NOT_FOUND
+    for (const hiddenId of [draftSelf.id, openOtherSpecific.id, openUnsub.id]) {
+      await expect(client.agentGetBountyDetail(k1, hiddenId)).rejects.toMatchObject({
+        code: 'BOUNTY_NOT_FOUND',
+        status: 404,
+      });
+    }
+    const detail = await client.agentGetBountyDetail(k1, openUnsubSelf.id);
+    expect(detail.bounty.id).toBe(openUnsubSelf.id);
+  });
+});
+
+describe('Issue 03 辅助格式化函数与中英文翻译', () => {
+  it('正确格式化 Agent 状态、段位、邀请令牌状态、订阅摘要与错误消息且不含中点分隔符', () => {
+    setLocalePreference('zh-CN');
+    expect(formatAgentStatus('active')).toBe('正常接入');
+    expect(formatAgentStatus('disabled')).toBe('已停用');
+    expect(formatAgentStatus('revoked')).toBe('已吊销');
+    expect(formatAgentTier('Unranked')).toBe('未定级');
+    expect(formatAgentTier('A')).toBe('A 级');
+
+    const nowMs = Date.parse('2026-11-17T12:00:00.000Z');
+    const baseToken: InviteTokenSummary = {
+      id: 't1',
+      label: 'Test',
+      token_prefix: 'tr_inv_12345678',
+      max_uses: 2,
+      use_count: 0,
+      expires_at: '2026-11-18T12:00:00.000Z',
+      revoked_at: null,
+      created_at: '2026-11-17T00:00:00.000Z',
+    };
+    expect(formatInviteTokenStatus(baseToken, nowMs)).toEqual({ kind: 'active', label: '有效' });
+    expect(formatInviteTokenStatus({ ...baseToken, revoked_at: '2026-11-17T01:00:00.000Z' }, nowMs)).toEqual({
+      kind: 'revoked',
+      label: '已作废',
+    });
+    expect(formatInviteTokenStatus({ ...baseToken, expires_at: '2026-11-17T12:00:00.000Z' }, nowMs)).toEqual({
+      kind: 'expired',
+      label: '已过期',
+    });
+    expect(formatInviteTokenStatus({ ...baseToken, use_count: 2 }, nowMs)).toEqual({
+      kind: 'exhausted',
+      label: '已用尽',
+    });
+
+    const p1: BountyProject = {
+      id: 'p1',
+      name: 'Core',
+      icon: null,
+      description: '',
+      workspace_path: '',
+      default_acceptance_criteria: '',
+      agent_draft_policy: 'open',
+      arbitrator_chain: [],
+      archived: false,
+      created_at: '2026-11-17T00:00:00.000Z',
+      updated_at: '2026-11-17T00:00:00.000Z',
+    };
+    const p2: BountyProject = { ...p1, id: 'p2', name: 'Web' };
+    const projectsById = new Map<string, BountyProject>([
+      [p1.id, p1],
+      [p2.id, p2],
+    ]);
+    const baseAgent: AgentSummary = {
+      id: 'a1',
+      name: 'Agent',
+      description: '',
+      capabilities: [],
+      api_key_prefix: 'tr_ag_123456789',
+      tier: 'Unranked',
+      placement_completed: false,
+      subscribe_all_projects: true,
+      project_ids: [],
+      status: 'active',
+      invite_token_id: null,
+      active_lease_count: 0,
+      last_seen_at: null,
+      created_at: '2026-11-17T00:00:00.000Z',
+      updated_at: '2026-11-17T00:00:00.000Z',
+    };
+
+    expect(formatAgentSubscriptionSummary(baseAgent, projectsById)).toBe('全部项目');
+    expect(
+      formatAgentSubscriptionSummary({ ...baseAgent, subscribe_all_projects: false, project_ids: [] }, projectsById),
+    ).toBe('未订阅项目');
+    const summaryZh = formatAgentSubscriptionSummary(
+      { ...baseAgent, subscribe_all_projects: false, project_ids: ['p1', 'p2'] },
+      projectsById,
+    );
+    expect(summaryZh).toBe('Core、Web');
+    expect(summaryZh).not.toContain('·');
+
+    expect(formatServiceError(new ServiceApiError('INVITE_TOKEN_REQUIRED', 401, 'raw'))).toBe(
+      '需要提供注册邀请令牌。',
+    );
+    expect(formatServiceError(new ServiceApiError('AGENT_NAME_TAKEN', 409, 'raw'))).toBe(
+      '该 Agent 名称已被占用，请更换名称。',
+    );
+
+    setLocalePreference('en');
+    expect(formatAgentStatus('active')).toBe('Active');
+    expect(formatAgentTier('Unranked')).toBe('Unranked');
+    expect(formatAgentTier('S')).toBe('Tier S');
+    expect(
+      formatAgentSubscriptionSummary(
+        { ...baseAgent, subscribe_all_projects: false, project_ids: ['p1', 'p2'] },
+        projectsById,
+      ),
+    ).toBe('Core, Web');
+    expect(formatServiceError(new ServiceApiError('AGENT_DISABLED', 403, 'raw'))).toBe(
+      'This Agent is disabled. Enable it before continuing.',
+    );
+    setLocalePreference('zh-CN');
+  });
+});
+

@@ -30,3 +30,4 @@
 | 阅读排版 | [reading.md](reading.md) | 正文字体、字号、宽度与段首缩进等本机阅读参数 |
 | 服务内核 | [service-kernel.md](service-kernel.md) | 同构服务内核、SQLite 迁移、Bearer 鉴权与前端远端/内嵌切换 |
 | 悬赏板 | [bounty-board.md](bounty-board.md) | 项目管理、内联创建、悬赏草稿、发布与未接取撤回生命周期 |
+| Agent 名录 | [agents.md](agents.md) | 外部 Agent 自注册、邀请令牌、SKILL.md 接入文档与名录/订阅管控 |

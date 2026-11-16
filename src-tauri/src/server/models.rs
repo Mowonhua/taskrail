@@ -19,6 +19,116 @@ string_enum!(BountyStatus {
     Completed => "COMPLETED", Cancelled => "CANCELLED"
 });
 string_enum!(AgentDraftPolicy { Open => "open", Draft => "draft" });
+string_enum!(AgentTier { Unranked => "Unranked", C => "C", B => "B", A => "A", S => "S" });
+string_enum!(AgentStatus { Active => "active", Disabled => "disabled", Revoked => "revoked" });
+string_enum!(AgentActivity { Idle => "idle", Busy => "busy" });
+
+/// 结构职责：邀请令牌的公开摘要；永远不包含摘要密钥或明文凭证。
+#[derive(Debug, Serialize, Deserialize)]
+pub struct InviteTokenSummary {
+    pub id: String,
+    pub label: String,
+    pub token_prefix: String,
+    pub max_uses: Option<i64>,
+    pub use_count: i64,
+    pub expires_at: Option<String>,
+    pub revoked_at: Option<String>,
+    pub created_at: String,
+}
+
+/// 结构职责：创建邀请；次数须为正整数，有效小时数须为有限正数。
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CreateInviteToken {
+    pub label: String,
+    pub max_uses: Option<i64>,
+    pub expires_in_hours: Option<f64>,
+}
+
+/// 结构职责：仅创建时返回明文邀请；后续列表仅返回 token 摘要。
+#[derive(Serialize)]
+pub struct CreatedInviteToken {
+    pub token: InviteTokenSummary,
+    pub raw_token: String,
+}
+
+/// 结构职责：管理员查看的准入配置及邀请摘要。
+#[derive(Serialize)]
+pub struct Onboarding {
+    pub lan_open_registration: bool,
+    pub invite_tokens: Vec<InviteTokenSummary>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateOnboarding {
+    pub lan_open_registration: bool,
+}
+
+/// 结构职责：Agent 注册输入；名称去空白后限 1 至 64 个 Unicode 字符。
+/// 约束条件：全局订阅不能同时指定非空项目列表；缺省订阅全部项目。
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RegisterAgent {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    pub invite_token: Option<String>,
+    pub subscribe_all_projects: Option<bool>,
+    pub project_ids: Option<Vec<String>>,
+}
+
+/// 结构职责：管理员名录及 Agent 自身使用的公开资料；不包含 MMR 和凭证摘要。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentSummary {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub capabilities: Vec<String>,
+    pub api_key_prefix: String,
+    pub tier: AgentTier,
+    pub placement_completed: bool,
+    pub subscribe_all_projects: bool,
+    pub project_ids: Vec<String>,
+    pub status: AgentStatus,
+    pub invite_token_id: Option<String>,
+    pub active_lease_count: i64,
+    pub last_seen_at: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// 结构职责：注册成功的一次性凭证；后续读取不能恢复 api_key。
+#[derive(Serialize)]
+pub struct RegisteredAgent {
+    pub agent: AgentSummary,
+    pub api_key: String,
+}
+
+/// 结构职责：Agent 可自行更新的资料；不允许修改名称、凭证或评级。
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct UpdateAgent {
+    pub description: Option<String>,
+    pub capabilities: Option<Vec<String>>,
+}
+
+/// 结构职责：完整替换项目订阅；空对象恢复全局订阅，false 加空列表表示不订阅。
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AgentSubscriptions {
+    pub subscribe_all_projects: Option<bool>,
+    pub project_ids: Option<Vec<String>>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AgentFilter {
+    pub status: Option<AgentStatus>,
+    pub activity: Option<AgentActivity>,
+}
 
 fn open_policy() -> AgentDraftPolicy {
     AgentDraftPolicy::Open
@@ -28,15 +138,11 @@ fn human() -> String {
 }
 
 /// 结构职责：可空字段的 PATCH 值；缺省保持原值，显式 null 清空。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum NullablePatch<T> {
+    #[default]
     Unset,
     Set(Option<T>),
-}
-impl<T> Default for NullablePatch<T> {
-    fn default() -> Self {
-        Self::Unset
-    }
 }
 impl<'de, T: Deserialize<'de>> Deserialize<'de> for NullablePatch<T> {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {

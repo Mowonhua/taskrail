@@ -124,6 +124,19 @@ async fn export_theme_file(
     .await
 }
 
+/// Markdown 导出的路径校验、文件 IO 与原子提交共用配置文件锁。
+#[tauri::command]
+async fn export_markdown_file(
+    path: String,
+    text: String,
+    state: State<'_, FileState>,
+) -> Result<(), FileError> {
+    disk(state.gate.clone(), move || {
+        storage::export_markdown_file(Path::new(&path), &text)
+    })
+    .await
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[cfg(target_os = "windows")]
@@ -190,6 +203,7 @@ pub fn run() {
             load_config,
             save_config,
             export_theme_file,
+            export_markdown_file,
             #[cfg(not(target_os = "android"))]
             get_embedded_server_info,
             #[cfg(not(target_os = "android"))]
@@ -219,4 +233,84 @@ pub fn run() {
             #[cfg(target_os = "android")]
             let _ = (app, event);
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn markdown_export_uses_generated_acl_without_plugin_fs_write_permission() {
+        let capabilities: Value =
+            serde_json::from_str(include_str!(concat!(env!("OUT_DIR"), "/capabilities.json")))
+                .unwrap();
+        let manifests: Value = serde_json::from_str(include_str!(concat!(
+            env!("OUT_DIR"),
+            "/acl-manifests.json"
+        )))
+        .unwrap();
+        assert!(manifests.get("__app-acl__").is_none());
+        assert!(capabilities["desktop"]["permissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|permission| !permission.to_string().contains("fs:")));
+
+        // 使用构建生成的真实配置与 ACL；仅替换窗口运行时，不添加测试专用授权。
+        let app = tauri::test::mock_builder()
+            .manage(FileState::default())
+            .plugin(tauri_plugin_fs::init())
+            .invoke_handler(tauri::generate_handler![export_markdown_file])
+            .build(tauri::generate_context!())
+            .unwrap();
+        let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+            .build()
+            .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("SKILL.md");
+        let invoke = |cmd: &str, body: Value| {
+            tauri::test::get_ipc_response(
+                &webview,
+                tauri::webview::InvokeRequest {
+                    cmd: cmd.into(),
+                    callback: tauri::ipc::CallbackFn(0),
+                    error: tauri::ipc::CallbackFn(1),
+                    url: if cfg!(windows) {
+                        "http://tauri.localhost"
+                    } else {
+                        "tauri://localhost"
+                    }
+                    .parse()
+                    .unwrap(),
+                    body: tauri::ipc::InvokeBody::Json(body),
+                    headers: Default::default(),
+                    invoke_key: tauri::test::INVOKE_KEY.into(),
+                },
+            )
+        };
+        let text = "# 接入指南\n";
+        assert!(invoke(
+            "export_markdown_file",
+            serde_json::json!({"path":path,"text":text})
+        )
+        .is_ok());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+
+        let denied = invoke(
+            "plugin:fs|write_text_file",
+            serde_json::json!({"path":path,"text":"uncontrolled"}),
+        )
+        .unwrap_err();
+        assert!(denied.as_str().unwrap().contains("not allowed"), "{denied}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+
+        let invalid = invoke(
+            "export_markdown_file",
+            serde_json::json!({"path":directory.path().join("SKILL.exe"),"text":text}),
+        )
+        .unwrap_err();
+        assert_eq!(invalid["code"], "MARKDOWN_EXPORT_PATH");
+        assert!(invalid["message"].as_str().unwrap().contains("扩展名"));
+    }
 }

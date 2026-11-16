@@ -6,6 +6,7 @@ use std::path::Path;
 use std::{fs, io::Write};
 
 const MAX_THEME_EXPORT_BYTES: usize = 262144;
+const MAX_MARKDOWN_EXPORT_BYTES: usize = 1024 * 1024;
 
 /// 结构职责：向调用方提供可稳定分支处理的错误。
 /// 字段说明：code 与本地语言无关，message 包含操作诊断。
@@ -189,6 +190,74 @@ pub fn export_theme_file(path: &Path, text: &str) -> Result<(), FileError> {
     sync_parent(&target)
 }
 
+/// 导出原始 UTF-8 文本，仅接受 .md、.markdown、.txt，最多 1 MiB。
+/// 调用方必须在 FileState.gate 内执行；父目录必须存在，已有目标必须是普通文件。
+pub fn export_markdown_file(path: &Path, text: &str) -> Result<(), FileError> {
+    if !path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            ["md", "markdown", "txt"]
+                .iter()
+                .any(|allowed| extension.eq_ignore_ascii_case(allowed))
+        })
+    {
+        return Err(FileError::new(
+            "MARKDOWN_EXPORT_PATH",
+            "导出文件必须使用 .md、.markdown 或 .txt 扩展名。",
+        ));
+    }
+    if text.len() > MAX_MARKDOWN_EXPORT_BYTES {
+        return Err(FileError::new(
+            "MARKDOWN_EXPORT_SIZE",
+            "导出内容不能超过 1 MiB。",
+        ));
+    }
+    // Windows 的备用数据流可伪装扩展名；盘符前缀不属于 Normal 组件。
+    #[cfg(windows)]
+    if path.components().any(|component| matches!(component, std::path::Component::Normal(name) if name.to_string_lossy().contains(':'))) {
+        return Err(FileError::new("MARKDOWN_EXPORT_PATH", "导出路径不能包含备用数据流。"));
+    }
+    let parent = path
+        .parent()
+        .filter(|value| !value.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    // 仅解析父目录，保留最终目录项，以便识别现存及悬空符号链接。
+    let parent = fs::canonicalize(parent)
+        .ok()
+        .filter(|parent| parent.is_dir())
+        .ok_or_else(|| {
+            FileError::new(
+                "MARKDOWN_EXPORT_PATH",
+                "导出目标的父路径必须是已存在的目录。",
+            )
+        })?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| FileError::new("MARKDOWN_EXPORT_PATH", "导出文件名无效。"))?;
+    let target = parent.join(name);
+    match fs::symlink_metadata(&target) {
+        Ok(metadata) if metadata.file_type().is_file() => {}
+        Ok(_) => {
+            return Err(FileError::new(
+                "MARKDOWN_EXPORT_PATH",
+                "导出目标必须是普通文件，不能是目录或符号链接。",
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => {
+            return Err(FileError::new("MARKDOWN_EXPORT_PATH", "无法检查导出目标。"));
+        }
+    }
+    // 同目录临时文件先刷新再替换目录项，避免部分正文可见或跟随目标符号链接。
+    let write_error = |_| FileError::new("MARKDOWN_EXPORT_WRITE", "无法写入导出文件。");
+    staged_file(&target, text.as_bytes())
+        .map_err(write_error)?
+        .persist(&target)
+        .map_err(|error| write_error(FileError::io(error.error)))?;
+    sync_parent(&target).map_err(write_error)
+}
+
 /// 函数职责：读取可选的应用私有 JSON 状态。
 /// 输入说明：路径来自应用配置数据目录。
 /// 输出说明：仅缺失返回 None；损坏和权限错误不伪装为空配置。
@@ -205,6 +274,135 @@ pub fn load_json(path: &Path) -> Result<Option<serde_json::Value>, FileError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn markdown_export_preserves_utf8_text_and_replaces_regular_files() {
+        let directory = tempfile::tempdir().unwrap();
+        for name in ["SKILL.md", "guide.MD", "guide.MarkDown", "guide.TXT"] {
+            let path = directory.path().join(name);
+            let text = "# 接入指南\r\n\n正文\n";
+            export_markdown_file(&path, text).unwrap();
+            assert_eq!(fs::read(&path).unwrap(), text.as_bytes());
+            export_markdown_file(&path, "替换正文").unwrap();
+            assert_eq!(fs::read_to_string(&path).unwrap(), "替换正文");
+            export_markdown_file(&path, "").unwrap();
+            assert!(fs::read(&path).unwrap().is_empty());
+        }
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 4);
+    }
+
+    #[test]
+    fn markdown_export_rejects_invalid_extensions_without_writing() {
+        let directory = tempfile::tempdir().unwrap();
+        for name in ["SKILL", ".md", "guide.json", "guide.md.exe", "guide."] {
+            let path = directory.path().join(name);
+            fs::write(&path, "original").unwrap();
+            assert_eq!(
+                export_markdown_file(&path, "replacement").unwrap_err().code,
+                "MARKDOWN_EXPORT_PATH"
+            );
+            assert_eq!(fs::read_to_string(path).unwrap(), "original");
+        }
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 5);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn markdown_export_rejects_alternate_data_stream_paths() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("original.exe");
+        fs::write(&path, "original").unwrap();
+        let stream = directory.path().join("original.exe:guide.md");
+        assert_eq!(
+            export_markdown_file(&stream, "text").unwrap_err().code,
+            "MARKDOWN_EXPORT_PATH"
+        );
+        assert!(fs::read(stream).is_err());
+        assert_eq!(fs::read_to_string(path).unwrap(), "original");
+    }
+
+    #[test]
+    fn markdown_export_accepts_the_byte_limit_and_rejects_larger_content() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("SKILL.md");
+        let at_limit = "a".repeat(1024 * 1024);
+        export_markdown_file(&path, &at_limit).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), at_limit);
+
+        for oversized in [format!("{at_limit}a"), "界".repeat(350000)] {
+            assert_eq!(
+                export_markdown_file(&path, &oversized).unwrap_err().code,
+                "MARKDOWN_EXPORT_SIZE"
+            );
+            assert_eq!(fs::read_to_string(&path).unwrap(), at_limit);
+            let missing = directory.path().join("missing.md");
+            assert_eq!(
+                export_markdown_file(&missing, &oversized).unwrap_err().code,
+                "MARKDOWN_EXPORT_SIZE"
+            );
+            assert!(!missing.exists());
+        }
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn markdown_export_rejects_missing_parent_and_parent_that_is_a_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("missing");
+        let file = directory.path().join("file");
+        fs::write(&file, "original").unwrap();
+        for parent in [&missing, &file] {
+            assert_eq!(
+                export_markdown_file(&parent.join("SKILL.md"), "text")
+                    .unwrap_err()
+                    .code,
+                "MARKDOWN_EXPORT_PATH"
+            );
+        }
+        assert!(!missing.exists());
+        assert_eq!(fs::read_to_string(file).unwrap(), "original");
+    }
+
+    #[test]
+    fn markdown_export_rejects_directory_targets() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("SKILL.md");
+        fs::create_dir(&path).unwrap();
+        let child = path.join("keep.txt");
+        fs::write(&child, "original").unwrap();
+        assert_eq!(
+            export_markdown_file(&path, "text").unwrap_err().code,
+            "MARKDOWN_EXPORT_PATH"
+        );
+        assert_eq!(fs::read_to_string(child).unwrap(), "original");
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn markdown_export_rejects_existing_and_dangling_symlinks() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("original.md");
+        fs::write(&target, "original").unwrap();
+        for (name, destination) in [
+            ("existing.md", target.clone()),
+            ("dangling.md", directory.path().join("missing.md")),
+        ] {
+            let link = directory.path().join(name);
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(&destination, &link).unwrap();
+            #[cfg(windows)]
+            std::os::windows::fs::symlink_file(&destination, &link).unwrap();
+            assert_eq!(
+                export_markdown_file(&link, "text").unwrap_err().code,
+                "MARKDOWN_EXPORT_PATH"
+            );
+            assert!(fs::symlink_metadata(link).unwrap().file_type().is_symlink());
+        }
+        assert_eq!(fs::read_to_string(target).unwrap(), "original");
+        assert!(!directory.path().join("missing.md").exists());
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 3);
+    }
 
     #[test]
     fn theme_export_preserves_utf8_text_and_replaces_regular_files() {

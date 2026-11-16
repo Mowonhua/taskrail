@@ -14,6 +14,8 @@ use std::{
 };
 use uuid::Uuid;
 
+mod agents;
+
 /// 结构职责：可克隆的文件数据库入口；每次调用独立连接，可跨进程共享同一文件。
 /// 约束条件：同步接口应在阻塞线程执行，不接受 :memory:，以保证多连接共享数据。
 #[derive(Debug, Clone)]
@@ -45,13 +47,17 @@ impl Repository {
             [],
             |r| r.get(0),
         )?;
-        if version > 1 {
+        if version > 2 {
             return Err(ApiError::internal("数据库版本高于当前服务支持版本"));
         }
         if version == 0 {
             tx.execute_batch(include_str!("schema.sql"))?;
+        } else if version == 1 {
+            tx.execute_batch(include_str!("schema_v2.sql"))?;
+        }
+        if version < 2 {
             tx.execute(
-                "INSERT INTO schema_migrations(version,applied_at) VALUES(1,?1)",
+                "INSERT INTO schema_migrations(version,applied_at) VALUES(2,?1)",
                 [now()],
             )?;
         }
@@ -505,7 +511,7 @@ mod tests {
         Repository::open(&path).unwrap();
         let conn = Connection::open(&path).unwrap();
         conn.execute(
-            "INSERT INTO schema_migrations(version,applied_at) VALUES(2,'future')",
+            "INSERT INTO schema_migrations(version,applied_at) VALUES(3,'future')",
             [],
         )
         .unwrap();
@@ -514,7 +520,7 @@ mod tests {
             conn.query_row("SELECT MAX(version) FROM schema_migrations", [], |r| r
                 .get::<_, i64>(0))
                 .unwrap(),
-            2
+            3
         );
     }
 }

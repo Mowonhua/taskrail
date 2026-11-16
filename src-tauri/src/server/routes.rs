@@ -24,8 +24,11 @@ use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use tower_http::cors::{Any, CorsLayer};
 
+mod agents;
+
 pub(super) fn router(state: AppState) -> Router {
     Router::new()
+        .merge(agents::router())
         .route("/api/v1/health", get(health))
         .route("/api/v1/admin/status", get(admin_status))
         .route("/api/v1/projects", get(list_projects).post(create_project))
@@ -61,6 +64,7 @@ pub(super) fn router(state: AppState) -> Router {
                     Method::GET,
                     Method::POST,
                     Method::PATCH,
+                    Method::PUT,
                     Method::DELETE,
                     Method::OPTIONS,
                 ]),
@@ -70,7 +74,13 @@ pub(super) fn router(state: AppState) -> Router {
 
 async fn authorize(State(state): State<AppState>, request: Request, next: Next) -> Response {
     let path = request.uri().path();
-    let protected = ["/api/v1/projects", "/api/v1/bounties", "/api/v1/admin"]
+    let protected = path != "/api/v1/agents/register"
+        && [
+            "/api/v1/projects",
+            "/api/v1/bounties",
+            "/api/v1/admin",
+            "/api/v1/agents",
+        ]
         .iter()
         .any(|prefix| {
             path == *prefix

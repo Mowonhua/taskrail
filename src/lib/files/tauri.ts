@@ -1,6 +1,6 @@
 /**
- * 文件职责：封装 Tauri 桌面环境的配置持久化、主题文件导出与外链打开通道。
- * 定义范围：仅调用保留的原生命令（load_config / save_config / export_theme_file / open_external_link / open_local_document）与插件对话框。
+ * 文件职责：封装 Tauri 桌面环境的配置持久化、主题与 Markdown 文档导出与外链打开通道。
+ * 定义范围：仅调用保留的原生命令（load_config / save_config / export_theme_file / export_markdown_file / open_external_link / open_local_document）与插件对话框。
  */
 import { invoke } from '@tauri-apps/api/core';
 import { save } from '@tauri-apps/plugin-dialog';
@@ -81,7 +81,10 @@ export class TauriFilePort implements FilePort {
       ],
     });
     if (!picked || Array.isArray(picked)) return false;
-    await call('export_theme_file', { path: picked, text });
+    await call(extension === 'json' ? 'export_theme_file' : 'export_markdown_file', {
+      path: picked,
+      text,
+    });
     return true;
   }
 

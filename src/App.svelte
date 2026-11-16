@@ -15,17 +15,27 @@
     type BountyApiPort,
   } from './lib/api/bounty-client';
   import type {
+    AgentActivity,
+    AgentFilter,
+    AgentStatus,
+    AgentSummary,
     BountyDetail,
     BountyProject,
     BountyQuery,
     BountyStatus,
     BountyTask,
+    CreatedInviteToken,
     CreateBountyInput,
+    CreateInviteTokenInput,
     CreateProjectInput,
+    InviteTokenSummary,
+    OnboardingSettings,
     ServiceMode,
+    SkillDocument,
     UpdateBountyInput,
     UpdateProjectInput,
   } from './lib/api/types';
+  import AgentDirectory from './lib/bounty/AgentDirectory.svelte';
   import BountyCard from './lib/bounty/BountyCard.svelte';
   import BountyComposerModal from './lib/bounty/BountyComposerModal.svelte';
   import BountyDetailDrawer from './lib/bounty/BountyDetailDrawer.svelte';
@@ -124,9 +134,10 @@
       : async () => false);
 
   const fallbackMemoryBountyClient = createMemoryBountyClient();
-  let activeBountyApi = $state<BountyApiPort>(initialBountyApi ?? fallbackMemoryBountyClient);
+  let activeBountyApi = $state.raw<BountyApiPort>(initialBountyApi ?? fallbackMemoryBountyClient);
   let serviceConnected = $state(true);
   let serviceUrl = $state('');
+  let serviceEpoch = $state(0);
   let serviceConnectionError = $state('');
 
   let loading = $state(true);
@@ -141,7 +152,7 @@
   let windowPlacement = $state<WindowPlacement | undefined>(undefined);
   let activeSection = $state<WorkspaceSection>(defaultPreferences.workspaceSection ?? 'bounties');
 
-  // 悬赏板与项目状态
+  // 悬赏板、项目与 Agent 准入/名录状态
   let allBountyProjects = $state<BountyProject[]>([]);
   let showArchivedProjects = $state(false);
   let bountyProjectFilter = $state<string>('ALL');
@@ -150,7 +161,20 @@
   let bounties = $state<BountyTask[]>([]);
   let actionableBounties = $state<BountyTask[]>([]);
   let inboxFilter = $state<'ALL' | 'DRAFT' | 'WAITING_INFO' | 'PENDING_ARBITRATION'>('ALL');
-  let agentFilter = $state<'all' | 'idle' | 'busy'>('all');
+
+  let onboardingSettings = $state<OnboardingSettings>({
+    lan_open_registration: false,
+    invite_tokens: [],
+  });
+  let onboardingLoaded = $state(false);
+  let onboardingLoadError = $state('');
+  let agents = $state<AgentSummary[]>([]);
+  let agentsLoaded = $state(false);
+  let agentsLoadError = $state('');
+  let agentActivityFilter = $state<'all' | AgentActivity>('all');
+  let agentStatusFilter = $state<'ALL' | AgentStatus>('ALL');
+  let skillGuideOpen = $state(false);
+  let skillDocument = $state<SkillDocument | null>(null);
 
   let composerOpen = $state(false);
   let editingBounty = $state<BountyTask | null>(null);
@@ -356,6 +380,9 @@
   let bountyListRequestSeq = 0;
   let workspaceRequestSeq = 0;
   let detailRequestSeq = 0;
+  let agentListRequestSeq = 0;
+  let onboardingRequestSeq = 0;
+  let skillDocRequestSeq = 0;
   let serviceReconnectSeq = 0;
   let connectionStatusSeq = 0;
 
@@ -375,6 +402,17 @@
       query.include_drafts = true;
     }
     return query;
+  }
+
+  function buildAgentFilter(): AgentFilter {
+    const filter: AgentFilter = {};
+    if (agentStatusFilter !== 'ALL') {
+      filter.status = agentStatusFilter;
+    }
+    if (agentActivityFilter !== 'all') {
+      filter.activity = agentActivityFilter;
+    }
+    return filter;
   }
 
   async function refreshBountiesOnly(): Promise<void> {
@@ -416,22 +454,139 @@
     }
   }
 
+  function normalizeOnboardingSettings(raw: unknown): OnboardingSettings {
+    if (raw && typeof raw === 'object') {
+      const candidate = raw as Partial<OnboardingSettings>;
+      return {
+        lan_open_registration: Boolean(candidate.lan_open_registration),
+        invite_tokens: Array.isArray(candidate.invite_tokens) ? candidate.invite_tokens : [],
+      };
+    }
+    return { lan_open_registration: false, invite_tokens: [] };
+  }
+
+  async function refreshAgentsOnly(): Promise<void> {
+    const agentsSeq = ++agentListRequestSeq;
+    const serviceSeq = serviceReconnectSeq;
+    const api = activeBountyApi;
+    const filter = buildAgentFilter();
+    try {
+      const list = await api.listAgents(filter);
+      if (
+        agentsSeq !== agentListRequestSeq ||
+        serviceSeq !== serviceReconnectSeq ||
+        api !== activeBountyApi
+      ) {
+        return;
+      }
+      agents = Array.isArray(list) ? list : [];
+      agentsLoaded = true;
+      agentsLoadError = '';
+    } catch (error) {
+      if (
+        agentsSeq === agentListRequestSeq &&
+        serviceSeq === serviceReconnectSeq &&
+        api === activeBountyApi
+      ) {
+        agentsLoadError = formatServiceError(error);
+      }
+    }
+  }
+
+  async function refreshOnboarding(): Promise<OnboardingSettings | null> {
+    const onbSeq = ++onboardingRequestSeq;
+    const serviceSeq = serviceReconnectSeq;
+    const api = activeBountyApi;
+    try {
+      const settings = normalizeOnboardingSettings(await api.getOnboardingSettings());
+      if (
+        onbSeq !== onboardingRequestSeq ||
+        serviceSeq !== serviceReconnectSeq ||
+        api !== activeBountyApi
+      ) {
+        return null;
+      }
+      onboardingSettings = settings;
+      onboardingLoaded = true;
+      onboardingLoadError = '';
+      return settings;
+    } catch (error) {
+      if (
+        onbSeq === onboardingRequestSeq &&
+        serviceSeq === serviceReconnectSeq &&
+        api === activeBountyApi
+      ) {
+        onboardingLoadError = formatServiceError(error);
+      }
+      return null;
+    }
+  }
+
+  async function loadSkillMarkdown(options?: {
+    baseUrl?: string;
+    inviteToken?: string;
+  }): Promise<SkillDocument> {
+    const skillSeq = ++skillDocRequestSeq;
+    const serviceSeq = serviceReconnectSeq;
+    const api = activeBountyApi;
+    const resolvedBaseUrl = options?.baseUrl?.trim() || serviceUrl.trim() || undefined;
+    try {
+      const doc = await api.getSkillMarkdown({
+        ...(resolvedBaseUrl ? { baseUrl: resolvedBaseUrl } : {}),
+        ...(options?.inviteToken ? { inviteToken: options.inviteToken } : {}),
+      });
+      if (
+        skillSeq === skillDocRequestSeq &&
+        serviceSeq === serviceReconnectSeq &&
+        api === activeBountyApi
+      ) {
+        skillDocument = doc;
+      }
+      return doc;
+    } catch (error) {
+      if (
+        skillSeq === skillDocRequestSeq &&
+        serviceSeq === serviceReconnectSeq &&
+        api === activeBountyApi
+      ) {
+        skillDocument = null;
+      }
+      throw error;
+    }
+  }
+
   async function refreshBountyWorkspace(
     throwOnError = false,
     inheritedStatusSeq?: number,
   ): Promise<void> {
     const workspaceSeq = ++workspaceRequestSeq;
     const listSeq = ++bountyListRequestSeq;
+    const agentsSeq = ++agentListRequestSeq;
+    const onbSeq = ++onboardingRequestSeq;
     const statusSeq = inheritedStatusSeq ?? ++connectionStatusSeq;
     const serviceSeq = serviceReconnectSeq;
     const api = activeBountyApi;
     const query = buildBountyQuery();
+    const agentFilterQuery = buildAgentFilter();
     try {
-      const [projectsList, filteredList, fullList] = await Promise.all([
-        api.listProjects(true),
-        api.listBounties(query),
-        api.listBounties({ include_drafts: true }),
-      ]);
+      const [projectsList, filteredList, fullList, onboardingSettled, agentsSettled] =
+        await Promise.all([
+          api.listProjects(true),
+          api.listBounties(query),
+          api.listBounties({ include_drafts: true }),
+          typeof api.getOnboardingSettings === 'function'
+            ? Promise.allSettled([api.getOnboardingSettings()]).then(([result]) => result)
+            : Promise.resolve({
+                status: 'fulfilled' as const,
+                value: { lan_open_registration: false, invite_tokens: [] } satisfies OnboardingSettings,
+              }),
+          typeof api.listAgents === 'function'
+            ? Promise.allSettled([api.listAgents(agentFilterQuery)]).then(([result]) => result)
+            : Promise.resolve({
+                status: 'fulfilled' as const,
+                value: [] satisfies AgentSummary[],
+              }),
+        ]);
       if (
         workspaceSeq !== workspaceRequestSeq ||
         serviceSeq !== serviceReconnectSeq ||
@@ -454,6 +609,32 @@
             item.status === 'WAITING_INFO' ||
             item.status === 'PENDING_ARBITRATION',
         );
+      }
+      if (
+        onbSeq === onboardingRequestSeq &&
+        serviceSeq === serviceReconnectSeq &&
+        api === activeBountyApi
+      ) {
+        if (onboardingSettled.status === 'fulfilled') {
+          onboardingSettings = normalizeOnboardingSettings(onboardingSettled.value);
+          onboardingLoaded = true;
+          onboardingLoadError = '';
+        } else {
+          onboardingLoadError = formatServiceError(onboardingSettled.reason);
+        }
+      }
+      if (
+        agentsSeq === agentListRequestSeq &&
+        serviceSeq === serviceReconnectSeq &&
+        api === activeBountyApi
+      ) {
+        if (agentsSettled.status === 'fulfilled') {
+          agents = Array.isArray(agentsSettled.value) ? agentsSettled.value : [];
+          agentsLoaded = true;
+          agentsLoadError = '';
+        } else {
+          agentsLoadError = formatServiceError(agentsSettled.reason);
+        }
       }
       if (statusSeq === connectionStatusSeq) {
         serviceConnected = true;
@@ -506,8 +687,29 @@
       if (serviceSeq !== serviceReconnectSeq) {
         return;
       }
+      const switchingClient = resolved.api !== activeBountyApi || resolved.url !== serviceUrl;
       activeBountyApi = resolved.api;
       serviceUrl = resolved.url;
+      skillDocument = null;
+      skillDocRequestSeq += 1;
+      if (switchingClient) {
+        serviceEpoch += 1;
+        bountyListRequestSeq += 1;
+        workspaceRequestSeq += 1;
+        detailRequestSeq += 1;
+        agentListRequestSeq += 1;
+        onboardingRequestSeq += 1;
+        allBountyProjects = [];
+        bounties = [];
+        actionableBounties = [];
+        onboardingSettings = { lan_open_registration: false, invite_tokens: [] };
+        onboardingLoaded = false;
+        onboardingLoadError = '';
+        agents = [];
+        agentsLoaded = false;
+        agentsLoadError = '';
+        activeDetail = null;
+      }
       statusSeq = ++connectionStatusSeq;
       await refreshBountyWorkspace(true, statusSeq);
     } catch (error) {
@@ -536,8 +738,12 @@
   }
 
   async function handleCreateBountyProject(input: CreateProjectInput): Promise<BountyProject> {
-    const created = await activeBountyApi.createProject(input);
-    await refreshBountyWorkspace();
+    const serviceSeq = serviceReconnectSeq;
+    const api = activeBountyApi;
+    const created = await api.createProject(input);
+    if (serviceSeq === serviceReconnectSeq && api === activeBountyApi) {
+      await refreshBountyWorkspace();
+    }
     return created;
   }
 
@@ -545,14 +751,173 @@
     id: string,
     input: UpdateProjectInput,
   ): Promise<BountyProject> {
-    const updated = await activeBountyApi.updateProject(id, input);
-    await refreshBountyWorkspace();
+    const serviceSeq = serviceReconnectSeq;
+    const api = activeBountyApi;
+    const updated = await api.updateProject(id, input);
+    if (serviceSeq === serviceReconnectSeq && api === activeBountyApi) {
+      await refreshBountyWorkspace();
+    }
     return updated;
   }
 
   async function handleDeleteBountyProject(id: string): Promise<void> {
-    await activeBountyApi.deleteProject(id);
-    await refreshBountyWorkspace();
+    const serviceSeq = serviceReconnectSeq;
+    const api = activeBountyApi;
+    await api.deleteProject(id);
+    if (serviceSeq === serviceReconnectSeq && api === activeBountyApi) {
+      await refreshBountyWorkspace();
+    }
+  }
+
+  async function handleToggleLanRegistration(enabled: boolean): Promise<OnboardingSettings> {
+    const onbSeq = ++onboardingRequestSeq;
+    const serviceSeq = serviceReconnectSeq;
+    const api = activeBountyApi;
+    const updated = normalizeOnboardingSettings(
+      await api.updateOnboardingSettings({ lan_open_registration: enabled }),
+    );
+    if (
+      onbSeq === onboardingRequestSeq &&
+      serviceSeq === serviceReconnectSeq &&
+      api === activeBountyApi
+    ) {
+      onboardingSettings = updated;
+      onboardingLoaded = true;
+      onboardingLoadError = '';
+      skillDocument = null;
+      skillDocRequestSeq += 1;
+    }
+    return updated;
+  }
+
+  async function handleCreateInviteToken(
+    input?: CreateInviteTokenInput,
+  ): Promise<CreatedInviteToken> {
+    const serviceSeq = serviceReconnectSeq;
+    const api = activeBountyApi;
+    const created = await api.createInviteToken(input);
+    if (serviceSeq === serviceReconnectSeq && api === activeBountyApi) {
+      const existingTokens = Array.isArray(onboardingSettings.invite_tokens)
+        ? onboardingSettings.invite_tokens
+        : [];
+      const exists = existingTokens.some(item => item.id === created.token.id);
+      onboardingSettings = {
+        ...onboardingSettings,
+        invite_tokens: exists
+          ? existingTokens.map(item => (item.id === created.token.id ? created.token : item))
+          : [created.token, ...existingTokens],
+      };
+      try {
+        await refreshOnboarding();
+      } catch {
+        // refreshOnboarding 内部已记录 onboardingLoadError，此处兜底避免吞掉已成功签发的明文令牌
+      }
+    }
+    return created;
+  }
+
+  async function handleRevokeInviteToken(id: string): Promise<InviteTokenSummary> {
+    const serviceSeq = serviceReconnectSeq;
+    const api = activeBountyApi;
+    const revoked = await api.revokeInviteToken(id);
+    if (serviceSeq === serviceReconnectSeq && api === activeBountyApi) {
+      const existingTokens = Array.isArray(onboardingSettings.invite_tokens)
+        ? onboardingSettings.invite_tokens
+        : [];
+      const exists = existingTokens.some(item => item.id === id || item.id === revoked.id);
+      onboardingSettings = {
+        ...onboardingSettings,
+        invite_tokens: exists
+          ? existingTokens.map(item => (item.id === id || item.id === revoked.id ? revoked : item))
+          : [revoked, ...existingTokens],
+      };
+      skillDocument = null;
+      skillDocRequestSeq += 1;
+      try {
+        await refreshOnboarding();
+      } catch {
+        // refreshOnboarding 内部已记录 onboardingLoadError，不回滚本地已作废状态也不对外抛错
+      }
+    }
+    return revoked;
+  }
+
+  async function handleExportSkillMarkdown(doc: SkillDocument): Promise<boolean> {
+    const serviceSeq = serviceReconnectSeq;
+    const api = activeBountyApi;
+    const filename = doc.filename || 'SKILL.md';
+    if (files.exportText) {
+      const exported = await files.exportText(doc.content, filename);
+      if (serviceSeq !== serviceReconnectSeq || api !== activeBountyApi) {
+        return false;
+      }
+      return exported;
+    }
+    if (typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function') {
+      const url = URL.createObjectURL(
+        new Blob([doc.content], { type: 'text/markdown;charset=utf-8' }),
+      );
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = filename;
+      link.click();
+      URL.revokeObjectURL(url);
+      return serviceSeq === serviceReconnectSeq && api === activeBountyApi;
+    }
+    return false;
+  }
+
+  async function handleOpenSkillGuide(): Promise<void> {
+    const serviceSeq = serviceReconnectSeq;
+    const api = activeBountyApi;
+    skillDocument = null;
+    skillGuideOpen = true;
+    try {
+      await loadSkillMarkdown();
+    } catch (error) {
+      if (skillGuideOpen && serviceSeq === serviceReconnectSeq && api === activeBountyApi) {
+        showToast(formatServiceError(error));
+      }
+    }
+  }
+
+  async function handleDisableAgent(id: string): Promise<AgentSummary> {
+    const serviceSeq = serviceReconnectSeq;
+    const api = activeBountyApi;
+    const updated = await api.disableAgent(id);
+    if (serviceSeq === serviceReconnectSeq && api === activeBountyApi) {
+      await refreshAgentsOnly();
+      if (serviceSeq === serviceReconnectSeq && api === activeBountyApi) {
+        showToast($t('已停用 Agent'));
+      }
+    }
+    return updated;
+  }
+
+  async function handleEnableAgent(id: string): Promise<AgentSummary> {
+    const serviceSeq = serviceReconnectSeq;
+    const api = activeBountyApi;
+    const updated = await api.enableAgent(id);
+    if (serviceSeq === serviceReconnectSeq && api === activeBountyApi) {
+      await refreshAgentsOnly();
+      if (serviceSeq === serviceReconnectSeq && api === activeBountyApi) {
+        showToast($t('已启用 Agent'));
+      }
+    }
+    return updated;
+  }
+
+  async function handleRevokeAgent(id: string): Promise<AgentSummary> {
+    const serviceSeq = serviceReconnectSeq;
+    const api = activeBountyApi;
+    const updated = await api.revokeAgent(id);
+    if (serviceSeq === serviceReconnectSeq && api === activeBountyApi) {
+      await refreshAgentsOnly();
+      if (serviceSeq === serviceReconnectSeq && api === activeBountyApi) {
+        showToast($t('已吊销 Agent'));
+      }
+    }
+    return updated;
   }
 
   async function handleCreateBounty(input: CreateBountyInput): Promise<BountyTask> {
@@ -1034,7 +1399,11 @@
         registerDrawerGestures({
           isOpen: () => mobileSidebarOpen,
           blocked: () =>
-            iconPickerOpen || updateDialogOpen || composerOpen || activeDetail !== null,
+            iconPickerOpen ||
+            updateDialogOpen ||
+            composerOpen ||
+            skillGuideOpen ||
+            activeDetail !== null,
           setOpen: open => {
             mobileSidebarOpen = open;
             preferences = { ...preferences, sidebarOpen: open, sidebarCollapsed: !open };
@@ -1573,53 +1942,50 @@
               <p class="view-description">{sectionMeta.description}</p>
             </div>
             <div class="view-hero-actions">
-              <span class="protocol-pill">{$t('接入指南')}</span>
+              <button
+                type="button"
+                class="secondary-action"
+                data-action="open-skill-guide"
+                onclick={() => void handleOpenSkillGuide()}
+              >
+                {$t('接入指南 (SKILL.md)')}
+              </button>
             </div>
           </header>
 
-          <div class="workspace-toolbar" data-slot="agents-toolbar">
-            <div class="filter-pills" role="group" aria-label={$t('Agent 名录')}>
-              {#each [
-                { id: 'all', label: $t('全部 Agent') },
-                { id: 'idle', label: $t('空闲可接单') },
-                { id: 'busy', label: $t('执行任务中') },
-              ] as item (item.id)}
-                <button
-                  type="button"
-                  class="filter-pill"
-                  class:active={agentFilter === item.id}
-                  onclick={() => {
-                    agentFilter = item.id as typeof agentFilter;
-                  }}
-                >
-                  {item.label}
-                </button>
-              {/each}
-            </div>
-          </div>
-
-          <div class="skeleton-stage" data-slot="agents-region">
-            <div class="empty-state-card">
-              <h2 class="empty-state-title">{$t('暂无已注册的 Agent')}</h2>
-              <p class="empty-state-copy">
-                {$t('外部 Agent 可阅读接入说明自助完成注册并获取专属凭证，在此展示能力标签与履约统计。')}
-              </p>
-            </div>
-
-            <div class="skeleton-grid two-columns">
-              <article class="skeleton-card">
-                <span class="skeleton-badge">{$t('接入规范')}</span>
-                <h3>{$t('自助准入与鉴权')}</h3>
-                <p>{$t('提供标准化接入说明，Agent 完成注册后凭专属访问凭证认领与交付悬赏。')}</p>
-              </article>
-
-              <article class="skeleton-card">
-                <span class="skeleton-badge">{$t('履约档案')}</span>
-                <h3>{$t('信誉与交付追踪')}</h3>
-                <p>{$t('记录完成数、按时交付率与验收通过记录，辅助多 Agent 协作调度。')}</p>
-              </article>
-            </div>
-          </div>
+          <AgentDirectory
+            {agents}
+            {agentsLoaded}
+            {agentsLoadError}
+            projectsById={bountyProjectsById}
+            activityFilter={agentActivityFilter}
+            statusFilter={agentStatusFilter}
+            {skillGuideOpen}
+            {skillDocument}
+            {serviceUrl}
+            {serviceEpoch}
+            onRetryLoadAgents={refreshAgentsOnly}
+            onChangeActivityFilter={next => {
+              agentActivityFilter = next;
+              void refreshAgentsOnly();
+            }}
+            onChangeStatusFilter={next => {
+              agentStatusFilter = next;
+              void refreshAgentsOnly();
+            }}
+            onDisableAgent={handleDisableAgent}
+            onEnableAgent={handleEnableAgent}
+            onRevokeAgent={handleRevokeAgent}
+            onOpenSkillGuide={() => void handleOpenSkillGuide()}
+            onCloseSkillGuide={() => {
+              skillDocRequestSeq += 1;
+              skillGuideOpen = false;
+            }}
+            onLoadSkillMarkdown={loadSkillMarkdown}
+            onExportSkillMarkdown={handleExportSkillMarkdown}
+            onNavigateToSettings={() => selectSection('settings')}
+            onNotify={showToast}
+          />
         </section>
       {:else if activeSection === 'settings'}
         <section class="workspace-view workspace-settings-view" aria-labelledby="view-heading-settings" data-view="settings">
@@ -1641,9 +2007,14 @@
               {themeError}
               {serviceConnected}
               {serviceUrl}
+              {serviceEpoch}
               {serviceConnectionError}
               bountyProjects={settingsBountyProjects}
               {showArchivedProjects}
+              {onboardingSettings}
+              {onboardingLoaded}
+              {onboardingLoadError}
+              {skillDocument}
               desktop={capabilities.desktop}
               mobile={Boolean(files.isMobile)}
               onSelectLanguage={handleSelectLanguage}
@@ -1664,6 +2035,13 @@
               onCreateBountyProject={handleCreateBountyProject}
               onUpdateBountyProject={handleUpdateBountyProject}
               onDeleteBountyProject={handleDeleteBountyProject}
+              onRetryLoadOnboarding={refreshOnboarding}
+              onToggleLanRegistration={handleToggleLanRegistration}
+              onCreateInviteToken={handleCreateInviteToken}
+              onRevokeInviteToken={handleRevokeInviteToken}
+              onLoadSkillMarkdown={loadSkillMarkdown}
+              onExportSkillMarkdown={handleExportSkillMarkdown}
+              onNotify={showToast}
             />
           </div>
         </section>
