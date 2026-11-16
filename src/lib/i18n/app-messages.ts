@@ -521,6 +521,12 @@ export const appMessages: Readonly<Record<string, string>> = {
   "导出路径不能包含备用数据流。": "The export path must not contain alternate data streams.",
   "无法检查导出目标。": "Could not inspect the export target.",
   "导出内容不能超过 1 MiB。": "Exported content must not exceed 1 MiB.",
-  "无法写入导出文件。": "Could not write the exported file."
+  "无法写入导出文件。": "Could not write the exported file.",
+  "在线长连接": "Live stream",
+  "离线": "Offline",
+  "连接通道": "Channel",
+  "最近推送": "Last pushed",
+  "从未推送": "Never pushed",
+  "刷新": "Refresh"
 };
 

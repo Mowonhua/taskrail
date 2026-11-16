@@ -14,6 +14,7 @@ import {
   registerAgent,
 } from './bounty-client';
 import {
+  formatAgentChannelStatus,
   formatAgentStatus,
   formatAgentSubscriptionSummary,
   formatAgentTier,
@@ -857,6 +858,11 @@ describe('Issue 03 辅助格式化函数与中英文翻译', () => {
       invite_token_id: null,
       active_lease_count: 0,
       last_seen_at: null,
+      channel_status: 'offline',
+      stream_connected: false,
+      webhook_configured: false,
+      webhook_url: null,
+      last_pushed_at: null,
       created_at: '2026-11-17T00:00:00.000Z',
       updated_at: '2026-11-17T00:00:00.000Z',
     };
@@ -895,4 +901,378 @@ describe('Issue 03 辅助格式化函数与中英文翻译', () => {
     setLocalePreference('zh-CN');
   });
 });
+
+describe('Issue 04 HTTP Agent 客户端（Webhook 配置、Inbox 与 Ack）', () => {
+  it('HttpAgentClient 正确构造 Webhook 读写、Inbox 查询参数与 Ack 请求', async () => {
+    const calls: Array<{ url: string; method?: string; headers: Record<string, string>; body?: string }> = [];
+    const fetchMock: typeof fetch = async (input, init) => {
+      calls.push({
+        url: String(input),
+        method: init?.method,
+        headers: (init?.headers ?? {}) as Record<string, string>,
+        body: typeof init?.body === 'string' ? init.body : undefined,
+      });
+      return jsonResponse({});
+    };
+
+    const agentClient = new HttpAgentClient('http://127.0.0.1:8420/', 'tr_ag_secret', fetchMock);
+    await agentClient.getWebhookConfig();
+    await agentClient.updateWebhookConfig({
+      webhook_url: 'https://agent.example.com/hook',
+      webhook_secret: 'custom-secret',
+    });
+    await agentClient.updateWebhookConfig({ webhook_url: null });
+    await agentClient.listEvents();
+    await agentClient.listEvents({ cursor: 0, limit: 50 });
+    await agentClient.ackEvents(42);
+
+    expect(calls.map(c => `${c.method} ${c.url}`)).toEqual([
+      'GET http://127.0.0.1:8420/api/v1/agent/me/webhook',
+      'PUT http://127.0.0.1:8420/api/v1/agent/me/webhook',
+      'PUT http://127.0.0.1:8420/api/v1/agent/me/webhook',
+      'GET http://127.0.0.1:8420/api/v1/agent/events',
+      'GET http://127.0.0.1:8420/api/v1/agent/events?cursor=0&limit=50',
+      'POST http://127.0.0.1:8420/api/v1/agent/events/ack',
+    ]);
+    for (const call of calls) {
+      expect(call.headers.Authorization).toBe('Bearer tr_ag_secret');
+    }
+    expect(JSON.parse(calls[1].body!)).toEqual({
+      webhook_url: 'https://agent.example.com/hook',
+      webhook_secret: 'custom-secret',
+    });
+    expect(JSON.parse(calls[2].body!)).toEqual({ webhook_url: null });
+    expect(JSON.parse(calls[5].body!)).toEqual({ event_id: 42 });
+  });
+});
+
+describe('createMemoryBountyClient (Issue 04 双通道推送与持久化事件收件箱)', () => {
+  it('支持注册与更新 Webhook 配置、一次性密钥返回、URL/密钥校验及通道状态更新', async () => {
+    const client = createMemoryBountyClient({ lan_open_registration: true });
+
+    // 非法 webhook_url 与空白 webhook_secret 均被拒绝
+    await expect(
+      client.registerAgent({ name: 'bad-url', webhook_url: 'ftp://example.com/hook' }),
+    ).rejects.toMatchObject({ code: 'VALIDATION_ERROR', status: 400 });
+    await expect(
+      client.registerAgent({ name: 'bad-space', webhook_url: ' https://example.com/hook' }),
+    ).rejects.toMatchObject({ code: 'VALIDATION_ERROR', status: 400 });
+    await expect(
+      client.registerAgent({ name: 'bad-sec', webhook_url: 'https://example.com/hook', webhook_secret: '   ' }),
+    ).rejects.toMatchObject({ code: 'VALIDATION_ERROR', status: 400 });
+
+    // 注册配置 webhook_url 且省略密钥时自动生成 tr_whsec_... 并仅返回一次
+    const regHook = await client.registerAgent({
+      name: 'hook-agent',
+      webhook_url: 'https://agent.example.com/events',
+    });
+    expect(regHook.webhook_secret?.startsWith('tr_whsec_')).toBe(true);
+    expect(regHook.agent.channel_status).toBe('webhook');
+    expect(regHook.agent.stream_connected).toBe(false);
+    expect(regHook.agent.webhook_configured).toBe(true);
+    expect(regHook.agent.webhook_url).toBe('https://agent.example.com/events');
+    expect(regHook.agent.last_pushed_at).toBeNull();
+    expect('webhook_secret' in regHook.agent).toBe(false);
+
+    // 读取配置不回显已有密钥
+    const hookConfig = await client.agentGetWebhookConfig(regHook.api_key);
+    expect(hookConfig).toEqual({
+      webhook_url: 'https://agent.example.com/events',
+      webhook_configured: true,
+      has_secret: true,
+      last_pushed_at: null,
+      recent_failed_count: 0,
+    });
+    expect('webhook_secret' in hookConfig).toBe(false);
+
+    // 仅更换 URL 时保留旧密钥且不再返回明文
+    const replacedUrl = await client.agentUpdateWebhookConfig(regHook.api_key, {
+      webhook_url: 'http://127.0.0.1:9001/hook',
+    });
+    expect(replacedUrl.webhook_url).toBe('http://127.0.0.1:9001/hook');
+    expect(replacedUrl.has_secret).toBe(true);
+    expect(replacedUrl.webhook_secret).toBeUndefined();
+
+    // 显式更换密钥时返回一次新密钥
+    const rotatedSecret = await client.agentUpdateWebhookConfig(regHook.api_key, {
+      webhook_url: 'http://127.0.0.1:9001/hook',
+      webhook_secret: 'my-explicit-secret',
+    });
+    expect(rotatedSecret.webhook_secret).toBe('my-explicit-secret');
+
+    // 清空 webhook_url 同时清除密钥并使通道回到 offline
+    const cleared = await client.agentUpdateWebhookConfig(regHook.api_key, { webhook_url: null });
+    expect(cleared.webhook_url).toBeNull();
+    expect(cleared.webhook_configured).toBe(false);
+    expect(cleared.has_secret).toBe(false);
+    expect(cleared.webhook_secret).toBeUndefined();
+    expect((await client.agentGetMe(regHook.api_key)).channel_status).toBe('offline');
+  });
+
+  it('精准分发：Unranked/C/B 段位映射、指定指派、订阅匹配与撤回仅通知已接收目标', async () => {
+    const client = createMemoryBountyClient({ lan_open_registration: true });
+    const p1 = await client.createProject({ name: 'Project A' });
+    const p2 = await client.createProject({ name: 'Project B' });
+
+    const unrankedSub1 = await client.registerAgent({
+      name: 'unranked-p1',
+      project_ids: [p1.id],
+    });
+    const tierBSub1 = await client.registerAgent({
+      name: 'tier-b-p1',
+      project_ids: [p1.id],
+    });
+    await client.simulateAgentTier(tierBSub1.agent.id, 'B', true);
+
+    const unsubAgent = await client.registerAgent({
+      name: 'unsub-p2',
+      project_ids: [p2.id],
+    });
+    const disabledAgent = await client.registerAgent({
+      name: 'disabled-all',
+      subscribe_all_projects: true,
+    });
+    await client.disableAgent(disabledAgent.agent.id);
+
+    // 1. DRAFT 不触发分发
+    const draft = await client.createBounty({
+      project_id: p1.id,
+      title: 'Secret Draft Title',
+      description: 'Secret Draft Body',
+      difficulty: 'C',
+      assignee_mode: 'min_tier',
+      assignee_min_tier: 'C',
+      status: 'DRAFT',
+    });
+    expect((await client.agentListEvents(unrankedSub1.api_key)).events).toEqual([]);
+
+    // 2. min_tier = C 时，Unranked 与 B 均收到 task.published；未订阅 p1 与已停用 Agent 收不到
+    await client.publishBounty(draft.id);
+    const inboxUnranked1 = await client.agentListEvents(unrankedSub1.api_key);
+    const inboxB1 = await client.agentListEvents(tierBSub1.api_key);
+    expect(inboxUnranked1.events.map(e => e.event_type)).toEqual(['task.published']);
+    expect(inboxUnranked1.events[0].bounty_id).toBe(draft.id);
+    expect(inboxUnranked1.events[0].project_id).toBe(p1.id);
+    expect(inboxUnranked1.events[0].data.title).toBe('Secret Draft Title');
+    expect(inboxB1.events.map(e => e.event_type)).toEqual(['task.published']);
+    expect((await client.agentListEvents(unsubAgent.api_key)).events).toEqual([]);
+
+    // 3. min_tier = B 直接创建为 OPEN 时，Unranked 收不到，B 级收到
+    const openMinB = await client.createBounty({
+      project_id: p1.id,
+      title: 'Need B',
+      difficulty: 'B',
+      assignee_mode: 'min_tier',
+      assignee_min_tier: 'B',
+      status: 'OPEN',
+    });
+    expect((await client.agentListEvents(unrankedSub1.api_key)).events).toHaveLength(1);
+    const inboxB2 = await client.agentListEvents(tierBSub1.api_key);
+    expect(inboxB2.events.map(e => e.bounty_id)).toEqual([draft.id, openMinB.id]);
+
+    // 4. specific 指派：即使目标 Agent 未订阅项目也收到 task.assigned，其余订阅者收不到
+    const specificBounty = await client.createBounty({
+      project_id: p1.id,
+      title: 'Direct Assignment',
+      difficulty: 'A',
+      assignee_mode: 'specific',
+      assignee_agent_id: unsubAgent.agent.id,
+      status: 'OPEN',
+    });
+    const inboxUnsub = await client.agentListEvents(unsubAgent.api_key);
+    expect(inboxUnsub.events.map(e => `${e.event_type}:${e.bounty_id}`)).toEqual([
+      `task.assigned:${specificBounty.id}`,
+    ]);
+    expect((await client.agentListEvents(unrankedSub1.api_key)).events).toHaveLength(1);
+    expect((await client.agentListEvents(tierBSub1.api_key)).events).toHaveLength(2);
+
+    // 5. 撤回 draft：变更订阅不影响撤回通知，且不泄露草稿正文；同时清理分发记录
+    await client.agentUpdateSubscriptions(unrankedSub1.api_key, {
+      subscribe_all_projects: false,
+      project_ids: [],
+    });
+    // 让 unsubAgent 此时订阅 p1，也不应收到上一轮未通知任务的撤回事件
+    await client.agentUpdateSubscriptions(unsubAgent.api_key, {
+      subscribe_all_projects: false,
+      project_ids: [p1.id],
+    });
+    await client.withdrawBounty(draft.id);
+
+    const afterWithdrawUnranked = await client.agentListEvents(unrankedSub1.api_key);
+    expect(afterWithdrawUnranked.events.map(e => e.event_type)).toEqual([
+      'task.published',
+      'task.withdrawn',
+    ]);
+    expect(afterWithdrawUnranked.events[1].data).toEqual({
+      bounty_id: draft.id,
+      project_id: p1.id,
+    });
+    expect(afterWithdrawUnranked.events[1].data.title).toBeUndefined();
+
+    const afterWithdrawB = await client.agentListEvents(tierBSub1.api_key);
+    expect(afterWithdrawB.events.map(e => `${e.event_type}:${e.bounty_id}`)).toEqual([
+      `task.published:${draft.id}`,
+      `task.published:${openMinB.id}`,
+      `task.withdrawn:${draft.id}`,
+    ]);
+    expect((await client.agentListEvents(unsubAgent.api_key)).events).toHaveLength(1);
+
+    // 再次发布 draft：按最新订阅重新计算目标（unranked-p1 已取消订阅收不到，unsub-p2 新订阅收到）
+    await client.publishBounty(draft.id);
+    expect((await client.agentListEvents(unrankedSub1.api_key)).events).toHaveLength(2);
+    expect((await client.agentListEvents(unsubAgent.api_key)).events.map(e => e.event_type)).toEqual([
+      'task.assigned',
+      'task.published',
+    ]);
+  });
+
+  it('支持游标补拉、分页、Ack 钳位不回退与实时流连接/last_pushed_at 更新', async () => {
+    const client = createMemoryBountyClient({ lan_open_registration: true });
+    const p1 = await client.createProject({ name: 'StreamProj' });
+    const reg = await client.registerAgent({
+      name: 'stream-agent',
+      webhook_url: 'https://agent.example.com/hook',
+    });
+
+    // 初始空收件箱与参数校验
+    const empty = await client.agentListEvents(reg.api_key);
+    expect(empty).toEqual({
+      events: [],
+      cursor: 0,
+      acked_event_id: 0,
+      latest_event_id: 0,
+      has_more: false,
+    });
+    await expect(client.agentListEvents(reg.api_key, { cursor: -1 })).rejects.toMatchObject({
+      code: 'VALIDATION_ERROR',
+      status: 400,
+    });
+    await expect(client.agentListEvents(reg.api_key, { limit: 0 })).rejects.toMatchObject({
+      code: 'VALIDATION_ERROR',
+      status: 400,
+    });
+    await expect(client.agentAckEvents(reg.api_key, -1)).rejects.toMatchObject({
+      code: 'VALIDATION_ERROR',
+      status: 400,
+    });
+
+    // 发布 3 个任务产生 3 条事件
+    await client.createBounty({ project_id: p1.id, title: 'T1', difficulty: 'C', assignee_mode: 'any', status: 'OPEN' });
+    await client.createBounty({ project_id: p1.id, title: 'T2', difficulty: 'C', assignee_mode: 'any', status: 'OPEN' });
+    await client.createBounty({ project_id: p1.id, title: 'T3', difficulty: 'C', assignee_mode: 'any', status: 'OPEN' });
+
+    const page1 = await client.agentListEvents(reg.api_key, { limit: 2 });
+    expect(page1.events).toHaveLength(2);
+    expect(page1.has_more).toBe(true);
+    expect(page1.cursor).toBe(page1.events[1].event_id);
+    expect(page1.acked_event_id).toBe(0);
+    expect(page1.latest_event_id).toBeGreaterThan(page1.cursor);
+
+    const page2 = await client.agentListEvents(reg.api_key, { cursor: page1.cursor, limit: 2 });
+    expect(page2.events).toHaveLength(1);
+    expect(page2.has_more).toBe(false);
+    expect(page2.cursor).toBe(page2.latest_event_id);
+
+    // 空页保留请求 cursor
+    const emptyTail = await client.agentListEvents(reg.api_key, { cursor: page2.latest_event_id });
+    expect(emptyTail.events).toEqual([]);
+    expect(emptyTail.cursor).toBe(page2.latest_event_id);
+
+    // Ack 第 1 条，再尝试回退 Ack 0 不回退；尝试超前 Ack 99999 钳位至自身最大 event_id
+    const ack1 = await client.agentAckEvents(reg.api_key, page1.events[0].event_id);
+    expect(ack1.acked_event_id).toBe(page1.events[0].event_id);
+    const ackRegress = await client.agentAckEvents(reg.api_key, 0);
+    expect(ackRegress.acked_event_id).toBe(page1.events[0].event_id);
+
+    // 建立内存实时流：立即补发 acked_event_id 之后的积压事件，切换为 streaming，并更新 last_pushed_at
+    const received: number[] = [];
+    const unsubscribe = await client.agentOpenStream(reg.api_key, ev => {
+      received.push(ev.event_id);
+    });
+    expect(received).toEqual([page1.events[1].event_id, page2.events[0].event_id]);
+
+    const streamingMe = await client.agentGetMe(reg.api_key);
+    expect(streamingMe.channel_status).toBe('streaming');
+    expect(streamingMe.stream_connected).toBe(true);
+    expect(streamingMe.webhook_configured).toBe(true);
+    expect(streamingMe.last_pushed_at).not.toBeNull();
+
+    // 实时发布第 4 个任务直接推送给流监听者
+    await client.createBounty({ project_id: p1.id, title: 'T4', difficulty: 'C', assignee_mode: 'any', status: 'OPEN' });
+    expect(received).toHaveLength(3);
+
+    const ackClamped = await client.agentAckEvents(reg.api_key, 999_999);
+    expect(ackClamped.acked_event_id).toBe(received[2]);
+
+    // 关闭流连接后恢复为 webhook（因仍配置了 webhook_url）
+    unsubscribe();
+    const afterClose = await client.agentGetMe(reg.api_key);
+    expect(afterClose.channel_status).toBe('webhook');
+    expect(afterClose.stream_connected).toBe(false);
+
+    // 模拟流与推送辅助方法覆盖
+    const simStream = await client.simulateAgentStream(reg.agent.id, true);
+    expect(simStream.channel_status).toBe('streaming');
+    await client.disableAgent(reg.agent.id);
+    const disabledSummary = (await client.listAgents())[0];
+    expect(disabledSummary.stream_connected).toBe(false);
+    expect(disabledSummary.channel_status).toBe('webhook');
+
+    const pushed = await client.simulateAgentPush(reg.agent.id, {
+      pushedAt: '2026-11-17T08:00:00.000Z',
+      recentFailedCount: 2,
+    });
+    expect(pushed.last_pushed_at).toBe('2026-11-17T08:00:00.000Z');
+  });
+});
+
+describe('Issue 04 通道状态格式化与中英文翻译', () => {
+  it('formatAgentChannelStatus 正确输出中英文状态且不含 · 分隔符', () => {
+    setLocalePreference('zh-CN');
+    const streamingZh = formatAgentChannelStatus({
+      channel_status: 'streaming',
+      stream_connected: true,
+      webhook_configured: false,
+    });
+    const webhookZh = formatAgentChannelStatus({
+      channel_status: 'webhook',
+      stream_connected: false,
+      webhook_configured: true,
+    });
+    const offlineZh = formatAgentChannelStatus({
+      channel_status: 'offline',
+      stream_connected: false,
+      webhook_configured: false,
+    });
+    expect(streamingZh).toEqual({ kind: 'streaming', label: '在线长连接' });
+    expect(webhookZh).toEqual({ kind: 'webhook', label: 'Webhook' });
+    expect(offlineZh).toEqual({ kind: 'offline', label: '离线' });
+
+    setLocalePreference('en');
+    const streamingEn = formatAgentChannelStatus({
+      channel_status: 'streaming',
+      stream_connected: true,
+      webhook_configured: true,
+    });
+    const webhookEn = formatAgentChannelStatus({
+      channel_status: 'webhook',
+      stream_connected: false,
+      webhook_configured: true,
+    });
+    const offlineEn = formatAgentChannelStatus({
+      channel_status: 'offline',
+      stream_connected: false,
+      webhook_configured: false,
+    });
+    expect(streamingEn).toEqual({ kind: 'streaming', label: 'Live stream' });
+    expect(webhookEn).toEqual({ kind: 'webhook', label: 'Webhook' });
+    expect(offlineEn).toEqual({ kind: 'offline', label: 'Offline' });
+
+    for (const entry of [streamingZh, webhookZh, offlineZh, streamingEn, webhookEn, offlineEn]) {
+      expect(entry.label).not.toContain('·');
+    }
+    setLocalePreference('zh-CN');
+  });
+});
+
 

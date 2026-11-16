@@ -1201,6 +1201,9 @@
     activeSection = section;
     preferences = { ...preferences, workspaceSection: section };
     mobileSidebarOpen = false;
+    if (section === 'agents' && serviceConnected) {
+      void refreshAgentsOnly();
+    }
     void persistConfig();
   }
 

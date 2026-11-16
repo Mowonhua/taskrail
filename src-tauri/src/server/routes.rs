@@ -25,10 +25,12 @@ use subtle::ConstantTimeEq;
 use tower_http::cors::{Any, CorsLayer};
 
 mod agents;
+mod events;
 
 pub(super) fn router(state: AppState) -> Router {
     Router::new()
         .merge(agents::router())
+        .merge(events::router())
         .route("/api/v1/health", get(health))
         .route("/api/v1/admin/status", get(admin_status))
         .route("/api/v1/projects", get(list_projects).post(create_project))
@@ -59,7 +61,11 @@ pub(super) fn router(state: AppState) -> Router {
         .layer(
             CorsLayer::new()
                 .allow_origin(Any)
-                .allow_headers([AUTHORIZATION, CONTENT_TYPE])
+                .allow_headers([
+                    AUTHORIZATION,
+                    CONTENT_TYPE,
+                    axum::http::HeaderName::from_static("last-event-id"),
+                ])
                 .allow_methods([
                     Method::GET,
                     Method::POST,

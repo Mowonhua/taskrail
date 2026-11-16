@@ -112,3 +112,75 @@
 | S-03 | 正常 | Agent 凭 `api_key` 可读写自身档案（同步刷新 `last_seen_at`）、区分「全部订阅」「指定项目」与「空订阅」整体替换订阅，并按 `created_at` 稳定顺序拉取未归档项目列表 | src-tauri/tests/server_agent_repository.rs::subscription_defaults_and_empty_selections_remain_distinct, src-tauri/tests/server_agents.rs::onboarding_validation_subscriptions_and_directory_filters, src/lib/api/bounty-client.test.ts::Issue 03 HTTP 客户端（管理员准入/名录 + Agent 门户） > HttpAgentClient 与 registerAgent 正确构造公开文档、注册及 Agent 鉴权请求, src/lib/api/bounty-client.test.ts::createMemoryBountyClient (Issue 03 Agent 准入、订阅与隔离) > 支持订阅替换校验、项目归档拒绝、停用/启用/吊销鉴权拦截与名录活跃度筛选 |
 | S-04 | 约束 | 严格隔离 `DRAFT` 任务（含指派给自身的草稿）及未订阅或指派给他人的悬赏，单条详情统一返回 `404 BOUNTY_NOT_FOUND`；停用返 `403 AGENT_DISABLED`、吊销返 `401 AGENT_REVOKED` 且终态禁止重新启用/停用；管理员凭证不可调用 Agent 门户且无效订阅或归档项目（`409 PROJECT_ARCHIVED`）保留原有订阅 | src-tauri/tests/server_agents.rs::registration_credentials_and_draft_isolation, src-tauri/tests/server_agents.rs::onboarding_validation_subscriptions_and_directory_filters, src/lib/api/bounty-client.test.ts::createMemoryBountyClient (Issue 03 Agent 准入、订阅与隔离) > 支持订阅替换校验、项目归档拒绝、停用/启用/吊销鉴权拦截与名录活跃度筛选, src/lib/api/bounty-client.test.ts::createMemoryBountyClient (Issue 03 Agent 准入、订阅与隔离) > 严格隔离 DRAFT 任务与定向任务可见性 |
 | S-05 | 异常 | 仅 Agent 列表加载失败时显式展示名录加载错误并支持重试恢复，不误显「暂无已注册的 Agent」空状态；重试加载使用独立请求序号，与停用/启用/吊销操作并发时互不取消且不锁死操作按钮 | src/lib/session/app-integration.test.ts::悬赏板工作台外壳集成测试 > 仅准入设置或 Agent 列表加载失败时显式展示错误并支持重试恢复\，且不误显假默认值或空状态, src/lib/session/app-integration.test.ts::悬赏板工作台外壳集成测试 > 准入设置或 Agent 名录重试加载与业务操作并发时互不取消\，按钮不锁死且一次性明文令牌不丢失 |
+
+## F-AGT-003 双通道推送（WebSocket/SSE + Webhook）与持久化事件收件箱
+
+悬赏发布（`OPEN`）与未接取撤回（`OPEN -> DRAFT`）在同一数据库写事务内按订阅范围、段位门槛（`Unranked` 等价 `C` 级）与定向指派规则精准分发至目标 Agent 的持久化收件箱（`agent_events`）及本轮分发快照（`bounty_dispatches`），撤回仅通知曾收到本轮分发的活跃 Agent 且不携带草稿正文。Agent 可通过 WebSocket（`/api/v1/agent/ws`）与 SSE（`/api/v1/agent/stream`）实时长连接（按 `cursor`/`Last-Event-ID` 补拉、断开自动释放连接登记并更新 `last_pushed_at`），或配置带 HMAC-SHA256 签名与指数退避重试的 Webhook 回调接收推送，亦可随时分页补拉收件箱并单调推进 `acked_event_id` 游标；工作台「Agent 名录」低密度展示通道状态（`在线长连接` / `Webhook` / `离线`，刷新失败时显示 `状态未知`）与最近推送时间，支持手动「刷新」与切页自动刷新（与停用/启用/吊销操作互不锁死）。
+
+创建提交：-
+
+### 功能关系
+
+| 类型 | 功能编号 |
+|---|---|
+| 依赖 | F-SRV-001 |
+| 依赖 | F-BNT-001 |
+| 依赖 | F-BNT-002 |
+| 依赖 | F-AGT-001 |
+| 依赖 | F-AGT-002 |
+
+### 实现
+
+| 角色 | 代码符号 |
+|---|---|
+| 主入口 | src-tauri/src/server/routes/events.rs::router |
+| 主入口 | src-tauri/src/server/push.rs::dispatch_webhooks |
+| 主入口 | src/lib/bounty/AgentDirectory.svelte::<module> |
+| 主入口 | src/App.svelte::<module> |
+| 关键实现 | src-tauri/src/server/schema_v3.sql::<module> |
+| 关键实现 | src-tauri/src/server/mod.rs::start |
+| 关键实现 | src-tauri/src/server/mod.rs::RunningServer |
+| 关键实现 | src-tauri/src/server/models.rs::AgentSummary |
+| 关键实现 | src-tauri/src/server/models.rs::AgentEvent |
+| 关键实现 | src-tauri/src/server/models.rs::AgentInbox |
+| 关键实现 | src-tauri/src/server/models.rs::UpdateWebhook |
+| 关键实现 | src-tauri/src/server/models.rs::WebhookConfig |
+| 关键实现 | src-tauri/src/server/db/events.rs::dispatch |
+| 关键实现 | src-tauri/src/server/db/events.rs::webhook_values |
+| 关键实现 | src-tauri/src/server/db/events.rs::WebhookDelivery |
+| 关键实现 | src-tauri/src/server/db/events.rs::Repository::agent_events |
+| 关键实现 | src-tauri/src/server/db/events.rs::Repository::ack_agent_events |
+| 关键实现 | src-tauri/src/server/db/events.rs::Repository::webhook_config |
+| 关键实现 | src-tauri/src/server/db/events.rs::Repository::update_webhook |
+| 关键实现 | src-tauri/src/server/db/events.rs::Repository::connect_stream |
+| 关键实现 | src-tauri/src/server/db/events.rs::Repository::mark_stream_pushed |
+| 关键实现 | src-tauri/src/server/db/events.rs::Repository::due_webhooks |
+| 关键实现 | src-tauri/src/server/db/events.rs::Repository::webhook_current_values |
+| 关键实现 | src-tauri/src/server/db/events.rs::Repository::finish_webhook |
+| 关键实现 | src-tauri/src/server/db/agents.rs::Repository::agent_summary |
+| 关键实现 | src-tauri/src/server/push.rs::Hub |
+| 关键实现 | src-tauri/src/server/push.rs::StreamGuard |
+| 关键实现 | src-tauri/src/server/push.rs::signature |
+| 关键实现 | src-tauri/src/server/push.rs::build_webhook_client |
+| 关键实现 | src-tauri/src/server/routes/events.rs::events |
+| 关键实现 | src-tauri/src/server/routes/events.rs::ack |
+| 关键实现 | src-tauri/src/server/routes/events.rs::webhook |
+| 关键实现 | src-tauri/src/server/routes/events.rs::update_webhook |
+| 关键实现 | src-tauri/src/server/routes/events.rs::sse |
+| 关键实现 | src-tauri/src/server/routes/events.rs::ws |
+| 关键实现 | src-tauri/src/server/routes/events.rs::EventStream |
+| 关键实现 | src-tauri/src/server/routes/events.rs::websocket |
+| 关键实现 | src/lib/bounty/helpers.ts::formatAgentChannelStatus |
+| 关键实现 | src/lib/api/bounty-client.ts::HttpBountyClient |
+| 关键实现 | src/lib/api/bounty-client.ts::HttpAgentClient |
+| 关键实现 | src/lib/api/bounty-client.ts::createMemoryBountyClient |
+
+### 行为场景
+
+| 编号 | 类型 | 场景与预期 | 测试 |
+|---|---|---|---|
+| S-01 | 正常 | 精准订阅与 `Unranked == C` 分发：发布或直接创建 `OPEN` 悬赏在同一写事务内写入目标 Agent 收件箱与 `bounty_dispatches` 快照；公开/最低段位悬赏仅匹配 `active` 且已订阅对应项目的 Agent（`Unranked` 按 `C` 级参与段位筛选），`specific` 定向悬赏仅向指定 `active` 目标推送 `task.assigned`；事务失败时任务与事件一并回滚，重新发布按最新订阅与状态重选接收目标 | src-tauri/tests/server_agent_events.rs::dispatch_subscription_tiers_assignment_withdrawal_and_ack, src-tauri/tests/server_agent_events.rs::dispatch_and_withdrawal_roll_back_together_and_republish_reselects_recipients, src/lib/api/bounty-client.test.ts::createMemoryBountyClient (Issue 04 双通道推送与持久化事件收件箱) > 精准分发：Unranked/C/B 段位映射、指定指派、订阅匹配与撤回仅通知已接收目标, src/lib/session/app-integration.test.ts::悬赏板工作台外壳集成测试 > 工作台发布与撤回悬赏联动精准事件分发、Unranked==C 段位匹配、Inbox 游标补拉与 Ack 推进 |
+| S-02 | 正常 | `task.withdrawn` 精准撤回：`OPEN -> DRAFT` 撤回仅向本轮 `bounty_dispatches` 中仍为 `active` 的原接收者发送 `task.withdrawn`（载荷仅含 `bounty_id` 与 `project_id`，绝不泄露草稿正文），并清空本轮分发快照 | src-tauri/tests/server_agent_events.rs::dispatch_subscription_tiers_assignment_withdrawal_and_ack, src-tauri/tests/server_agent_events.rs::dispatch_and_withdrawal_roll_back_together_and_republish_reselects_recipients, src/lib/api/bounty-client.test.ts::createMemoryBountyClient (Issue 04 双通道推送与持久化事件收件箱) > 精准分发：Unranked/C/B 段位映射、指定指派、订阅匹配与撤回仅通知已接收目标, src/lib/session/app-integration.test.ts::悬赏板工作台外壳集成测试 > 工作台发布与撤回悬赏联动精准事件分发、Unranked==C 段位匹配、Inbox 游标补拉与 Ack 推进 |
+| S-03 | 正常 | 持久化事件收件箱游标与 Ack：Agent 按 `cursor` 与 `limit` 顺序分页补拉自身事件（跨页不重不漏、严格隔离他人事件、省略 `cursor` 时从 `acked_event_id` 起读且读取不推进 Ack），通过 HTTP Ack 接口或 WebSocket `ack` 消息提交 `event_id` 时钳位到自身最大事件号且单调永不回退；若发现存在前序失败或断线间隙，先从已确认游标经 Inbox 补齐处理后再累计 Ack；非法负数游标、零 `limit` 或非法 Ack 载荷返回 `400 VALIDATION_ERROR` | src-tauri/tests/server_agent_events.rs::dispatch_subscription_tiers_assignment_withdrawal_and_ack, src-tauri/tests/server_agent_events.rs::inbox_http_isolation_validation_and_webhook_configuration, src-tauri/tests/server_agent_events.rs::large_backlog_crosses_page_boundary_without_duplicates_and_releases_last_connection, src-tauri/tests/server_agent_events.rs::webhook_failed_head_releases_successor_and_inbox_recovers_gap_before_cumulative_ack, src/lib/api/bounty-client.test.ts::Issue 04 HTTP Agent 客户端（Webhook 配置、Inbox 与 Ack） > HttpAgentClient 正确构造 Webhook 读写、Inbox 查询参数与 Ack 请求, src/lib/api/bounty-client.test.ts::createMemoryBountyClient (Issue 04 双通道推送与持久化事件收件箱) > 支持游标补拉、分页、Ack 钳位不回退与实时流连接/last_pushed_at 更新, src/lib/session/app-integration.test.ts::悬赏板工作台外壳集成测试 > 工作台发布与撤回悬赏联动精准事件分发、Unranked==C 段位匹配、Inbox 游标补拉与 Ack 推进 |
+| S-04 | 正常 | SSE/WebSocket 断线重连补拉与名录通道状态：SSE（`cursor`/`Last-Event-ID`）与 WebSocket 在数据库写锁内先登记 `Hub` 连接再按游标连续补发积压与新事件，写出事件后更新 `last_pushed_at`，断开、停用或吊销立即释放连接计数并中断在途流；工作台「Agent 名录」展示 `在线长连接` / `Webhook` / `离线` 与最近推送时间（无 `·` 分隔符，不泄露 `webhook_secret`/`api_key_hash`/`mmr`），支持手动「刷新」及切回 `agents` 自动刷新（刷新失败显示 `状态未知` 不误展旧在线状态，切回 `agents` 时仍会自动重试拉取并在恢复后清空错误与更新最新通道状态，切换连接清理错误，且并发刷新与停用互不锁死 `busyAgentId`） | src-tauri/tests/server_agent_events.rs::websocket_sse_reconnect_ack_connection_counts_and_revocation, src-tauri/tests/server_agent_events.rs::large_backlog_crosses_page_boundary_without_duplicates_and_releases_last_connection, src/lib/api/bounty-client.test.ts::createMemoryBountyClient (Issue 04 双通道推送与持久化事件收件箱) > 支持游标补拉、分页、Ack 钳位不回退与实时流连接/last_pushed_at 更新, src/lib/api/bounty-client.test.ts::Issue 04 通道状态格式化与中英文翻译 > formatAgentChannelStatus 正确输出中英文状态且不含 · 分隔符, src/lib/session/app-integration.test.ts::悬赏板工作台外壳集成测试 > Agent 名录展示连接通道状态与最近推送时间\，支持手动刷新、切页自动刷新、失败不误显旧在线状态且并发停用不锁死 |
+| S-05 | 约束 | Webhook HMAC-SHA256 签名、单 Agent 队头保序与指数退避重试：注册或更新 Webhook 校验 HTTP(S) URL 与非空白密钥，清空 URL 同时清除密钥，明文 `webhook_secret` 仅在新生成或显式更新时返回一次；`server::start` 预安装 rustls 提供者并校验 HTTP 客户端创建（失败则明确拒绝启动），独立进程与内嵌服务共用 `dispatch_webhooks`（禁用重定向、携带 `X-Taskrail-Signature`）；同一 Agent 按最小 `pending` `event_id` 队头保序投递（队头重试退避期间暂缓该 Agent 后续事件而不阻塞其他 Agent 或批容量），失败按 100/200/400/800ms 最多重试 5 次转 `failed` 后释放后续事件投递并允许经 Inbox 补齐，Agent 停用/吊销/换绑时立即停止投递，服务关闭取消在途回调并在重启后继续投递持久化积压 | src-tauri/tests/server_agent_events.rs::inbox_http_isolation_validation_and_webhook_configuration, src-tauri/tests/server_agent_events.rs::standalone_binary_delivers_signed_webhook_without_preinstalled_crypto_provider, src-tauri/tests/server_agent_events.rs::signed_webhooks_retry_then_succeed_and_stop_for_disabled_revoked_agents, src-tauri/tests/server_agent_events.rs::webhook_retry_preserves_fifo_without_blocking_other_agents_or_batch_capacity, src-tauri/tests/server_agent_events.rs::webhook_exhaustion_is_persistent, src-tauri/tests/server_agent_events.rs::webhook_failed_head_releases_successor_and_inbox_recovers_gap_before_cumulative_ack, src-tauri/tests/server_agent_events.rs::shutdown_cancels_inflight_webhook_and_restart_delivers_persistent_backlog, src/lib/api/bounty-client.test.ts::createMemoryBountyClient (Issue 04 双通道推送与持久化事件收件箱) > 支持注册与更新 Webhook 配置、一次性密钥返回、URL/密钥校验及通道状态更新 |

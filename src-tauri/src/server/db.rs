@@ -15,12 +15,14 @@ use std::{
 use uuid::Uuid;
 
 mod agents;
+mod events;
 
 /// 结构职责：可克隆的文件数据库入口；每次调用独立连接，可跨进程共享同一文件。
 /// 约束条件：同步接口应在阻塞线程执行，不接受 :memory:，以保证多连接共享数据。
 #[derive(Debug, Clone)]
 pub struct Repository {
     path: PathBuf,
+    pub(crate) hub: super::push::Hub,
 }
 
 const PROJECT_COLUMNS: &str = "id,name,icon,description,workspace_path,default_acceptance_criteria,agent_draft_policy,arbitrator_chain_json,archived,created_at,updated_at";
@@ -37,7 +39,10 @@ impl Repository {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(ApiError::internal)?;
         }
-        let repo = Self { path };
+        let repo = Self {
+            path,
+            hub: super::push::Hub::default(),
+        };
         let mut conn = repo.connect()?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -47,7 +52,7 @@ impl Repository {
             [],
             |r| r.get(0),
         )?;
-        if version > 2 {
+        if version > 3 {
             return Err(ApiError::internal("数据库版本高于当前服务支持版本"));
         }
         if version == 0 {
@@ -55,9 +60,18 @@ impl Repository {
         } else if version == 1 {
             tx.execute_batch(include_str!("schema_v2.sql"))?;
         }
-        if version < 2 {
+        if version > 0 && version < 3 {
+            tx.execute_batch(include_str!("schema_v3.sql"))?;
+        }
+        if version == 1 {
             tx.execute(
                 "INSERT INTO schema_migrations(version,applied_at) VALUES(2,?1)",
+                [now()],
+            )?;
+        }
+        if version < 3 {
+            tx.execute(
+                "INSERT INTO schema_migrations(version,applied_at) VALUES(3,?1)",
                 [now()],
             )?;
         }
@@ -166,6 +180,7 @@ impl Repository {
                 params![id,input.project_id,input.title,input.description,input.acceptance_criteria,input.difficulty.as_str(),input.assignee_mode.as_str(),input.assignee_min_tier.map(Tier::as_str),input.assignee_agent_id,input.require_arbitration,input.status.as_str(),input.created_by,published,timestamp])?;
             let b = find_bounty(tx, &id)?;
             event(tx, &b, "created", &b.created_by, None, json!({}))?;
+            if b.status == BountyStatus::Open { events::dispatch(tx, &b, false)?; }
             Ok(b)
         })
     }
@@ -292,6 +307,9 @@ impl Repository {
             };
             if changed != 1 { return Err(invalid_transition()); }
             let updated = find_bounty(tx,id)?;
+            if matches!(action, Transition::Publish | Transition::Withdraw) {
+                events::dispatch(tx, &updated, matches!(action, Transition::Withdraw))?;
+            }
             let detail = if matches!(action,Transition::Claim) { json!({"lease_id":updated.lease_id,"lease_agent_id":updated.lease_agent_id,"lease_expires_at":updated.lease_expires_at}) } else { json!({}) };
             event(tx,&updated,event_type,actor,Some(b.status),detail)?;
             Ok(updated)
@@ -511,7 +529,7 @@ mod tests {
         Repository::open(&path).unwrap();
         let conn = Connection::open(&path).unwrap();
         conn.execute(
-            "INSERT INTO schema_migrations(version,applied_at) VALUES(3,'future')",
+            "INSERT INTO schema_migrations(version,applied_at) VALUES(4,'future')",
             [],
         )
         .unwrap();
@@ -520,7 +538,7 @@ mod tests {
             conn.query_row("SELECT MAX(version) FROM schema_migrations", [], |r| r
                 .get::<_, i64>(0))
                 .unwrap(),
-            3
+            4
         );
     }
 }

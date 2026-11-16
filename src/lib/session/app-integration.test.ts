@@ -5,6 +5,7 @@ import { mount, tick, unmount } from 'svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import App from '../../App.svelte';
 import { createMemoryBountyClient } from '../api/bounty-client';
+import { formatTimestamp } from '../bounty/helpers';
 import { clipboard } from '../clipboard';
 import { emptyAppConfig } from '../config-defaults';
 import type { AppConfig, FilePort } from '../contracts';
@@ -2139,6 +2140,7 @@ describe('悬赏板工作台外壳集成测试', () => {
       .mockImplementation(() => originalGetOnboarding());
     vi.spyOn(bountyApi, 'listAgents')
       .mockRejectedValueOnce(new Error('AGENTS_503'))
+      .mockRejectedValueOnce(new Error('AGENTS_503'))
       .mockImplementation(filter => originalListAgents(filter));
 
     instance = mount(App, { target, props: { files: port, bountyApi } });
@@ -2495,5 +2497,472 @@ describe('悬赏板工作台外壳集成测试', () => {
 
     expect(lanHelpBtn.getAttribute('aria-expanded')).toBe('false');
     expect(lanHelpPopover.hidden).toBe(true);
+  });
+
+  it('Agent 名录展示连接通道状态与最近推送时间，支持手动刷新、切页自动刷新、失败不误显旧在线状态且并发停用不锁死', async () => {
+    const { port } = createMemoryPort({
+      preferences: { ...emptyAppConfig().preferences, workspaceSection: 'agents' },
+    });
+    const bountyApi = createMemoryBountyClient({ lan_open_registration: true });
+    await bountyApi.createProject({ name: '通道监测项目' });
+
+    const streamReg = await bountyApi.registerAgent({
+      name: 'stream-worker',
+      capabilities: ['rust'],
+    });
+    const hookReg = await bountyApi.registerAgent({
+      name: 'webhook-worker',
+      capabilities: ['ts'],
+      webhook_url: 'https://agent.example.test/webhook',
+    });
+    const offlineReg = await bountyApi.registerAgent({
+      name: 'offline-worker',
+      capabilities: ['svelte'],
+    });
+
+    const streamPushedAt = '2026-11-17T08:05:00.000Z';
+    const hookPushedAt = '2026-11-17T09:15:00.000Z';
+    const unsubStream1 = await bountyApi.agentOpenStream(streamReg.api_key, () => {});
+    await bountyApi.simulateAgentPush(streamReg.agent.id, { pushedAt: streamPushedAt });
+    await bountyApi.simulateAgentPush(hookReg.agent.id, { pushedAt: hookPushedAt });
+
+    const originalListAgents = bountyApi.listAgents.bind(bountyApi);
+    const originalDisableAgent = bountyApi.disableAgent.bind(bountyApi);
+
+    instance = mount(App, { target, props: { files: port, bountyApi } });
+    await flush();
+
+    const listEl = target.querySelector<HTMLElement>('[data-slot="agent-list"]')!;
+    expect(listEl).not.toBeNull();
+    expect(listEl.textContent).not.toContain('·');
+    expect(listEl.textContent).not.toContain('webhook_secret');
+    expect(listEl.textContent).not.toContain('api_key_hash');
+    expect(listEl.textContent?.toLowerCase()).not.toContain('mmr');
+    if (hookReg.webhook_secret) {
+      expect(listEl.textContent).not.toContain(hookReg.webhook_secret);
+    }
+
+    const streamCard = target.querySelector<HTMLElement>(`[data-agent-id="${streamReg.agent.id}"]`)!;
+    const hookCard = target.querySelector<HTMLElement>(`[data-agent-id="${hookReg.agent.id}"]`)!;
+    const offlineCard = target.querySelector<HTMLElement>(`[data-agent-id="${offlineReg.agent.id}"]`)!;
+
+    expect(streamCard.querySelector<HTMLElement>('[data-agent-channel]')?.dataset.agentChannel).toBe('streaming');
+    expect(streamCard.querySelector('[data-agent-channel]')?.textContent?.trim()).toBe('在线长连接');
+    expect(streamCard.querySelector('[data-slot="agent-last-pushed"]')?.textContent?.trim()).toBe(
+      formatTimestamp(streamPushedAt),
+    );
+
+    expect(hookCard.querySelector<HTMLElement>('[data-agent-channel]')?.dataset.agentChannel).toBe('webhook');
+    expect(hookCard.querySelector('[data-agent-channel]')?.textContent?.trim()).toBe('Webhook');
+    expect(hookCard.querySelector('[data-slot="agent-last-pushed"]')?.textContent?.trim()).toBe(
+      formatTimestamp(hookPushedAt),
+    );
+
+    expect(offlineCard.querySelector<HTMLElement>('[data-agent-channel]')?.dataset.agentChannel).toBe('offline');
+    expect(offlineCard.querySelector('[data-agent-channel]')?.textContent?.trim()).toBe('离线');
+    expect(offlineCard.querySelector('[data-slot="agent-last-pushed"]')?.textContent?.trim()).toBe('从未推送');
+
+    // 断开长连接并记录推送失败后点击「刷新」，名录立即更新为 offline
+    unsubStream1();
+    await bountyApi.simulateAgentPush(streamReg.agent.id, { recentFailedCount: 1 });
+    target.querySelector<HTMLButtonElement>('[data-action="refresh-agents"]')!.click();
+    await flush();
+    expect(
+      target.querySelector<HTMLElement>(`[data-agent-id="${streamReg.agent.id}"] [data-agent-channel]`)?.dataset
+        .agentChannel,
+    ).toBe('offline');
+    expect(
+      target.querySelector(`[data-agent-id="${streamReg.agent.id}"] [data-agent-channel]`)?.textContent?.trim(),
+    ).toBe('离线');
+
+    // 重新建立长连接，切到悬赏板再切回 Agent 名录时自动拉取最新在线通道状态
+    await bountyApi.agentOpenStream(streamReg.api_key, () => {});
+    target.querySelector<HTMLButtonElement>('[data-nav-section="bounties"]')!.click();
+    await flush();
+    target.querySelector<HTMLButtonElement>('[data-nav-section="agents"]')!.click();
+    await flush();
+    expect(
+      target.querySelector<HTMLElement>(`[data-agent-id="${streamReg.agent.id}"] [data-agent-channel]`)?.dataset
+        .agentChannel,
+    ).toBe('streaming');
+
+    // 在其他页签期间停用长连接 Agent，再切回 agents 自动刷新后变为 offline
+    target.querySelector<HTMLButtonElement>('[data-nav-section="bounties"]')!.click();
+    await flush();
+    await bountyApi.disableAgent(streamReg.agent.id);
+    target.querySelector<HTMLButtonElement>('[data-nav-section="agents"]')!.click();
+    await flush();
+    expect(
+      target.querySelector<HTMLElement>(`[data-agent-id="${streamReg.agent.id}"]`)?.dataset.agentStatus,
+    ).toBe('disabled');
+    expect(
+      target.querySelector<HTMLElement>(`[data-agent-id="${streamReg.agent.id}"] [data-agent-channel]`)?.dataset
+        .agentChannel,
+    ).toBe('offline');
+
+    // 重新启用并连回长连接；随后模拟手动刷新失败（503），不得继续误展「在线长连接」旧在线状态
+    await bountyApi.enableAgent(streamReg.agent.id);
+    await bountyApi.agentOpenStream(streamReg.api_key, () => {});
+    target.querySelector<HTMLButtonElement>('[data-action="refresh-agents"]')!.click();
+    await flush();
+    expect(
+      target.querySelector<HTMLElement>(`[data-agent-id="${streamReg.agent.id}"] [data-agent-channel]`)?.dataset
+        .agentChannel,
+    ).toBe('streaming');
+
+    const listSpy = vi.spyOn(bountyApi, 'listAgents');
+    listSpy.mockRejectedValueOnce(new Error('AGENTS_CHANNEL_503'));
+    target.querySelector<HTMLButtonElement>('[data-action="refresh-agents"]')!.click();
+    await flush();
+
+    expect(target.querySelector('[data-status="agent-directory-load-error"]')?.textContent).toContain(
+      'AGENTS_CHANNEL_503',
+    );
+    const channelAfterError = target.querySelector<HTMLElement>(
+      `[data-agent-id="${streamReg.agent.id}"] [data-agent-channel]`,
+    )!;
+    expect(channelAfterError.dataset.agentChannel).toBe('unknown');
+    expect(channelAfterError.textContent?.trim()).toBe('状态未知');
+
+    // 点击「刷新」恢复；随后再次触发 503，验证切去悬赏板再切回名录会自动重试并在服务恢复后清空错误横幅与「状态未知」
+    target.querySelector<HTMLButtonElement>('[data-action="refresh-agents"]')!.click();
+    await flush();
+    expect(target.querySelector('[data-status="agent-directory-load-error"]')).toBeNull();
+    expect(
+      target.querySelector<HTMLElement>(`[data-agent-id="${streamReg.agent.id}"] [data-agent-channel]`)?.dataset
+        .agentChannel,
+    ).toBe('streaming');
+
+    listSpy.mockRejectedValueOnce(new Error('AGENTS_REENTER_503'));
+    target.querySelector<HTMLButtonElement>('[data-action="refresh-agents"]')!.click();
+    await flush();
+    expect(target.querySelector('[data-status="agent-directory-load-error"]')?.textContent).toContain(
+      'AGENTS_REENTER_503',
+    );
+    expect(
+      target.querySelector<HTMLElement>(`[data-agent-id="${streamReg.agent.id}"] [data-agent-channel]`)?.dataset
+        .agentChannel,
+    ).toBe('unknown');
+
+    const callsBeforeSwitch = listSpy.mock.calls.length;
+    listSpy.mockRejectedValueOnce(new Error('AGENTS_REENTER_RETRY_503'));
+    target.querySelector<HTMLButtonElement>('[data-nav-section="bounties"]')!.click();
+    await flush();
+    target.querySelector<HTMLButtonElement>('[data-nav-section="agents"]')!.click();
+    await flush();
+    expect(listSpy.mock.calls.length).toBe(callsBeforeSwitch + 1);
+    expect(target.querySelector('[data-status="agent-directory-load-error"]')?.textContent).toContain(
+      'AGENTS_REENTER_RETRY_503',
+    );
+    expect(
+      target.querySelector<HTMLElement>(`[data-agent-id="${streamReg.agent.id}"] [data-agent-channel]`)?.dataset
+        .agentChannel,
+    ).toBe('unknown');
+
+    const recoveredPushedAt = '2026-11-17T10:30:00.000Z';
+    await bountyApi.simulateAgentPush(streamReg.agent.id, { pushedAt: recoveredPushedAt });
+    target.querySelector<HTMLButtonElement>('[data-nav-section="bounties"]')!.click();
+    await flush();
+    target.querySelector<HTMLButtonElement>('[data-nav-section="agents"]')!.click();
+    await flush();
+    expect(listSpy.mock.calls.length).toBe(callsBeforeSwitch + 2);
+    expect(target.querySelector('[data-status="agent-directory-load-error"]')).toBeNull();
+    const recoveredChannel = target.querySelector<HTMLElement>(
+      `[data-agent-id="${streamReg.agent.id}"] [data-agent-channel]`,
+    )!;
+    expect(recoveredChannel.dataset.agentChannel).toBe('streaming');
+    expect(recoveredChannel.textContent?.trim()).toBe('在线长连接');
+    expect(
+      target
+        .querySelector(`[data-agent-id="${streamReg.agent.id}"] [data-slot="agent-last-pushed"]`)
+        ?.textContent?.trim(),
+    ).toBe(formatTimestamp(recoveredPushedAt));
+
+    // 存在 agentsLoadError 时切回名录触发的自动重试也受 agentListRequestSeq 乱序保护
+    listSpy.mockRejectedValueOnce(new Error('AGENTS_RACE_503'));
+    target.querySelector<HTMLButtonElement>('[data-action="refresh-agents"]')!.click();
+    await flush();
+    expect(target.querySelector('[data-status="agent-directory-load-error"]')?.textContent).toContain(
+      'AGENTS_RACE_503',
+    );
+
+    let resolveStaleAutoRefresh!: (agents: Awaited<ReturnType<typeof originalListAgents>>) => void;
+    listSpy.mockImplementationOnce(
+      () =>
+        new Promise(resolve => {
+          resolveStaleAutoRefresh = resolve;
+        }),
+    );
+    target.querySelector<HTMLButtonElement>('[data-nav-section="bounties"]')!.click();
+    await flush();
+    target.querySelector<HTMLButtonElement>('[data-nav-section="agents"]')!.click();
+    await vi.waitFor(() => expect(resolveStaleAutoRefresh).toBeTypeOf('function'));
+
+    // 较新的手动刷新先完成并恢复正常状态，随后迟到的自动刷新结果不得覆盖最新名录
+    target.querySelector<HTMLButtonElement>('[data-action="refresh-agents"]')!.click();
+    await flush();
+    expect(target.querySelector('[data-status="agent-directory-load-error"]')).toBeNull();
+    expect(
+      target.querySelector<HTMLElement>(`[data-agent-id="${streamReg.agent.id}"] [data-agent-channel]`)?.dataset
+        .agentChannel,
+    ).toBe('streaming');
+
+    resolveStaleAutoRefresh([]);
+    await flush();
+    expect(target.querySelector('[data-status="agent-directory-load-error"]')).toBeNull();
+    expect(
+      target.querySelector<HTMLElement>(`[data-agent-id="${streamReg.agent.id}"] [data-agent-channel]`)?.dataset
+        .agentChannel,
+    ).toBe('streaming');
+
+    let resolveSlowRefresh!: (agents: Awaited<ReturnType<typeof originalListAgents>>) => void;
+    let resolvePendingDisable!: (agent: Awaited<ReturnType<typeof originalDisableAgent>>) => void;
+    let pendingDisableResult!: Promise<Awaited<ReturnType<typeof originalDisableAgent>>>;
+
+    listSpy.mockImplementationOnce(filter => {
+      const result = originalListAgents(filter);
+      return new Promise(resolve => {
+        void result.then(data => {
+          resolveSlowRefresh = () => resolve(data);
+        });
+      });
+    });
+    vi.spyOn(bountyApi, 'disableAgent').mockImplementationOnce(id => {
+      pendingDisableResult = originalDisableAgent(id);
+      return new Promise(resolve => {
+        resolvePendingDisable = resolve;
+      });
+    });
+
+    const refreshBtn = target.querySelector<HTMLButtonElement>('[data-action="refresh-agents"]')!;
+    const disableBtn = target.querySelector<HTMLButtonElement>(
+      `[data-agent-id="${streamReg.agent.id}"] [data-action="disable-agent"]`,
+    )!;
+    refreshBtn.click();
+    await vi.waitFor(() => expect(resolveSlowRefresh).toBeTypeOf('function'));
+    expect(refreshBtn.disabled).toBe(true);
+    expect(disableBtn.disabled).toBe(false);
+
+    disableBtn.click();
+    await vi.waitFor(() => expect(resolvePendingDisable).toBeTypeOf('function'));
+    expect(disableBtn.disabled).toBe(true);
+
+    // 慢刷新先完成不应提前解锁或干扰正在进行的 disableAgent，也不应让 busyAgentId 卡死
+    resolveSlowRefresh([]);
+    await flush();
+    expect(refreshBtn.disabled).toBe(false);
+    expect(disableBtn.disabled).toBe(true);
+
+    resolvePendingDisable(await pendingDisableResult);
+    await flush();
+    const finalStreamCard = target.querySelector<HTMLElement>(`[data-agent-id="${streamReg.agent.id}"]`)!;
+    expect(finalStreamCard.dataset.agentStatus).toBe('disabled');
+    expect(finalStreamCard.querySelector<HTMLElement>('[data-agent-channel]')?.dataset.agentChannel).toBe('offline');
+    const enableBtn = finalStreamCard.querySelector<HTMLButtonElement>('[data-action="enable-agent"]')!;
+    expect(enableBtn).not.toBeNull();
+    expect(enableBtn.disabled).toBe(false);
+
+    // 存在 agentsLoadError 时切换服务连接（serviceEpoch 递增），必须清理错误横幅与旧名录状态
+    listSpy.mockRejectedValueOnce(new Error('AGENTS_SWITCH_503'));
+    refreshBtn.click();
+    await flush();
+    expect(target.querySelector('[data-status="agent-directory-load-error"]')?.textContent).toContain(
+      'AGENTS_SWITCH_503',
+    );
+
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async input => {
+      const url = typeof input === 'string' ? input : input.toString();
+      if (url.startsWith('https://service-b-agents.taskrail.test/api/v1/admin/onboarding')) {
+        return new Response(
+          JSON.stringify({ lan_open_registration: false, invite_tokens: [] }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        );
+      }
+      if (
+        url.startsWith('https://service-b-agents.taskrail.test/api/v1/projects') ||
+        url.startsWith('https://service-b-agents.taskrail.test/api/v1/bounties') ||
+        url.startsWith('https://service-b-agents.taskrail.test/api/v1/agents')
+      ) {
+        return new Response(JSON.stringify([]), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
+
+    target.querySelector<HTMLButtonElement>('[data-nav-section="settings"]')!.click();
+    await flush();
+    target.querySelector<HTMLButtonElement>('[data-service-mode="remote"]')!.click();
+    await flush();
+    const remoteUrlInput = target.querySelector<HTMLInputElement>('#remote-server-url-input')!;
+    const remoteTokenInput = target.querySelector<HTMLInputElement>('#remote-admin-token-input')!;
+    remoteUrlInput.value = 'https://service-b-agents.taskrail.test';
+    remoteUrlInput.dispatchEvent(new Event('input', { bubbles: true }));
+    remoteTokenInput.value = 'service-b-admin';
+    remoteTokenInput.dispatchEvent(new Event('input', { bubbles: true }));
+    target.querySelector<HTMLButtonElement>('[data-action="save-reconnect"]')!.click();
+    await flush();
+
+    target.querySelector<HTMLButtonElement>('[data-nav-section="agents"]')!.click();
+    await flush();
+    expect(target.querySelector('[data-status="agent-directory-load-error"]')).toBeNull();
+    expect(target.querySelector('[data-slot="agent-empty-state"]')).not.toBeNull();
+  });
+
+  it('工作台发布与撤回悬赏联动精准事件分发、Unranked==C 段位匹配、Inbox 游标补拉与 Ack 推进', async () => {
+    const { port } = createMemoryPort({
+      preferences: { ...emptyAppConfig().preferences, workspaceSection: 'bounties' },
+    });
+    const bountyApi = createMemoryBountyClient({ lan_open_registration: true });
+    const projAlpha = await bountyApi.createProject({ name: '分发主项目' });
+    const projOther = await bountyApi.createProject({ name: '隔离项目' });
+
+    const unrankedReg = await bountyApi.registerAgent({
+      name: 'unranked-agent',
+      subscribe_all_projects: false,
+      project_ids: [projAlpha.id],
+    });
+    const tierBReg = await bountyApi.registerAgent({
+      name: 'tier-b-agent',
+      subscribe_all_projects: false,
+      project_ids: [projAlpha.id],
+    });
+    await bountyApi.simulateAgentTier(tierBReg.agent.id, 'B', true);
+    const otherReg = await bountyApi.registerAgent({
+      name: 'other-proj-agent',
+      subscribe_all_projects: false,
+      project_ids: [projOther.id],
+    });
+    await bountyApi.simulateAgentTier(otherReg.agent.id, 'S', true);
+
+    instance = mount(App, { target, props: { files: port, bountyApi } });
+    await flush();
+
+    async function publishFromComposer(options: {
+      title: string;
+      mode: 'any' | 'min_tier' | 'specific';
+      minTier?: 'C' | 'B' | 'A' | 'S';
+      assigneeAgentId?: string;
+    }): Promise<void> {
+      target.querySelector<HTMLButtonElement>('[data-action="open-composer"]')!.click();
+      await flush();
+      const composer = target.querySelector<HTMLElement>('[data-dialog="bounty-composer"]')!;
+      const projectSelect = composer.querySelector<HTMLSelectElement>('#bounty-project-select')!;
+      projectSelect.value = projAlpha.id;
+      projectSelect.dispatchEvent(new Event('change', { bubbles: true }));
+      const titleInput = composer.querySelector<HTMLInputElement>('#bounty-title-input')!;
+      titleInput.value = options.title;
+      titleInput.dispatchEvent(new Event('input', { bubbles: true }));
+      composer.querySelector<HTMLButtonElement>(`[data-assignee-mode="${options.mode}"]`)!.click();
+      await flush();
+      if (options.mode === 'min_tier' && options.minTier) {
+        const minTierSelect = composer.querySelector<HTMLSelectElement>('#bounty-min-tier-select')!;
+        minTierSelect.value = options.minTier;
+        minTierSelect.dispatchEvent(new Event('change', { bubbles: true }));
+      } else if (options.mode === 'specific' && options.assigneeAgentId) {
+        const agentInput = composer.querySelector<HTMLInputElement>('#bounty-assignee-agent-input')!;
+        agentInput.value = options.assigneeAgentId;
+        agentInput.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+      await flush();
+      composer.querySelector<HTMLButtonElement>('[data-action="publish-now"]')!.click();
+      await flush();
+      expect(target.querySelector('[data-dialog="bounty-composer"]')).toBeNull();
+    }
+
+    // 1. 发布 any、min_tier=B、min_tier=C 与 specific 任务
+    await publishFromComposer({ title: '公开任意段位任务', mode: 'any' });
+    await publishFromComposer({ title: 'B 级门槛任务', mode: 'min_tier', minTier: 'B' });
+    await publishFromComposer({ title: 'C 级门槛任务', mode: 'min_tier', minTier: 'C' });
+    await publishFromComposer({
+      title: '定向指派任务',
+      mode: 'specific',
+      assigneeAgentId: otherReg.agent.id,
+    });
+
+    const unrankedInboxBeforeWithdraw = await bountyApi.agentListEvents(unrankedReg.api_key, { cursor: 0 });
+    expect(unrankedInboxBeforeWithdraw.events.map(ev => ev.event_type)).toEqual([
+      'task.published',
+      'task.published',
+    ]);
+    expect(unrankedInboxBeforeWithdraw.events.map(ev => ev.data.title)).toEqual([
+      '公开任意段位任务',
+      'C 级门槛任务',
+    ]);
+
+    const tierBInboxBeforeWithdraw = await bountyApi.agentListEvents(tierBReg.api_key, { cursor: 0 });
+    expect(tierBInboxBeforeWithdraw.events.map(ev => ev.data.title)).toEqual([
+      '公开任意段位任务',
+      'B 级门槛任务',
+      'C 级门槛任务',
+    ]);
+
+    const otherInboxBeforeWithdraw = await bountyApi.agentListEvents(otherReg.api_key, { cursor: 0 });
+    expect(otherInboxBeforeWithdraw.events).toHaveLength(1);
+    expect(otherInboxBeforeWithdraw.events[0].event_type).toBe('task.assigned');
+    expect(otherInboxBeforeWithdraw.events[0].data.title).toBe('定向指派任务');
+
+    // 2. 通过工作台详情抽屉撤回「B 级门槛任务」（OPEN -> DRAFT）
+    const allBounties = await bountyApi.listBounties({ include_drafts: true });
+    const tierBBounty = allBounties.find(b => b.title === 'B 级门槛任务')!;
+    expect(tierBBounty).toBeDefined();
+
+    target
+      .querySelector<HTMLButtonElement>(`[data-bounty-id="${tierBBounty.id}"] .bounty-card-button`)!
+      .click();
+    await flush();
+    const drawer = target.querySelector<HTMLElement>('[data-dialog="bounty-detail"]')!;
+    expect(drawer.dataset.bountyStatus).toBe('OPEN');
+    drawer.querySelector<HTMLButtonElement>('[data-action="withdraw-bounty"]')!.click();
+    await flush();
+    expect(drawer.dataset.bountyStatus).toBe('DRAFT');
+
+    // 仅曾收到该任务的 tierBReg 收到 task.withdrawn（且不携带 DRAFT 敏感正文）
+    const unrankedInboxAfter = await bountyApi.agentListEvents(unrankedReg.api_key, { cursor: 0 });
+    expect(unrankedInboxAfter.events).toHaveLength(2);
+    expect(unrankedInboxAfter.events.some(ev => ev.event_type === 'task.withdrawn')).toBe(false);
+
+    const otherInboxAfter = await bountyApi.agentListEvents(otherReg.api_key, { cursor: 0 });
+    expect(otherInboxAfter.events).toHaveLength(1);
+
+    const tierBInboxAfter = await bountyApi.agentListEvents(tierBReg.api_key, { cursor: 0 });
+    expect(tierBInboxAfter.events).toHaveLength(4);
+    const withdrawnEvent = tierBInboxAfter.events[3];
+    expect(withdrawnEvent.event_type).toBe('task.withdrawn');
+    expect(withdrawnEvent.bounty_id).toBe(tierBBounty.id);
+    expect(withdrawnEvent.data).toEqual({
+      bounty_id: tierBBounty.id,
+      project_id: projAlpha.id,
+    });
+
+    // 3. 验证 Inbox cursor 分页补拉与 Ack 游标单调推进
+    const page1 = await bountyApi.agentListEvents(unrankedReg.api_key, { cursor: 0, limit: 1 });
+    expect(page1.events).toHaveLength(1);
+    expect(page1.has_more).toBe(true);
+    expect(page1.acked_event_id).toBe(0);
+
+    const page2 = await bountyApi.agentListEvents(unrankedReg.api_key, {
+      cursor: page1.cursor,
+      limit: 10,
+    });
+    expect(page2.events).toHaveLength(1);
+    expect(page2.has_more).toBe(false);
+    expect(page2.events[0].event_id).toBeGreaterThan(page1.events[0].event_id);
+
+    const ackLatest = await bountyApi.agentAckEvents(unrankedReg.api_key, page2.events[0].event_id);
+    expect(ackLatest.acked_event_id).toBe(page2.events[0].event_id);
+
+    // Ack 不回退
+    const ackRegress = await bountyApi.agentAckEvents(unrankedReg.api_key, page1.events[0].event_id);
+    expect(ackRegress.acked_event_id).toBe(page2.events[0].event_id);
+
+    // 省略 cursor 时从 acked_event_id 之后拉取
+    const afterAck = await bountyApi.agentListEvents(unrankedReg.api_key);
+    expect(afterAck.events).toEqual([]);
+    expect(afterAck.acked_event_id).toBe(page2.events[0].event_id);
   });
 });

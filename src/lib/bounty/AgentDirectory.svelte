@@ -12,6 +12,7 @@
   import { clipboard } from '../clipboard';
   import { locale, t } from '../i18n';
   import {
+    formatAgentChannelStatus,
     formatAgentStatus,
     formatAgentSubscriptionSummary,
     formatAgentTier,
@@ -338,6 +339,18 @@
       {/each}
     </div>
   </div>
+
+  {#if onRetryLoadAgents}
+    <button
+      type="button"
+      class="secondary-action"
+      data-action="refresh-agents"
+      disabled={retryingAgents}
+      onclick={() => void handleRetryLoadAgents()}
+    >
+      {$t('刷新')}
+    </button>
+  {/if}
 </div>
 
 {#if agentsLoadError}
@@ -408,6 +421,12 @@
           const _lang = $locale;
           return formatAgentStatus(agent.status);
         })()}
+        {@const channelInfo = (() => {
+          const _lang = $locale;
+          return agentsLoadError
+            ? { kind: 'unknown' as const, label: $t('状态未知') }
+            : formatAgentChannelStatus(agent);
+        })()}
         {@const subscriptionSummary = (() => {
           const _lang = $locale;
           return formatAgentSubscriptionSummary(agent, projectsById);
@@ -437,6 +456,12 @@
                 data-agent-status-pill={agent.status}
               >
                 {statusLabel}
+              </span>
+              <span
+                class="status-pill"
+                data-agent-channel={channelInfo.kind}
+              >
+                {channelInfo.label}
               </span>
               <span
                 class="detail-meta-pill"
@@ -472,6 +497,13 @@
             <div class="agent-meta-item">
               <span class="agent-meta-label">{$t('凭证前缀')}:</span>
               <code class="agent-key-prefix">{agent.api_key_prefix}…</code>
+            </div>
+
+            <div class="agent-meta-item">
+              <span class="agent-meta-label">{$t('最近推送')}:</span>
+              <span class="agent-meta-value" data-slot="agent-last-pushed">
+                {agent.last_pushed_at ? formatTimestamp(agent.last_pushed_at) : $t('从未推送')}
+              </span>
             </div>
 
             <div class="agent-meta-item">

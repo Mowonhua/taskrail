@@ -21,6 +21,7 @@
 | 关键实现 | src-tauri/src/server/mod.rs::RunningServer |
 | 关键实现 | src-tauri/src/server/config.rs::parse_config |
 | 关键实现 | src-tauri/src/server/db.rs::Repository::open |
+| 关键实现 | src-tauri/src/server/schema_v3.sql::<module> |
 | 关键实现 | src-tauri/src/server/routes.rs::router |
 | 关键实现 | src-tauri/src/server/routes.rs::authorize |
 | 关键实现 | src-tauri/src/server/routes.rs::health |
@@ -37,7 +38,7 @@
 
 | 编号 | 类型 | 场景与预期 | 测试 |
 |---|---|---|---|
-| S-01 | 正常 | 首次打开数据库执行迁移，已有 v1 库可原子升级至 v2 并保留项目、悬赏与事件历史，重复打开保留已有数据；连接启用 WAL、外键约束和 5000ms busy timeout | src-tauri/tests/server_repository.rs::migrations_persist_and_project_crud_enforces_archive_and_references, src-tauri/tests/server_agent_repository.rs::v1_upgrade_preserves_projects_bounties_and_events_and_rolls_back_failure, src-tauri/src/server/db.rs::tests::connections_enable_foreign_keys_wal_and_busy_timeout |
+| S-01 | 正常 | 首次打开数据库执行迁移，已有 v1/v2 库可原子升级至 v3 并保留项目、悬赏、Agent 与事件历史（迁移失败完整回滚列与版本号），重复打开保留已有数据；连接启用 WAL、外键约束和 5000ms busy timeout | src-tauri/tests/server_repository.rs::migrations_persist_and_project_crud_enforces_archive_and_references, src-tauri/tests/server_agent_repository.rs::v1_upgrade_preserves_projects_bounties_and_events_and_rolls_back_failure, src-tauri/tests/server_agent_events.rs::v2_migration_preserves_all_existing_tables_and_is_idempotent, src-tauri/tests/server_agent_events.rs::v3_migration_failure_rolls_back_columns_and_version, src-tauri/src/server/db.rs::tests::connections_enable_foreign_keys_wal_and_busy_timeout |
 | S-02 | 约束 | 高于当前内核支持版本的数据库拒绝打开，迁移版本号保持原值不被修改 | src-tauri/src/server/db.rs::tests::future_schema_is_rejected_without_modification |
 | S-03 | 正常 | 无头入口支持 `--help`、缺少密钥以非零退出码结束；CLI 参数覆盖环境变量，缺省使用默认地址与数据库文件；重启保留数据并更换密钥后旧密钥失效 | src-tauri/tests/server_config.rs::cli_overrides_environment_and_preserves_paths, src-tauri/tests/server_config.rs::env_fallbacks_and_defaults_are_deterministic, src-tauri/tests/server_config.rs::invalid_or_ambiguous_config_is_rejected, src-tauri/tests/server_config.rs::binary_help_and_missing_token_exit_codes, src-tauri/tests/server_config.rs::binary_starts_with_environment_and_exposes_shared_kernel, src-tauri/tests/server_http.rs::server_restart_preserves_data_changes_token_and_releases_port |
 | S-04 | 约束 | `/api/v1/health` 公开访问；管理接口缺少或携带错误凭证返回 401 `UNAUTHORIZED`；跨域预检与 401 均携带 CORS 头；非法 JSON/参数返回 400 信封，存储失败返回 500 而不泄露 SQL 细节 | src-tauri/tests/server_http.rs::http_auth_cors_health_and_validation, src-tauri/tests/server_http.rs::server_restart_preserves_data_changes_token_and_releases_port |

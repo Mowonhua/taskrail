@@ -2233,10 +2233,24 @@ button.danger-text {
 }
 
 .status-pill[data-token-status="active"],
-.status-pill[data-agent-status-pill="active"] {
+.status-pill[data-agent-status-pill="active"],
+.status-pill[data-agent-channel="streaming"] {
   border-color: var(--accent);
   background: var(--accent-soft);
   color: var(--accent);
+}
+
+.status-pill[data-agent-channel="webhook"] {
+  border-color: var(--accent);
+  background: var(--surface);
+  color: var(--ink);
+}
+
+.status-pill[data-agent-channel="offline"],
+.status-pill[data-agent-channel="unknown"] {
+  border-color: var(--field-border, var(--line));
+  background: var(--field-background, var(--canvas));
+  color: var(--muted);
 }
 
 .status-pill[data-token-status="revoked"],

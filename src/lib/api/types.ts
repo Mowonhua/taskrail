@@ -153,6 +153,7 @@ export interface BountyQuery {
 export type AgentTier = 'Unranked' | 'C' | 'B' | 'A' | 'S';
 export type AgentStatus = 'active' | 'disabled' | 'revoked';
 export type AgentActivity = 'idle' | 'busy';
+export type AgentChannelStatus = 'streaming' | 'webhook' | 'offline';
 
 export interface InviteTokenSummary {
   id: string;
@@ -205,6 +206,11 @@ export interface AgentSummary {
   invite_token_id: string | null;
   active_lease_count: number;
   last_seen_at: string | null;
+  channel_status: AgentChannelStatus;
+  stream_connected: boolean;
+  webhook_configured: boolean;
+  webhook_url: string | null;
+  last_pushed_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -221,11 +227,14 @@ export interface RegisterAgentInput {
   invite_token?: string | null;
   subscribe_all_projects?: boolean;
   project_ids?: string[];
+  webhook_url?: string | null;
+  webhook_secret?: string | null;
 }
 
 export interface RegisteredAgentResult {
   agent: AgentSummary;
   api_key: string;
+  webhook_secret?: string;
 }
 
 export interface UpdateAgentInput {
@@ -236,6 +245,43 @@ export interface UpdateAgentInput {
 export interface AgentSubscriptionsInput {
   subscribe_all_projects?: boolean;
   project_ids?: string[];
+}
+
+export type AgentEventType = 'task.published' | 'task.assigned' | 'task.withdrawn' | string;
+
+export interface AgentEvent {
+  event_id: number;
+  event_type: AgentEventType;
+  bounty_id: string | null;
+  project_id: string | null;
+  created_at: string;
+  data: Record<string, unknown>;
+}
+
+export interface AgentInboxResponse {
+  events: AgentEvent[];
+  cursor: number;
+  acked_event_id: number;
+  latest_event_id: number;
+  has_more: boolean;
+}
+
+export interface AgentWebhookConfig {
+  webhook_url: string | null;
+  webhook_configured: boolean;
+  has_secret: boolean;
+  last_pushed_at: string | null;
+  recent_failed_count: number;
+  webhook_secret?: string;
+}
+
+export interface UpdateAgentWebhookInput {
+  webhook_url: string | null;
+  webhook_secret?: string | null;
+}
+
+export interface AckAgentEventsResult {
+  acked_event_id: number;
 }
 
 export type ServiceErrorCode =

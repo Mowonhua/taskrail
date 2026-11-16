@@ -5,6 +5,7 @@
 import type { Action } from 'svelte/action';
 import {
   ServiceApiError,
+  type AgentChannelStatus,
   type AgentStatus,
   type AgentSummary,
   type AgentTier,
@@ -52,6 +53,25 @@ export function formatAgentStatus(status: AgentStatus): string {
       return translate('已停用');
     case 'revoked':
       return translate('已吊销');
+  }
+}
+
+export function formatAgentChannelStatus(
+  agent: Pick<AgentSummary, 'channel_status' | 'stream_connected' | 'webhook_configured'>,
+): { kind: AgentChannelStatus; label: string } {
+  const kind: AgentChannelStatus =
+    agent.stream_connected || agent.channel_status === 'streaming'
+      ? 'streaming'
+      : agent.webhook_configured || agent.channel_status === 'webhook'
+        ? 'webhook'
+        : 'offline';
+  switch (kind) {
+    case 'streaming':
+      return { kind: 'streaming', label: translate('在线长连接') };
+    case 'webhook':
+      return { kind: 'webhook', label: 'Webhook' };
+    case 'offline':
+      return { kind: 'offline', label: translate('离线') };
   }
 }
 

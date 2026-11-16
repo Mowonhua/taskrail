@@ -5,9 +5,15 @@ use sha2::{Digest, Sha256};
 const INVITE_COLUMNS: &str =
     "id,label,token_prefix,max_uses,use_count,expires_at,revoked_at,created_at";
 // 显式列出公开字段，避免增加存储字段时意外暴露 MMR 或密钥摘要。
-const AGENT_COLUMNS: &str = "id,name,description,capabilities_json,api_key_prefix,tier,placement_completed,subscribe_all_projects,status,invite_token_id,last_seen_at,created_at,updated_at";
+const AGENT_COLUMNS: &str = "id,name,description,capabilities_json,api_key_prefix,tier,placement_completed,subscribe_all_projects,status,invite_token_id,last_seen_at,created_at,updated_at,webhook_url,last_pushed_at";
 
 impl Repository {
+    fn agent_summary(&self, conn: &Connection, id: &str) -> Result<AgentSummary> {
+        let mut agent = find_agent(conn, id)?;
+        self.hub.decorate(&mut agent);
+        Ok(agent)
+    }
+
     /// 函数职责：在同一快照读取准入设置及令牌列表；可选配置变更与返回值原子一致。
     pub fn onboarding(&self, update: Option<UpdateOnboarding>) -> Result<Onboarding> {
         self.write(|tx| {
@@ -87,6 +93,8 @@ impl Repository {
         }
         let (all, projects) = subscriptions(input.subscribe_all_projects, input.project_ids)?;
         let api_key = credential("tr_ag_")?;
+        let (webhook_url, webhook_secret) =
+            super::events::webhook_values(input.webhook_url, input.webhook_secret, None)?;
         let agent = self.write(|tx| {
             let timestamp = now();
             let invite_id = match input.invite_token.as_deref().filter(|v| !v.trim().is_empty()) {
@@ -107,10 +115,15 @@ impl Repository {
                 tx.execute("UPDATE invite_tokens SET use_count=use_count+1 WHERE id=?1", [invite_id])?;
             }
             tx.execute("INSERT INTO agents(id,name,description,capabilities_json,api_key_hash,api_key_prefix,subscribe_all_projects,invite_token_id,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?9)",params![id,name,input.description,json!(input.capabilities).to_string(),digest(&api_key),prefix(&api_key),all,invite_id,timestamp])?;
+            tx.execute("UPDATE agents SET webhook_url=?2,webhook_secret=?3 WHERE id=?1", params![id,webhook_url,webhook_secret])?;
             replace_subscriptions(tx, &id, &projects, &timestamp)?;
-            find_agent(tx, &id)
+            self.agent_summary(tx, &id)
         })?;
-        Ok(RegisteredAgent { agent, api_key })
+        Ok(RegisteredAgent {
+            agent,
+            api_key,
+            webhook_secret,
+        })
     }
 
     /// 函数职责：按密钥摘要认证并更新最近活动时间；停用和吊销分别返回 403 与 401。
@@ -135,7 +148,7 @@ impl Repository {
                 "UPDATE agents SET last_seen_at=?2 WHERE id=?1",
                 params![id, now()],
             )?;
-            find_agent(tx, &id)
+            self.agent_summary(tx, &id)
         })
     }
 
@@ -151,7 +164,7 @@ impl Repository {
         };
         let mut agents = Vec::with_capacity(ids.len());
         for id in ids {
-            let agent = find_agent(&tx, &id)?;
+            let agent = self.agent_summary(&tx, &id)?;
             let matches = match filter.activity {
                 None => true,
                 Some(AgentActivity::Idle) => agent.active_lease_count == 0,
@@ -168,7 +181,7 @@ impl Repository {
     /// 函数职责：切换凭证状态；吊销为终态，重复吊销幂等，启用或停用不能恢复吊销凭证。
     pub fn set_agent_status(&self, id: &str, status: AgentStatus) -> Result<AgentSummary> {
         self.write(|tx| {
-            let agent = find_agent(tx, id)?;
+            let agent = self.agent_summary(tx, id)?;
             if agent.status == AgentStatus::Revoked && status != AgentStatus::Revoked {
                 return Err(invalid_transition());
             }
@@ -176,7 +189,10 @@ impl Repository {
                 "UPDATE agents SET status=?2,updated_at=?3 WHERE id=?1",
                 params![id, status.as_str(), now()],
             )?;
-            find_agent(tx, id)
+            if status != AgentStatus::Active {
+                self.hub.disconnect(id);
+            }
+            self.agent_summary(tx, id)
         })
     }
 
@@ -198,7 +214,7 @@ impl Repository {
                     now()
                 ],
             )?;
-            find_agent(tx, id)
+            self.agent_summary(tx, id)
         })
     }
 
@@ -218,7 +234,7 @@ impl Repository {
                 params![id, all, timestamp],
             )?;
             replace_subscriptions(tx, id, &projects, &timestamp)?;
-            find_agent(tx, id)
+            self.agent_summary(tx, id)
         })
     }
 
@@ -363,6 +379,11 @@ fn find_agent(conn: &Connection, id: &str) -> Result<AgentSummary> {
                     updated_at: r.get(12)?,
                     project_ids: vec![],
                     active_lease_count: 0,
+                    channel_status: "offline".into(),
+                    stream_connected: false,
+                    webhook_configured: false,
+                    webhook_url: r.get(13)?,
+                    last_pushed_at: r.get(14)?,
                 })
             },
         )
@@ -377,7 +398,7 @@ fn find_agent(conn: &Connection, id: &str) -> Result<AgentSummary> {
     agent.active_lease_count = conn.query_row("SELECT COUNT(*) FROM bounties WHERE lease_agent_id=?1 AND status IN ('IN_PROGRESS','WAITING_INFO','PENDING_ARBITRATION') AND lease_expires_at>?2", params![id,now()], |r| r.get(0))?;
     Ok(agent)
 }
-fn active_agent(conn: &Connection, id: &str) -> Result<AgentSummary> {
+pub(super) fn active_agent(conn: &Connection, id: &str) -> Result<AgentSummary> {
     let agent = find_agent(conn, id)?;
     match agent.status {
         AgentStatus::Active => Ok(agent),

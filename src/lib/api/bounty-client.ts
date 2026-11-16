@@ -6,11 +6,17 @@ import { invoke } from '@tauri-apps/api/core';
 import { parseProjectIcon } from '../project-icons';
 import {
   ServiceApiError,
+  type AckAgentEventsResult,
   type AdminStatus,
+  type AgentChannelStatus,
   type AgentDraftPolicy,
+  type AgentEvent,
   type AgentFilter,
+  type AgentInboxResponse,
   type AgentSubscriptionsInput,
   type AgentSummary,
+  type AgentTier,
+  type AgentWebhookConfig,
   type AssigneeMode,
   type BountyDetail,
   type BountyDifficulty,
@@ -31,6 +37,7 @@ import {
   type ServerHealth,
   type SkillDocument,
   type UpdateAgentInput,
+  type UpdateAgentWebhookInput,
   type UpdateBountyInput,
   type UpdateOnboardingInput,
   type UpdateProjectInput,
@@ -89,6 +96,10 @@ export interface AgentApiPort {
   listProjects(): Promise<BountyProject[]>;
   listBounties(query?: BountyQuery): Promise<BountyTask[]>;
   getBountyDetail(id: string): Promise<BountyDetail>;
+  getWebhookConfig(): Promise<AgentWebhookConfig>;
+  updateWebhookConfig(input: UpdateAgentWebhookInput): Promise<AgentWebhookConfig>;
+  listEvents(options?: { cursor?: number; limit?: number }): Promise<AgentInboxResponse>;
+  ackEvents(eventId: number): Promise<AckAgentEventsResult>;
 }
 
 export interface MemoryBountyClient extends BountyApiPort {
@@ -111,6 +122,31 @@ export interface MemoryBountyClient extends BountyApiPort {
   agentListProjects(apiKey: string): Promise<BountyProject[]>;
   agentListBounties(apiKey: string, query?: BountyQuery): Promise<BountyTask[]>;
   agentGetBountyDetail(apiKey: string, id: string): Promise<BountyDetail>;
+  agentGetWebhookConfig(apiKey: string): Promise<AgentWebhookConfig>;
+  agentUpdateWebhookConfig(
+    apiKey: string,
+    input: UpdateAgentWebhookInput,
+  ): Promise<AgentWebhookConfig>;
+  agentListEvents(
+    apiKey: string,
+    options?: { cursor?: number; limit?: number },
+  ): Promise<AgentInboxResponse>;
+  agentAckEvents(apiKey: string, eventId: number): Promise<AckAgentEventsResult>;
+  agentOpenStream(
+    apiKey: string,
+    listener: (event: AgentEvent) => void,
+    options?: { cursor?: number },
+  ): Promise<() => void>;
+  simulateAgentTier(
+    agentId: string,
+    tier: AgentTier,
+    placementCompleted?: boolean,
+  ): Promise<AgentSummary>;
+  simulateAgentStream(agentId: string, connected: boolean): Promise<AgentSummary>;
+  simulateAgentPush(
+    agentId: string,
+    options?: { pushedAt?: string | null; recentFailedCount?: number },
+  ): Promise<AgentSummary>;
 }
 
 /** 校验 http/https 服务地址并去除末尾斜杠，避免路径拼接或 URL 序列化产生额外斜杠。 */
@@ -430,6 +466,37 @@ export class HttpAgentClient implements AgentApiPort {
     );
   }
 
+  async getWebhookConfig(): Promise<AgentWebhookConfig> {
+    return await this.request<AgentWebhookConfig>('GET', '/api/v1/agent/me/webhook');
+  }
+
+  async updateWebhookConfig(input: UpdateAgentWebhookInput): Promise<AgentWebhookConfig> {
+    return await this.request<AgentWebhookConfig>('PUT', '/api/v1/agent/me/webhook', {
+      body: input,
+    });
+  }
+
+  async listEvents(options?: { cursor?: number; limit?: number }): Promise<AgentInboxResponse> {
+    const params = new URLSearchParams();
+    if (options?.cursor !== undefined) {
+      params.set('cursor', String(options.cursor));
+    }
+    if (options?.limit !== undefined) {
+      params.set('limit', String(options.limit));
+    }
+    const qs = params.toString();
+    return await this.request<AgentInboxResponse>(
+      'GET',
+      qs ? `/api/v1/agent/events?${qs}` : '/api/v1/agent/events',
+    );
+  }
+
+  async ackEvents(eventId: number): Promise<AckAgentEventsResult> {
+    return await this.request<AckAgentEventsResult>('POST', '/api/v1/agent/events/ack', {
+      body: { event_id: eventId },
+    });
+  }
+
   private async request<T>(method: string, path: string, options?: { body?: unknown }): Promise<T> {
     const headers: Record<string, string> = {
       Authorization: `Bearer ${this.apiKey}`,
@@ -655,9 +722,63 @@ interface StoredInviteToken {
   rawToken: string;
 }
 
+interface StoredAgentEvent {
+  event: AgentEvent;
+  lastError: string | null;
+}
+
 interface StoredAgent {
   summary: AgentSummary;
   apiKey: string;
+  webhookSecret: string | null;
+  ackedEventId: number;
+  inbox: StoredAgentEvent[];
+  streamListeners: Map<number, (event: AgentEvent) => void>;
+  simulatedStreamConnected: boolean;
+  simulatedRecentFailedCount: number;
+}
+
+function tierRank(tier: AgentTier | BountyDifficulty): number {
+  switch (tier) {
+    case 'S':
+      return 4;
+    case 'A':
+      return 3;
+    case 'B':
+      return 2;
+    case 'C':
+    case 'Unranked':
+      return 1;
+  }
+}
+
+function resolveWebhookValues(
+  url: string | null | undefined,
+  secret: string | null | undefined,
+  oldSecret: string | null,
+): { webhookUrl: string | null; webhookSecret: string | null } {
+  if (secret !== undefined && secret !== null) {
+    if (typeof secret !== 'string' || secret.trim().length === 0) {
+      throw new ServiceApiError('VALIDATION_ERROR', 400, 'webhook_secret 不能为空白');
+    }
+  }
+  if (url === undefined || url === null) {
+    return { webhookUrl: null, webhookSecret: null };
+  }
+  if (typeof url !== 'string' || url.length === 0 || /\s/.test(url)) {
+    throw new ServiceApiError('VALIDATION_ERROR', 400, 'webhook_url 必须为 HTTP(S) URL');
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new ServiceApiError('VALIDATION_ERROR', 400, 'webhook_url 必须为 HTTP(S) URL');
+  }
+  if ((parsed.protocol !== 'http:' && parsed.protocol !== 'https:') || !parsed.hostname) {
+    throw new ServiceApiError('VALIDATION_ERROR', 400, 'webhook_url 必须为 HTTP(S) URL');
+  }
+  const resolvedSecret = (secret ?? oldSecret) ?? `tr_whsec_${randomHex64()}`;
+  return { webhookUrl: url, webhookSecret: resolvedSecret };
 }
 
 export function createMemoryBountyClient(seed?: {
@@ -672,8 +793,11 @@ export function createMemoryBountyClient(seed?: {
   const inviteTokensByRaw = new Map<string, StoredInviteToken>();
   const agentsById = new Map<string, StoredAgent>();
   const agentsByApiKey = new Map<string, StoredAgent>();
+  const bountyDispatches = new Map<string, Set<string>>();
   let lanOpenRegistration = seed?.lan_open_registration ?? false;
   let nextEventId = 1;
+  let nextAgentEventId = 1;
+  let nextStreamConnectionId = 1;
   let lastTimestampMs = 0;
 
   function nowIso(): string {
@@ -780,7 +904,117 @@ export function createMemoryBountyClient(seed?: {
   function toAgentSummary(entry: StoredAgent): AgentSummary {
     const summary = clone(entry.summary);
     summary.active_lease_count = computeActiveLeaseCount(summary.id);
+    const streamConnected =
+      entry.summary.status === 'active' &&
+      (entry.streamListeners.size > 0 || entry.simulatedStreamConnected);
+    const webhookConfigured = summary.webhook_url !== null;
+    const channelStatus: AgentChannelStatus = streamConnected
+      ? 'streaming'
+      : webhookConfigured
+        ? 'webhook'
+        : 'offline';
+    summary.stream_connected = streamConnected;
+    summary.webhook_configured = webhookConfigured;
+    summary.channel_status = channelStatus;
     return summary;
+  }
+
+  function toWebhookConfig(entry: StoredAgent): AgentWebhookConfig {
+    const cutoffMs = Date.now() - 24 * 3_600_000;
+    const failedInInbox = entry.inbox.filter(
+      item => item.lastError !== null && Date.parse(item.event.created_at) >= cutoffMs,
+    ).length;
+    return {
+      webhook_url: entry.summary.webhook_url,
+      webhook_configured: entry.summary.webhook_url !== null,
+      has_secret: entry.webhookSecret !== null,
+      last_pushed_at: entry.summary.last_pushed_at,
+      recent_failed_count: failedInInbox + entry.simulatedRecentFailedCount,
+    };
+  }
+
+  function disconnectAgentStreams(entry: StoredAgent): void {
+    entry.streamListeners.clear();
+    entry.simulatedStreamConnected = false;
+  }
+
+  function pushAgentEvent(entry: StoredAgent, event: AgentEvent): void {
+    entry.inbox.push({ event, lastError: null });
+    if (entry.streamListeners.size > 0) {
+      entry.summary.last_pushed_at = nowIso();
+      for (const listener of entry.streamListeners.values()) {
+        listener(clone(event));
+      }
+    }
+  }
+
+  function dispatchBountyEvents(bounty: BountyTask, withdrawn: boolean): void {
+    const timestamp = nowIso();
+    if (withdrawn) {
+      const targetIds = Array.from(bountyDispatches.get(bounty.id) ?? []).sort((a, b) =>
+        a < b ? -1 : a > b ? 1 : 0,
+      );
+      for (const agentId of targetIds) {
+        const entry = agentsById.get(agentId);
+        if (!entry || entry.summary.status !== 'active') continue;
+        pushAgentEvent(entry, {
+          event_id: nextAgentEventId++,
+          event_type: 'task.withdrawn',
+          bounty_id: bounty.id,
+          project_id: bounty.project_id,
+          created_at: timestamp,
+          data: {
+            bounty_id: bounty.id,
+            project_id: bounty.project_id,
+          },
+        });
+      }
+      bountyDispatches.delete(bounty.id);
+      return;
+    }
+
+    if (bounty.status !== 'OPEN') {
+      throw new ServiceApiError('INVALID_TRANSITION', 409, '当前状态不允许此操作');
+    }
+
+    const targets = Array.from(agentsById.values())
+      .filter(entry => {
+        if (entry.summary.status !== 'active') return false;
+        if (bounty.assignee_mode === 'specific') {
+          return entry.summary.id === bounty.assignee_agent_id;
+        }
+        const subscribed =
+          entry.summary.subscribe_all_projects ||
+          entry.summary.project_ids.includes(bounty.project_id);
+        if (!subscribed) return false;
+        if (bounty.assignee_mode === 'min_tier') {
+          return tierRank(entry.summary.tier) >= tierRank(bounty.assignee_min_tier ?? 'C');
+        }
+        return true;
+      })
+      .sort((a, b) =>
+        a.summary.id < b.summary.id ? -1 : a.summary.id > b.summary.id ? 1 : 0,
+      );
+
+    const eventType = bounty.assignee_mode === 'specific' ? 'task.assigned' : 'task.published';
+    const data = clone(bounty) as unknown as Record<string, unknown>;
+    let dispatched = bountyDispatches.get(bounty.id);
+    if (!dispatched) {
+      dispatched = new Set<string>();
+      bountyDispatches.set(bounty.id, dispatched);
+    }
+
+    for (const entry of targets) {
+      pushAgentEvent(entry, {
+        event_id: nextAgentEventId++,
+        event_type: eventType,
+        bounty_id: bounty.id,
+        project_id: bounty.project_id,
+        created_at: timestamp,
+        data: clone(data),
+      });
+      dispatched.add(entry.summary.id);
+    }
   }
 
   function requireStoredAgent(id: string): StoredAgent {
@@ -984,6 +1218,9 @@ export function createMemoryBountyClient(seed?: {
       bounties.set(bounty.id, bounty);
       eventsByBounty.set(bounty.id, []);
       recordEvent(bounty, 'created', bounty.created_by, null);
+      if (bounty.status === 'OPEN') {
+        dispatchBountyEvents(bounty, false);
+      }
       return clone(bounty);
     },
 
@@ -1048,6 +1285,7 @@ export function createMemoryBountyClient(seed?: {
         updated_at: timestamp,
       };
       bounties.set(id, updated);
+      dispatchBountyEvents(updated, false);
       recordEvent(updated, 'published', 'human', 'DRAFT');
       return clone(updated);
     },
@@ -1068,6 +1306,7 @@ export function createMemoryBountyClient(seed?: {
         updated_at: timestamp,
       };
       bounties.set(id, updated);
+      dispatchBountyEvents(updated, true);
       recordEvent(updated, 'withdrawn', 'human', 'OPEN');
       return clone(updated);
     },
@@ -1269,6 +1508,7 @@ export function createMemoryBountyClient(seed?: {
       }
       entry.summary.status = 'disabled';
       entry.summary.updated_at = nowIso();
+      disconnectAgentStreams(entry);
       return toAgentSummary(entry);
     },
 
@@ -1286,6 +1526,7 @@ export function createMemoryBountyClient(seed?: {
       const entry = requireStoredAgent(id);
       entry.summary.status = 'revoked';
       entry.summary.updated_at = nowIso();
+      disconnectAgentStreams(entry);
       return toAgentSummary(entry);
     },
 
@@ -1313,6 +1554,11 @@ export function createMemoryBountyClient(seed?: {
       const { subscribeAll, projectIds } = resolveSubscriptionInput(
         input.subscribe_all_projects,
         input.project_ids,
+      );
+      const { webhookUrl, webhookSecret } = resolveWebhookValues(
+        input.webhook_url,
+        input.webhook_secret,
+        null,
       );
 
       const bodyInvite =
@@ -1362,17 +1608,35 @@ export function createMemoryBountyClient(seed?: {
         invite_token_id: inviteEntry?.summary.id ?? null,
         active_lease_count: 0,
         last_seen_at: null,
+        channel_status: webhookUrl !== null ? 'webhook' : 'offline',
+        stream_connected: false,
+        webhook_configured: webhookUrl !== null,
+        webhook_url: webhookUrl,
+        last_pushed_at: null,
         created_at: timestamp,
         updated_at: timestamp,
       };
-      const stored: StoredAgent = { summary, apiKey };
+      const stored: StoredAgent = {
+        summary,
+        apiKey,
+        webhookSecret,
+        ackedEventId: 0,
+        inbox: [],
+        streamListeners: new Map(),
+        simulatedStreamConnected: false,
+        simulatedRecentFailedCount: 0,
+      };
       agentsById.set(summary.id, stored);
       agentsByApiKey.set(apiKey, stored);
 
-      return {
+      const result: RegisteredAgentResult = {
         agent: toAgentSummary(stored),
         api_key: apiKey,
       };
+      if (webhookSecret !== null) {
+        result.webhook_secret = webhookSecret;
+      }
+      return result;
     },
 
     async agentGetMe(apiKey: string): Promise<AgentSummary> {
@@ -1449,6 +1713,155 @@ export function createMemoryBountyClient(seed?: {
         bounty: clone(bounty),
         events: clone(events),
       };
+    },
+
+    async agentGetWebhookConfig(apiKey: string): Promise<AgentWebhookConfig> {
+      const entry = authenticateAgent(apiKey);
+      return toWebhookConfig(entry);
+    },
+
+    async agentUpdateWebhookConfig(
+      apiKey: string,
+      input: UpdateAgentWebhookInput,
+    ): Promise<AgentWebhookConfig> {
+      const entry = authenticateAgent(apiKey);
+      if (!input || input.webhook_url === undefined) {
+        throw new ServiceApiError('VALIDATION_ERROR', 400, 'webhook_url 为必填字段');
+      }
+      const oldSecret = entry.webhookSecret;
+      const reveal =
+        input.webhook_url !== null &&
+        ((input.webhook_secret !== undefined && input.webhook_secret !== null) || oldSecret === null);
+      const { webhookUrl, webhookSecret } = resolveWebhookValues(
+        input.webhook_url,
+        input.webhook_secret,
+        oldSecret,
+      );
+      entry.summary.webhook_url = webhookUrl;
+      entry.webhookSecret = webhookSecret;
+      entry.summary.updated_at = nowIso();
+      const config = toWebhookConfig(entry);
+      if (reveal && webhookSecret !== null) {
+        config.webhook_secret = webhookSecret;
+      }
+      return config;
+    },
+
+    async agentListEvents(
+      apiKey: string,
+      options?: { cursor?: number; limit?: number },
+    ): Promise<AgentInboxResponse> {
+      const rawLimit = options?.limit ?? 100;
+      if (typeof rawLimit !== 'number' || !Number.isInteger(rawLimit) || rawLimit <= 0) {
+        throw new ServiceApiError('VALIDATION_ERROR', 400, 'cursor 必须非负，limit 必须大于 0');
+      }
+      if (
+        options?.cursor !== undefined &&
+        (typeof options.cursor !== 'number' ||
+          !Number.isInteger(options.cursor) ||
+          options.cursor < 0)
+      ) {
+        throw new ServiceApiError('VALIDATION_ERROR', 400, 'cursor 必须非负，limit 必须大于 0');
+      }
+      const entry = authenticateAgent(apiKey);
+      const effectiveCursor = options?.cursor ?? entry.ackedEventId;
+      const limit = Math.min(rawLimit, 500);
+      const latestEventId =
+        entry.inbox.length > 0 ? entry.inbox[entry.inbox.length - 1].event.event_id : 0;
+      const matching = entry.inbox
+        .map(item => item.event)
+        .filter(ev => ev.event_id > effectiveCursor);
+      const hasMore = matching.length > limit;
+      const events = clone(matching.slice(0, limit));
+      const cursor = events.length > 0 ? events[events.length - 1].event_id : effectiveCursor;
+      return {
+        events,
+        cursor,
+        acked_event_id: entry.ackedEventId,
+        latest_event_id: latestEventId,
+        has_more: hasMore,
+      };
+    },
+
+    async agentAckEvents(apiKey: string, eventId: number): Promise<AckAgentEventsResult> {
+      if (typeof eventId !== 'number' || !Number.isInteger(eventId) || eventId < 0) {
+        throw new ServiceApiError('VALIDATION_ERROR', 400, 'event_id 必须非负');
+      }
+      const entry = authenticateAgent(apiKey);
+      const latestEventId =
+        entry.inbox.length > 0 ? entry.inbox[entry.inbox.length - 1].event.event_id : 0;
+      entry.ackedEventId = Math.max(entry.ackedEventId, Math.min(eventId, latestEventId));
+      return {
+        acked_event_id: entry.ackedEventId,
+      };
+    },
+
+    async agentOpenStream(
+      apiKey: string,
+      listener: (event: AgentEvent) => void,
+      options?: { cursor?: number },
+    ): Promise<() => void> {
+      if (
+        options?.cursor !== undefined &&
+        (typeof options.cursor !== 'number' ||
+          !Number.isInteger(options.cursor) ||
+          options.cursor < 0)
+      ) {
+        throw new ServiceApiError('VALIDATION_ERROR', 400, 'cursor 必须非负');
+      }
+      const entry = authenticateAgent(apiKey);
+      const connectionId = nextStreamConnectionId++;
+      entry.streamListeners.set(connectionId, listener);
+      const effectiveCursor = options?.cursor ?? entry.ackedEventId;
+      const backlog = entry.inbox
+        .map(item => item.event)
+        .filter(ev => ev.event_id > effectiveCursor);
+      if (backlog.length > 0) {
+        entry.summary.last_pushed_at = nowIso();
+        for (const ev of backlog) {
+          listener(clone(ev));
+        }
+      }
+      return () => {
+        entry.streamListeners.delete(connectionId);
+      };
+    },
+
+    async simulateAgentTier(
+      agentId: string,
+      tier: AgentTier,
+      placementCompleted = true,
+    ): Promise<AgentSummary> {
+      const entry = requireStoredAgent(agentId);
+      entry.summary.tier = tier;
+      entry.summary.placement_completed = placementCompleted;
+      entry.summary.updated_at = nowIso();
+      return toAgentSummary(entry);
+    },
+
+    async simulateAgentStream(agentId: string, connected: boolean): Promise<AgentSummary> {
+      const entry = requireStoredAgent(agentId);
+      if (connected && entry.summary.status !== 'active') {
+        throw new ServiceApiError('INVALID_TRANSITION', 409, '当前状态不允许此操作');
+      }
+      entry.simulatedStreamConnected = connected;
+      return toAgentSummary(entry);
+    },
+
+    async simulateAgentPush(
+      agentId: string,
+      options?: { pushedAt?: string | null; recentFailedCount?: number },
+    ): Promise<AgentSummary> {
+      const entry = requireStoredAgent(agentId);
+      if (options?.pushedAt !== undefined) {
+        entry.summary.last_pushed_at = options.pushedAt;
+      } else if (options?.recentFailedCount === undefined) {
+        entry.summary.last_pushed_at = nowIso();
+      }
+      if (options?.recentFailedCount !== undefined) {
+        entry.simulatedRecentFailedCount = Math.max(0, options.recentFailedCount);
+      }
+      return toAgentSummary(entry);
     },
   };
 }

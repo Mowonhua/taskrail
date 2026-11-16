@@ -3,6 +3,7 @@ pub mod config;
 pub mod db;
 pub mod error;
 pub mod models;
+mod push;
 mod routes;
 
 use db::Repository;
@@ -11,7 +12,11 @@ use models::EmbeddedServerInfo;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::{net::SocketAddr, path::PathBuf};
-use tokio::{net::TcpListener, sync::oneshot, task::JoinHandle};
+use tokio::{
+    net::TcpListener,
+    sync::{oneshot, watch},
+    task::JoinHandle,
+};
 
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -70,10 +75,18 @@ pub struct RunningServer {
     pub info: EmbeddedServerInfo,
     shutdown: Option<oneshot::Sender<()>>,
     task: Option<JoinHandle<std::io::Result<()>>>,
+    hub: push::Hub,
+    dispatcher_stop: watch::Sender<bool>,
+    dispatcher: Option<JoinHandle<()>>,
 }
 
 impl RunningServer {
     pub async fn shutdown(mut self) -> Result<()> {
+        self.hub.shutdown();
+        let _ = self.dispatcher_stop.send(true);
+        if let Some(dispatcher) = self.dispatcher.take() {
+            dispatcher.await.map_err(ApiError::internal)?;
+        }
         if let Some(signal) = self.shutdown.take() {
             let _ = signal.send(());
         }
@@ -88,25 +101,34 @@ impl RunningServer {
     /// 函数职责：等待外部退出信号或监听任务异常；异常不被静默留在后台任务中。
     pub async fn run_until(mut self, signal: impl std::future::Future<Output = ()>) -> Result<()> {
         let mut task = self.task.take().expect("服务任务只可取出一次");
-        tokio::select! {
-            result = &mut task => result.map_err(ApiError::internal)?.map_err(ApiError::internal),
-            () = signal => {
-                if let Some(sender) = self.shutdown.take() { let _ = sender.send(()); }
-                task.await.map_err(ApiError::internal)?.map_err(ApiError::internal)
-            }
+        let result = tokio::select! {
+            result = &mut task => Some(result),
+            () = signal => None,
+        };
+        if let Some(result) = result {
+            self.shutdown().await?;
+            result
+                .map_err(ApiError::internal)?
+                .map_err(ApiError::internal)
+        } else {
+            self.task = Some(task);
+            self.shutdown().await
         }
     }
 }
 impl Drop for RunningServer {
     fn drop(&mut self) {
+        self.hub.shutdown();
+        let _ = self.dispatcher_stop.send(true);
         if let Some(signal) = self.shutdown.take() {
             let _ = signal.send(());
         }
     }
 }
 
-/// 函数职责：完成迁移与监听后才返回实际地址；SQLite 初始化不占用异步工作线程。
+/// 函数职责：完成回调客户端构建、迁移与监听后才返回实际地址；SQLite 初始化不占用异步工作线程。
 pub async fn start(config: ServerConfig) -> Result<RunningServer> {
+    let webhook_client = push::build_webhook_client()?;
     let repository = tokio::task::spawn_blocking(move || Repository::open(config.db_path))
         .await
         .map_err(ApiError::internal)??;
@@ -125,6 +147,13 @@ pub async fn start(config: ServerConfig) -> Result<RunningServer> {
         admin_token: config.admin_token,
         db_path: repository.path().to_string_lossy().into_owned(),
     };
+    let hub = repository.hub.clone();
+    let (dispatcher_stop, stop_receiver) = watch::channel(false);
+    let dispatcher = tokio::spawn(push::dispatch_webhooks(
+        repository,
+        webhook_client,
+        stop_receiver,
+    ));
     let (shutdown, receiver) = oneshot::channel();
     let task = tokio::spawn(async move {
         axum::serve(listener, app)
@@ -137,6 +166,9 @@ pub async fn start(config: ServerConfig) -> Result<RunningServer> {
         info,
         shutdown: Some(shutdown),
         task: Some(task),
+        hub,
+        dispatcher_stop,
+        dispatcher: Some(dispatcher),
     })
 }
 

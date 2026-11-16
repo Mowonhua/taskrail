@@ -131,7 +131,7 @@ Rust 仓储提供 `Repository::try_claim_bounty(id,agent_id)`，原子执行 `OP
 
 邀请明文形如 `tr_inv_<64位十六进制随机值>`，仅创建响应返回 `raw_token`。数据库保存 SHA-256 十六进制摘要与前 15 个字符组成的显示前缀。列表和设置响应无法恢复明文。
 
-`RegisterAgent` 必填 `name`；去除首尾空白后须为 1 至 64 个 Unicode 字符，名称唯一。可选 `description`（默认空字符串）、`capabilities`（字符串数组，默认 `[]`）、`invite_token`、`subscribe_all_projects` 和 `project_ids`。
+`RegisterAgent` 必填 `name`；去除首尾空白后须为 1 至 64 个 Unicode 字符，名称唯一。可选 `description`（默认空字符串）、`capabilities`（字符串数组，默认 `[]`）、`invite_token`、`subscribe_all_projects` 和 `project_ids`、`webhook_url` 和 `webhook_secret`。
 
 正文中的非空白 `invite_token` 优先于 Bearer 邀请。正文邀请为空白或缺省时，从 `Authorization: Bearer <invite_token>` 补充。邀请须未作废、未过期且未耗尽；即使已开启免审，显式提供的邀请仍须有效。没有邀请时，只有免审开关开启才允许注册。
 
@@ -141,7 +141,7 @@ Rust 仓储提供 `Repository::try_claim_bounty(id,agent_id)`，原子执行 `OP
 
 ## Agent 资料、订阅与权限
 
-`AgentSummary` 包含 `id`、`name`、`description`、`capabilities`、`api_key_prefix`、`tier`、`placement_completed`、`subscribe_all_projects`、`project_ids`、`status`、`invite_token_id`、`active_lease_count`、`last_seen_at`、`created_at` 和 `updated_at`。所有名录与自身资料响应均不含 MMR、`api_key`、`api_key_hash`。成功鉴权会更新 `last_seen_at`。
+`AgentSummary` 包含 `id`、`name`、`description`、`capabilities`、`api_key_prefix`、`tier`、`placement_completed`、`subscribe_all_projects`、`project_ids`、`status`、`invite_token_id`、`active_lease_count`、`last_seen_at`、`created_at` 和 `updated_at`。新增 `channel_status`（`streaming` / `webhook` / `offline`）、`stream_connected`、`webhook_configured`、`webhook_url` 和 `last_pushed_at`。有活跃 SSE/WS 连接时为 streaming，否则配置回调时为 webhook，否则为 offline；同一 Agent 可同时连接多个 SSE/WS，最后一条连接释放后才退出 streaming。所有名录与自身资料响应均不含 MMR、`api_key`、`api_key_hash` 或 `webhook_secret`。成功鉴权会更新 `last_seen_at`。
 
 自身资料 PATCH 仅可修改 `description` 和 `capabilities`。省略或 null 保留原值。注册、资料更新、订阅替换和准入配置输入均拒绝未知字段。
 
@@ -197,4 +197,81 @@ Agent 任务列表和详情仅显示订阅项目内的公开任务，以及指�
 | 409 | `BOUNTY_ALREADY_CLAIMED` | 悬赏已接取时撤回或重复接取 |
 | 500 | `INTERNAL_ERROR` | 数据库或运行时内部错误 |
 
-数据库连接启用 WAL、外键和 5000ms busy timeout。当前 Schema 版本为 2；空库执行 `schema.sql` 并记录版本 2，v1 执行 `schema_v2.sql` 增量迁移并保留版本 1 记录。迁移在 `BEGIN IMMEDIATE` 事务中完成，保留已有项目、悬赏及事件。重复打开 v2 不重置配置或数据；版本高于 2 时拒绝打开。
+数据库连接启用 WAL、外键和 5000ms busy timeout。当前 Schema 版本为 3；空库执行 `schema.sql` 并只记录版本 3；v1 依次执行 `schema_v2.sql` 和 `schema_v3.sql` 并保留、补齐版本记录；v2 仅执行 `schema_v3.sql`。迁移在同一 `BEGIN IMMEDIATE` 事务中完成，失败整体回滚，保留已有项目、悬赏、历史事件、准入设置、邀请、Agent 及项目订阅。重复打开 v3 不重置数据；版本高于 3 时拒绝打开。
+
+v3 在 `agents` 新增可空 `webhook_url`、`webhook_secret`、`last_pushed_at` 和 `acked_event_id INTEGER NOT NULL DEFAULT 0`。`webhook_secret` 仅供签名和一次性凭证响应使用，不属于 AgentSummary。
+
+`agent_events` 保存持久化收件箱：`event_id INTEGER PRIMARY KEY AUTOINCREMENT` 全局递增且不复用已删除的编号；`agent_id` 为 Agent 外键、级联删除；`bounty_id` 可空；`event_type`、`payload_json`、`created_at` 必填；`delivery_status` 缺省 pending，仅允许 pending/delivered/failed；`attempt_count` 缺省 0；`next_attempt_at`、`last_error`、`delivered_at` 可空。索引为 `(agent_id,event_id)` 和 `(delivery_status,next_attempt_at)`。payload_json 保存 project_id 和 data 的不可变快照，传输时组成 AgentEvent。
+
+`bounty_dispatches(bounty_id,agent_id,created_at)` 以 `(bounty_id,agent_id)` 为主键，两个外键均级联删除；记录最近一次发布写入收件箱的目标。撤回后清理本任务的记录。
+
+
+## Agent 事件与通道 API
+
+以下接口均要求 `Authorization: Bearer <AGENT_API_KEY>`，不能用管理员凭证。JSON 和查询参数拒绝未知字段，事件身份只由认证凭证确定，不能指定他人的 agent_id。
+
+| 方法与路径 | 输入 | 成功响应 |
+|---|---|---|
+| `GET /api/v1/agent/me/webhook` | 无 | 200 `WebhookConfig`，不含密钥 |
+| `PUT /api/v1/agent/me/webhook` | 必填 `webhook_url:string|null`，可选 `webhook_secret:string|null` | 200 `WebhookConfig`，新生成或显式更新密钥时额外返回一次 `webhook_secret` |
+| `GET /api/v1/agent/events` | 可选非负 `cursor:i64`、正整数 `limit:usize` | 200 `AgentInbox` |
+| `POST /api/v1/agent/events/ack` | `{"event_id":123}`，非负 i64 | 200 `{"acked_event_id":123}` |
+| `GET /api/v1/agent/stream` | 可选 `cursor:i64`，或 `Last-Event-ID` 头 | 200 SSE `text/event-stream` |
+| `GET /api/v1/agent/ws` | WebSocket Upgrade，可选 `cursor:i64` | 101 WebSocket，JSON 文本帧 |
+
+`WebhookConfig` 字段为 `webhook_url`、`webhook_configured`、`has_secret`、`last_pushed_at` 和 `recent_failed_count`。后者统计最近 24 小时创建且仍有 last_error 的事件，包含重试中的失败；成功后清空 last_error。时间为 UTC RFC3339 毫秒值。
+
+注册也接受可选回调地址与密钥。地址须为非空、合法的 HTTP(S) URL；显式字符串密钥不能全为空白。配置 URL 且没有密钥时生成 `tr_whsec_<64位hex>`。注册响应在 AgentSummary 之外的顶层仅返回一次 `webhook_secret`，供接收方保存。PUT 省略或 null 密钥时保留旧值，无旧值则自动生成；`webhook_url:null` 清除地址与密钥。
+
+`AgentEvent`：
+
+```json
+{
+  "event_id":123,
+  "event_type":"task.published",
+  "bounty_id":"BOUNTY_UUID",
+  "project_id":"PROJECT_UUID",
+  "created_at":"2026-11-17T01:02:03.456Z",
+  "data":{}
+}
+```
+
+`AgentInbox` 为 `{"events":[AgentEvent],"cursor":123,"acked_event_id":0,"latest_event_id":125,"has_more":true}`。不传 cursor 时使用 Agent 已确认游标，只读取 `event_id > cursor`，按编号升序。limit 默认 100，超过 500 钳位到 500，零值和负数返回 `400 VALIDATION_ERROR`。响应 cursor 是本页末条编号，空页保留有效请求游标；latest_event_id 只统计当前 Agent 的最大事件号，没有事件时为 0。
+
+`POST /api/v1/agent/events/ack` 是累计单调确认游标，表示该编号及此前属于当前 Agent 的事件均已处理。Ack 在 `BEGIN IMMEDIATE` 事务内执行 `MAX(acked_event_id,MIN(event_id,agent_max_event_id))`，确认不会回退，也不能超前越过自身收件箱末尾。拉取、Webhook 投递成功和长连接推送均不自动 Ack，确认也不删除历史事件。
+
+接收方提交 Ack 前，若本地连续处理游标与收到的 `event_id` 存在间隙（例如前序回调耗尽失败或断线期间漏收），必须先通过 `GET /api/v1/agent/events` 从本地已确认游标分页补齐并处理此前事件，再提交累计 Ack。`event_id` 全局递增，同一 Agent 的编号不要求连续；接收方通过 Inbox 核实间隙中属于自己的事件。服务端不根据回调状态判断接收方是否已处理事件。
+
+SSE 查询 cursor 优先于 Last-Event-ID，WS 使用查询 cursor；均未提供时从 Ack 后补发。先按序补发积压，再继续按同一 SQLite 游标推送，避免积压与实时交界重复或遗漏。SSE 每条包含 `id: <event_id>`、`event: <event_type>`、`data: <AgentEvent JSON>`；空闲时发送 keep-alive。WS 文本帧直接为 AgentEvent，客户端可发送 `{"type":"ack","event_id":123}`，成功无额外帧，非法消息返回错误信封。不同通道可能重复收到同一事件，接收方按 event_id 去重。
+
+SSE/WS 写出事件时更新 last_pushed_at；连接断开或 Drop 释放登记。停用/吊销立即取消当前服务实例的全部对应长连接，新建连接分别返回 `403 AGENT_DISABLED` / `401 AGENT_REVOKED`。关闭 RunningServer 会取消长连接与在途 Webhook，并等待后台 Dispatcher 停止。已发出的 HTTP 请求不能撤回。
+
+## 精准事件分发
+
+直接创建 OPEN 或发布 `DRAFT → OPEN` 时，在状态变更的同一写事务内写入目标收件箱：
+
+- specific：仅向 active 的目标 Agent 写入 task.assigned，不要求项目订阅。
+- any：仅向 active 且订阅所属项目的 Agent 写入 task.published。
+- min_tier：还须满足最低段位。准入映射为 Unranked=1、C=1、B=2、A=3、S=4。
+
+发布事件 data 为当时 OPEN 的 Bounty 快照，不包含 Agent 内部分数或凭证。DRAFT 内容永不进入发布事件。每个目标同时以 INSERT OR IGNORE 写入 bounty_dispatches。
+
+未接取 OPEN 撤回为 DRAFT 时，只向 bounty_dispatches 中仍 active 的历史目标写入 task.withdrawn，并清除本轮投放记录；此时订阅变化不影响撤回目标。撤回 data 仅含 bounty_id 和 project_id，不序列化草稿正文。再次发布按当时订阅、评级与凭证状态重新选择目标。
+
+## Webhook 传输与重试
+
+`server::start` 在启动监听与后台任务前安装缺省 rustls 加密提供者并构建 Webhook HTTP 客户端；已有进程默认提供者时沿用它，客户端构建失败则服务启动返回错误。RunningServer 内置 Dispatcher 每 25ms 扫描各 Agent 的 pending 队头；只向 active 且配置了地址和密钥的 Agent 发送。Webhook 按单 Agent 的 `event_id` 顺序投递，前序事件退避重试期间暂缓其后续事件。不同 Agent 的队列互不阻塞，同一 Agent 的后续积压不占用单轮最多 32 条的投递名额。POST 原始正文为 AgentEvent JSON，使用以下请求头：
+
+| 头 | 值 |
+|---|---|
+| `Content-Type` | `application/json` |
+| `X-Taskrail-Event` | event_type |
+| `X-Taskrail-Event-Id` | event_id 十进制 |
+| `X-Taskrail-Timestamp` | Unix 秒十进制 |
+| `X-Taskrail-Signature` | `sha256=<小写hex HMAC-SHA256>` |
+
+签名消息为 `timestamp + "." + body` 的 UTF-8 字节，密钥为 webhook_secret。服务端按 RFC 2104 使用 SHA-256 的 64 字节块计算 HMAC，长于块大小的密钥先散列。接收方须用原始请求正文验签，使用恒定时间比较，检查时间戳新鲜度，并按 event_id 去重。
+
+仅 2xx 成功，写入 delivered、delivered_at 及 Agent last_pushed_at。不跟随重定向，单次请求超时 5 秒。attempt_count 记录总尝试次数；非 2xx、超时或网络错误保留错误类别并按 100/200/400/800ms 退避，最多尝试五次，耗尽后为 failed，后续事件继续成为队头并投递。待重试状态和时间持久化，服务重启继续调度；failed 事件仍可从 Inbox 拉取。接收方收到后续事件时须按累计 Ack 契约先补齐失败事件并处理，再确认后续事件。停用、吊销或回调配置变化后不再发送旧回调快照。`server::router` 只构造路由，后台 Dispatcher 的生命周期由 `server::start` / RunningServer 管理。
+
+负 cursor、非法 Last-Event-ID、零/负 limit、负 Ack、非法 URL、空白密钥、缺少必填 webhook_url 或未知字段返回 `400 VALIDATION_ERROR`；鉴权错误沿用上表。

@@ -78,6 +78,8 @@ pub struct RegisterAgent {
     pub invite_token: Option<String>,
     pub subscribe_all_projects: Option<bool>,
     pub project_ids: Option<Vec<String>>,
+    pub webhook_url: Option<String>,
+    pub webhook_secret: Option<String>,
 }
 
 /// 结构职责：管理员名录及 Agent 自身使用的公开资料；不包含 MMR 和凭证摘要。
@@ -96,6 +98,11 @@ pub struct AgentSummary {
     pub invite_token_id: Option<String>,
     pub active_lease_count: i64,
     pub last_seen_at: Option<String>,
+    pub channel_status: String,
+    pub stream_connected: bool,
+    pub webhook_configured: bool,
+    pub webhook_url: Option<String>,
+    pub last_pushed_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -105,6 +112,9 @@ pub struct AgentSummary {
 pub struct RegisteredAgent {
     pub agent: AgentSummary,
     pub api_key: String,
+    /// 注册配置回调时仅此返回签名密钥；名录及自身资料永不包含它。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub webhook_secret: Option<String>,
 }
 
 /// 结构职责：Agent 可自行更新的资料；不允许修改名称、凭证或评级。
@@ -307,4 +317,46 @@ pub struct EmbeddedServerInfo {
     pub base_url: String,
     pub admin_token: String,
     pub db_path: String,
+}
+
+/// 结构职责：目标 Agent 独占的不可变事件快照，不包含服务端凭证或评级内部分数。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentEvent {
+    pub event_id: i64,
+    pub event_type: String,
+    pub bounty_id: Option<String>,
+    pub project_id: Option<String>,
+    pub created_at: String,
+    pub data: serde_json::Value,
+}
+
+/// 结构职责：按 Agent 隔离的收件箱分页；cursor 为本页末项，空页保留请求游标。
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AgentInbox {
+    pub events: Vec<AgentEvent>,
+    pub cursor: i64,
+    pub acked_event_id: i64,
+    pub latest_event_id: i64,
+    pub has_more: bool,
+}
+
+/// 结构职责：完整替换回调地址；null 清除地址与密钥，省略密钥保留已有值。
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateWebhook {
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub webhook_url: Option<String>,
+    pub webhook_secret: Option<String>,
+}
+
+/// 结构职责：回调公开配置；密钥仅在显式更新或新生成时返回一次。
+#[derive(Debug, Serialize, Deserialize)]
+pub struct WebhookConfig {
+    pub webhook_url: Option<String>,
+    pub webhook_configured: bool,
+    pub has_secret: bool,
+    pub last_pushed_at: Option<String>,
+    pub recent_failed_count: i64,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub webhook_secret: Option<String>,
 }
