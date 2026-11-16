@@ -1,1700 +1,1283 @@
 <script lang="ts">
-  /** 文件职责：组织项目导航、唯一编辑视图、查询和保存反馈。 */
-  import { defaultPreferences } from './lib/config-defaults';
-  import { onMount, tick } from 'svelte';
-  import { t, setLocalePreference } from './lib/i18n';
-  import { fly } from 'svelte/transition';
-  import { cubicOut } from 'svelte/easing';
+  /**
+   * 文件职责：承载 Taskrail 悬赏板工作台外壳（左侧四入口紧凑导航 + 右侧多视图主工作区）。
+   * 定义范围：顶层导航切换、主题与原生窗口材质协调、配置持久化、应用更新面板及项目图标选择器承载。
+   */
+  import { onDestroy, onMount, tick, untrack } from 'svelte';
+  import type { Action } from 'svelte/action';
+  import { getVersion } from '@tauri-apps/api/app';
+  import { invoke } from '@tauri-apps/api/core';
+  import { listen } from '@tauri-apps/api/event';
+  import { getCurrentWindow } from '@tauri-apps/api/window';
+  import { BrowserFilePort } from './lib/browser-files';
+  import { defaultPreferences, defaultThemeId, emptyAppConfig } from './lib/config-defaults';
+  import type {
+    AppConfig,
+    FilePort,
+    Preferences,
+    Project,
+    WindowPlacement,
+    WorkspaceSection,
+  } from './lib/contracts';
+  import { errorMessage } from './lib/errors';
+  import { AndroidFilePort } from './lib/files/android';
+  import { TauriFilePort } from './lib/files/tauri';
+  import { locale, setLocalePreference, t, type LocalePreference } from './lib/i18n';
+  import { renderMarkdown } from './lib/markdown';
+  import { registerDrawerGestures } from './lib/mobile-navigation';
   import { platformCapabilities } from './lib/platform';
-  import SyncPanel from './lib/SyncPanel.svelte';
-  import { SyncEngine } from './lib/sync/engine';
-  import { SyncController } from './lib/sync/controller';
-  import { SessionSyncDocuments } from './lib/session/sync-documents';
-  import { nativeSyncStore, nativeSyncTransport } from './lib/sync/native';
-  import appIcon from '../src-tauri/icons/icon.png';
-  import WindowControls from './lib/WindowControls.svelte';
-  import UpdatePanel from './lib/UpdatePanel.svelte';
-  import SettingsPanel from './lib/SettingsPanel.svelte';
+  import {
+    parseProjectIcon,
+    serializeProjectIcon,
+    type ProjectIcon as ProjectIconValue,
+  } from './lib/project-icons';
   import ProjectIcon from './lib/ProjectIcon.svelte';
   import ProjectIconPicker from './lib/ProjectIconPicker.svelte';
+  import SettingsPanel from './lib/SettingsPanel.svelte';
+  import {
+    applyTheme,
+    bootThemeKey,
+    builtInThemes,
+    parseTheme,
+    type ThemeDefinition,
+    type ThemeMode,
+  } from './lib/themes';
+  import UpdatePanel from './lib/UpdatePanel.svelte';
+  import { AndroidUpdatePort } from './lib/updater/android';
+  import type { UpdatePort, UpdateStatus } from './lib/updater/contracts';
+  import { TauriUpdatePort } from './lib/updater/tauri';
   import { UpdateCoordinator } from './lib/updater/update-coordinator';
-  import type { UpdateStatus } from './lib/updater/contracts';
-  import { formatBytes } from './lib/updater/format-bytes';
-  import packageInfo from '../package.json';
-  import { convertFileSrc, invoke } from '@tauri-apps/api/core';
-  import { EditorController, getDocumentModel } from './lib/editor';
-  import { renderTaskTitle } from './lib/editor/preview';
-  import { sourceVisibleRanges } from './lib/editor/source-scope';
-  import { BrowserFilePort, welcomeText } from './lib/browser-files';
-  import type { AppConfig, FilePort, FileSnapshot, Project, ProjectView, RecoveryDraft, ViewMode } from './lib/contracts';
-  import { SaveCoordinator } from './lib/session/save-coordinator';
-  import { errorMessage } from './lib/errors';
-  import type { ProjectSession, TaskResult } from './lib/session/types';
-  import { getHiddenRanges, parseDocument, searchTasks, taskIsArchived } from './lib/markdown';
-  import type { DocumentModel, ListItem } from './lib/markdown';
-  import { countWords } from './lib/word-count';
-  import { activeOutlineFrom, outlineEntries } from './lib/markdown/outline';
-  import { documentPathKey, resolveDocumentResource } from './lib/resource-paths';
-  import { validateAppConfig } from './lib/config-validation';
-  import { serializeProjectIcon, type ProjectIcon as IconReference } from './lib/project-icons';
-  import { applyTheme, bootThemeKey, builtInThemes, parseTheme } from './lib/themes';
   import { WindowMaterialController, type WindowMaterial } from './lib/window-material';
-  import { registerDrawerGestures } from './lib/mobile-navigation';
-  import { createCardWindowController } from './lib/card-window';
-  import CanvasPanel from './lib/canvas/CanvasPanel.svelte';
-  import './lib/canvas/canvas.css';
-  import { createCanvasAssetPort, nativeSaveCanvasFile } from './lib/canvas/assets';
-  import { canvasAssetsFromText, scanCanvasBlocks } from './lib/canvas/model';
-  import type { CanvasSession } from './lib/canvas/types';
+  import WindowControls from './lib/WindowControls.svelte';
 
-  let { onready }: { onready?: () => void } = $props();
-  const { native, android, desktop } = platformCapabilities();
-  const mobile = android || import.meta.env.DEV && new URLSearchParams(location.search).has('mobile-preview');
-  const canvasAssets = createCanvasAssetPort(native);
-  let canvasSession = $state.raw<CanvasSession | null>(null);
-  let canvasClosing = $state(false);
-  let canvasPanel = $state.raw<CanvasPanel>();
-  let bundleInput: HTMLInputElement;
-  let bundleBusy = $state(false);
-  let syncController = $state.raw<SyncController>();
-  let syncRevision = $state(0);
-  let syncOpen = $state(false);
-  let syncError = $state('');
-  const syncLabel = $derived.by(() => { void syncRevision; return syncController?.attention ?? ''; });
-  // 底部栏只放需要用户处理的同步问题；未配对和正常同步过程只出现在同步面板。更新提示存活时间短且优先级更高，占用同一位置替换同步状态，不并排。
-  const syncNotice = $derived.by(() => { void syncRevision; return native && !!syncLabel; });
-  const TOAST_DURATION_MS = 3000;
-  // 灵感簿使用伪项目身份复用会话与搜索机制；不写入 projects 列表，避免污染项目语义与聚合视图。
-  const INSPIRATION_ID = 'inspiration';
-  // 托管灵感文件的固定初始内容；与新建项目模板一致以一级标题起头，语言切换不改变文件名与内容。
-  const INSPIRATION_TEXT = '# 灵感\n\n';
-  const windowMaterial = new WindowMaterialController(document.documentElement, (material, theme, keepTransparentOnBlur) =>
-    desktop ? invoke<boolean>('set_window_material', { material, theme: theme === 'system' ? null : theme, keepTransparentOnBlur }) : Promise.resolve(false));
-  let files: FilePort;
-  let editor: EditorController | undefined;
-  let resourceDocumentPath = '';
-  let editorHost: HTMLDivElement;
-  const sessions = new Map<string, ProjectSession>();
-  // 会话必须与 Map、保存闭包共享同一对象；深层代理会让保存器读到代理前的旧 EditorState。
-  let active = $state.raw<ProjectSession | null>(null);
-  let config = $state<AppConfig>({ projects: [], activeProjectId: null, preferences: { ...defaultPreferences }, projectViews: {} });
-  let ready = $state(false);
-  let configReady = $state(false);
-  /** 启动项目解析完成前保持 false；欢迎页以此推迟渲染，避免首帧闪现无项目界面。 */
+  type ApplyWindowMaterial = (
+    material: WindowMaterial,
+    theme: 'light' | 'dark' | 'system',
+    keepTransparentOnBlur: boolean,
+  ) => Promise<boolean>;
+
+  interface Props {
+    files?: FilePort;
+    updater?: UpdatePort;
+    setWindowMaterial?: ApplyWindowMaterial;
+    onready?: () => void;
+  }
+
+  let { files: injectedFiles, updater: injectedUpdater, setWindowMaterial, onready }: Props = $props();
+
+  const capabilities = platformCapabilities();
+  const initialFiles = untrack(() => injectedFiles);
+  const initialUpdater = untrack(() => injectedUpdater);
+  const initialSetWindowMaterial = untrack(() => setWindowMaterial);
+
+  const files: FilePort =
+    initialFiles ??
+    (capabilities.desktop
+      ? new TauriFilePort()
+      : capabilities.android
+        ? new AndroidFilePort()
+        : new BrowserFilePort());
+  const updateSupported = Boolean(initialUpdater) || capabilities.native;
+  const updatePort: UpdatePort =
+    initialUpdater ??
+    (capabilities.desktop
+      ? new TauriUpdatePort()
+      : capabilities.android
+        ? new AndroidUpdatePort()
+        : {
+            check: async () => null,
+          });
+
+  const applyNativeWindowMaterial: ApplyWindowMaterial =
+    initialSetWindowMaterial ??
+    (capabilities.desktop
+      ? (material, theme, keepTransparentOnBlur) =>
+          invoke<boolean>('set_window_material', { material, theme, keepTransparentOnBlur })
+      : async () => false);
+
+  let loading = $state(true);
   let booted = $state(false);
-  let configError = $state('');
-  let updater: UpdateCoordinator | undefined;
-  let updateStatus = $state<UpdateStatus>({ kind: 'idle' });
-  /** 底部栏下载提示只追加已下载/总大小；服务器未给总大小时仅显示已下载部分。 */
-  const updateDownloadSize = $derived(updateStatus.kind === 'downloading' && updateStatus.downloadedBytes !== undefined
-    ? ` ${formatBytes(updateStatus.downloadedBytes)}${updateStatus.totalBytes ? ` / ${formatBytes(updateStatus.totalBytes)}` : ''}`
-    : '');
-  let updateInstalling = $state(false);
-  let switching = false;
-  let openGeneration = 0;
-  let version = $state(0);
-  let screen = $state<'project' | 'all'>('project');
-  let sidebar = $state(true);
-  // 大纲目录是侧栏的另一种内容形态；展开意愿持久化在偏好中，视图切换不改变它。
-  let sidebarView = $state<'nav' | 'outline'>('nav');
-  let activeHeadingFrom = $state<number | null>(null);
-  let reducedMotion = $state(false);
-  // 卡片仅改变当前窗口布局，不写入项目配置；原侧栏状态和编辑器实例保留供退出恢复。
-  let cardMode = $state(false);
-  let cardTransitioning = $state(false);
-  let appShell: HTMLDivElement;
-  const cardWindow = desktop ? createCardWindowController() : undefined;
+  let configResolved = $state(false);
+  let configLoadFailed = $state(false);
+  let configLoadError = $state('');
+  let projects = $state<Project[]>([]);
+  let activeProjectId = $state<string | null>(null);
+  let customThemes = $state<ThemeDefinition[]>([]);
+  let preferences = $state<Preferences>({ ...defaultPreferences });
+  let windowPlacement = $state<WindowPlacement | undefined>(undefined);
+  let activeSection = $state<WorkspaceSection>(defaultPreferences.workspaceSection ?? 'bounties');
 
-  /** 灵感簿会话的伪项目身份；名称为文件本名，界面文案在展示处翻译。 */
-  function inspirationProject(path: string): Project {
-    return { id: INSPIRATION_ID, name: '灵感', path };
-  }
+  let bountyStateFilter = $state<'all' | 'OPEN' | 'CLAIMED' | 'WAITING_INFO' | 'SUBMITTED' | 'APPROVED'>('all');
+  let bountySearchQuery = $state('');
+  let inboxFilter = $state<'all' | 'WAITING_INFO' | 'SUBMITTED' | 'expiring'>('all');
+  let agentFilter = $state<'all' | 'idle' | 'busy'>('all');
 
-  /** 托管灵感文件的默认位置；桌面在应用数据目录，浏览器预览保存在本地沙盒目录。 */
-  async function defaultInspirationPath(): Promise<string> {
-    if (!native) return `${$t('浏览器')}/${$t('灵感')}.md`;
-    const { appDataDir, join } = await import('@tauri-apps/api/path');
-    return join(await appDataDir(), $t('灵感.md'));
-  }
+  let iconPickerOpen = $state(false);
+  let updateDialogOpen = $state(false);
+  let mobileSidebarOpen = $state(false);
 
-  /**
-   * 函数职责：切换卡片布局，并在桌面环境同步窗口几何与置顶状态。
-   * 输入说明：同一按钮触发；切换未完成时忽略重复请求，鼠标触发后解除按钮焦点。
-   * 输出说明：原生操作成功后更新布局，失败保留当前入口并展示错误。
-   * 实现思路：先淡出布局，再由窗口控制器切换几何，成功后淡入新布局；减少动态效果时跳过动画。
-   */
-  async function toggleCardMode(event: MouseEvent): Promise<void> {
-    if (cardTransitioning) return;
-    cardTransitioning = true;
-    const button = event.currentTarget as HTMLButtonElement;
-    const animate = !window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-    let transition: Animation | undefined;
-    try {
-      if (animate && appShell.animate) {
-        transition = appShell.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 100, easing: 'ease-out', fill: 'forwards' });
-        await transition.finished;
-      }
-      // 淡出保持到原生几何与新布局均已就绪，避免缩放期间旧侧栏和正文反复重排闪烁。
-      if (cardMode) await cardWindow?.exit({ animate });
-      else await cardWindow?.enter({ animate });
-      cardMode = !cardMode;
-      menuOpen = false;
-      searchOpen = false;
-      await tick();
-      transition?.cancel();
-      if (animate && appShell.animate) {
-        transition = appShell.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 160, easing: 'ease-out', fill: 'forwards' });
-        await transition.finished;
-      }
-      // 鼠标进入卡片后底栏自动收起；键盘操作保留焦点，便于再次退出。
-      if (event.detail > 0) button.blur();
-    } catch (error) {
-      notify($t("卡片模式切换失败：{error}", { error: errorMessage(error) }));
-    } finally {
-      // 失败或动画取消也必须解除透明状态，确保重试入口不会留在不可见的窗口中。
-      transition?.cancel();
-      cardTransitioning = false;
-      // 原生调用期间 disabled 可能移走焦点；重新启用后恢复键盘退出入口。
-      if (event.detail === 0) {
-        await tick();
-        button.focus({ preventScroll: true });
-      }
-    }
-  }
-  let projectFilter = $state('');
-  let projectSearchOpen = $state(false);
-  let draggedProjectId = $state<string | null>(null);
-  let projectDropTarget = $state<{ id: string; after: boolean } | null>(null);
-  let query = $state('');
-  let searchOpen = $state(false);
-  let includeArchived = $state(false);
-  let results = $state<TaskResult[]>([]);
-  let resultLimit = $state(100);
-  // 每条聚合结果保留生成它的语法快照，异步刷新时标题与引用定义不会跨版本混用。
-  type AggregateResult = TaskResult & {
-    model: DocumentModel; item: ListItem; path: string;
-    /** 任务上方二级至六级标题链（外层在前）；一级标题不入链，链为空时任务直属项目分组。 */
-    sectionChain: { from: number; text: string }[];
-    /** 任务祖先层数及各级祖先子树终点（外层在前），驱动全部待办的层级缩进与父子连线。 */
-    depth: number; ancestorTos: number[];
-  };
-  let aggregateResults = $state.raw<AggregateResult[]>([]);
-  let aggregateLimits = $state<Record<string, number>>({});
-  let indexing = $state(false);
-  let indexGeneration = 0;
-  const indexCache = new Map<string, { text: string; model: DocumentModel }>();
-  let searchTimer: ReturnType<typeof setTimeout>;
-  let configTimer: ReturnType<typeof setTimeout>;
-  let configQueue: Promise<void> = Promise.resolve();
+  let themeError = $state('');
+  let importingTheme = $state(false);
+  let configSaveFailed = $state(false);
   let toast = $state('');
-  let toastUndo = $state(false);
-  let toastTimer: ReturnType<typeof setTimeout>;
-  let fatal = $state('');
-  let missing = $state<Project | null>(null);
-  let menuOpen = $state(false);
-  /** 右键目标独立于当前编辑会话，避免删除或归档错误的项目。 */
-  let projectMenu = $state<{ project: Project; x: number; y: number } | null>(null);
-  /** 面包屑切换列表锚定触发按钮；大纲侧栏没有项目列表，切换项目从这里进入。 */
-  let crumbMenu = $state<{ x: number; y: number } | null>(null);
-  let removeTarget = $state<Project | null>(null);
-  /** 图标对话框的目标独立于当前项目，从项目菜单编辑其他项目时不切换正文。 */
-  let iconTarget = $state<Project | null>(null);
-  let projectActionBusy = $state(false);
-  let addingProject = $state(false);
-  let dialog = $state<'project' | 'rename' | 'settings' | 'help' | 'conflict' | 'recovery' | 'remove' | 'archived-projects' | 'updates' | 'icon' | null>(null);
-  let projectName = $state('');
-  let projectPath = $state('');
-  let createFile = $state(false);
-  let dialogError = $state('');
-  let systemDark = $state(false);
-  let themeImportBusy = $state(false);
-  let themeExportBusy = $state(false);
-  const themes = $derived([...builtInThemes, ...(config.customThemes ?? [])]);
-  const selectedTheme = $derived(themes.find(theme => theme.id === config.preferences.themeId) ?? builtInThemes[0]);
-  const resolvedThemeMode = $derived(config.preferences.theme === 'system' ? (systemDark ? 'dark' : 'light') : config.preferences.theme);
-  const selectedWindowMaterial = $derived((selectedTheme.monochrome ? 'opaque' :
-    selectedTheme.appearance?.[resolvedThemeMode]?.['window-material'] ?? 'opaque') as WindowMaterial);
-  let recovery = $state<{ project: Project; disk: FileSnapshot; text: string } | null>(null);
-  const availableProjects = $derived(config.projects.filter(project => !project.archived));
-  const archivedProjects = $derived(config.projects.filter(project => project.archived));
-  const visibleProjects = $derived(availableProjects.filter(project => project.name.toLocaleLowerCase().includes(projectFilter.toLocaleLowerCase())));
-  const mode = $derived.by(() => { void version; return active?.ui.mode ?? 'todo'; });
-  const previewMode = $derived.by(() => { void version; return mode === 'source' ? active?.ui.sourceView ?? 'todo' : mode; });
-  const saveStatus = $derived.by(() => { void version; return active?.status; });
-  // 按正文与磁盘基线比较，避免撤销回原文或仅恢复数据清理失败时误报未保存。
-  const hasUnsavedChanges = $derived.by(() => { void version; return active?.saver.hasLocalChanges ?? false; });
-  const pageText = $derived.by(() => {
-    void version;
-    if (!active) return '';
-    const state = active.state;
-    const model = getDocumentModel(state);
-    // 画布快照是引擎数据，界面只渲染卡片；源码与预览都按同一口径不计入写作字数。
-    const canvases = scanCanvasBlocks(model.text, model.tree).map(block => ({ from: block.from, to: block.to }));
-    // 源码沿用编辑器冻结的分区边界，避免编辑复选框后统计提前跳到另一页；折叠不影响字数。
-    const hidden = mode === 'source' ? complementRanges(sourceVisibleRanges(state), model.text.length) : getHiddenRanges(model, previewMode);
-    return textOutsideRanges(model.text, [...hidden, ...canvases]);
-  });
+  let toastTimer: ReturnType<typeof setTimeout> | null = null;
 
-  /**
-   * 函数职责：从正文中剔除指定范围，得到计入字数的文字。
-   * 输入说明：ranges 为需排除的左闭右开原文坐标，允许乱序、重叠或越界。
-   * 输出说明：按原文顺序拼接剩余片段，不补分隔符；标点与空白由字数口径忽略。
-   */
-  function textOutsideRanges(text: string, ranges: readonly { from: number; to: number }[]): string {
-    let result = '';
-    let position = 0;
-    for (const range of [...ranges].sort((left, right) => left.from - right.from || left.to - right.to)) {
-      if (range.to <= position) continue;
-      if (range.from > position) result += text.slice(position, range.from);
-      position = range.to;
-    }
-    return result + text.slice(position);
+  let currentVersion = $state('0.8.8');
+  let updateStatus = $state<UpdateStatus>({ kind: 'idle' });
+  let systemDark = $state(
+    typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+      ? window.matchMedia('(prefers-color-scheme: dark)').matches
+      : false,
+  );
+
+  const windowMaterial =
+    typeof document !== 'undefined'
+      ? new WindowMaterialController(document.documentElement, applyNativeWindowMaterial)
+      : null;
+
+  const allThemes = $derived([...builtInThemes, ...customThemes]);
+  const activeTheme = $derived(
+    allThemes.find(item => item.id === preferences.themeId) ?? builtInThemes[0],
+  );
+  const desktopMaterialSupported =
+    Boolean(initialSetWindowMaterial) || (capabilities.desktop && !files.isBrowser && !files.isMobile);
+
+  const activeProject = $derived(
+    projects.length > 0
+      ? (projects.find(project => project.id === activeProjectId) ?? projects[0])
+      : null,
+  );
+  const currentProjectIcon = $derived(
+    activeProject ? activeProject.icon : preferences.defaultProjectIcon,
+  );
+  const sidebarCollapsed = $derived(
+    preferences.sidebarOpen !== undefined
+      ? !preferences.sidebarOpen
+      : Boolean(preferences.sidebarCollapsed),
+  );
+
+  function resolveWindowMaterial(
+    theme: ThemeDefinition,
+    mode: ThemeMode,
+    dark: boolean,
+  ): WindowMaterial {
+    if (theme.monochrome) return 'opaque';
+    const resolvedMode = mode === 'system' ? (dark ? 'dark' : 'light') : mode;
+    const candidate = theme.appearance?.[resolvedMode]?.['window-material'];
+    return candidate === 'acrylic' || candidate === 'blur' || candidate === 'transparent'
+      ? candidate
+      : 'opaque';
   }
 
-  /** 函数职责：求可见范围的补集，供源码视图与预览共用“排除隐藏正文”的统计口径。 */
-  function complementRanges(ranges: readonly { from: number; to: number }[], length: number): { from: number; to: number }[] {
-    const hidden: { from: number; to: number }[] = [];
-    let position = 0;
-    for (const range of ranges) {
-      if (position < range.from) hidden.push({ from: position, to: range.from });
-      position = Math.max(position, range.to);
-    }
-    if (position < length) hidden.push({ from: position, to: length });
-    return hidden;
-  }
-  const characterCount = $derived(countWords(pageText));
-  const counts = $derived.by(() => {
-    void version;
-    if (!active) return { todo: 0, archive: 0 };
-    const model = getDocumentModel(active.state);
-    const archived = model.tasks.filter(item => taskIsArchived(model, item)).length;
-    return { todo: model.tasks.length - archived, archive: archived };
-  });
-  // 大纲只在存在当前文档的项目界面生效；全部待办和欢迎页没有可列的章节。
-  const outlineVisible = $derived(sidebarView === 'outline' && screen === 'project' && !!active);
-  const outlineItems = $derived.by(() => {
-    void version;
-    if (!active || !editor) return [];
-    const model = editor.model;
-    return outlineEntries(model, previewMode, getHiddenRanges(model, mode));
-  });
-
-  // 语言只改变界面文案；复用配置队列持久化，不重建编辑器或修改正文。
-  $effect(() => {
-    if (!configReady) return;
-    setLocalePreference(config.preferences.locale ?? 'zh-CN');
-    if (ready) scheduleConfig();
-  });
-
-  $effect(() => {
-    if (!configReady) return;
-    const p = config.preferences;
-    applyTheme(document.documentElement, selectedTheme, p.theme, systemDark);
-    // 回写启动首帧缓存，供 main.ts 下次同步取色；写入失败只让下次首帧回退默认主题。
-    try { localStorage.setItem(bootThemeKey, JSON.stringify({ definition: selectedTheme, mode: p.theme })); } catch { /* 存储不可用时忽略。 */ }
-    document.documentElement.style.setProperty('--document-font', p.fontFamily);
-    document.documentElement.style.setProperty('--document-size', `${p.fontSize}px`);
-    document.documentElement.style.setProperty('--document-width', `${p.contentWidth}px`);
-    document.documentElement.style.setProperty('--paragraph-indent', `${p.paragraphIndent}em`);
-    if (ready) scheduleConfig();
-  });
-  $effect(() => { void query; void includeArchived; if (ready && (searchOpen || screen === 'all')) scheduleIndex(); });
-  $effect(() => {
-    if (!configReady) return;
-    document.documentElement.dataset.canvasPreview = config.preferences.canvasPreview ?? 'compact';
-    // 卡片高度改变后重新测量块布局，不替换编辑器状态或写入正文历史。
-    void tick().then(() => editor?.view.requestMeasure());
-    if (ready) scheduleConfig();
-  });
-  // editor 是普通变量不参与追踪；编辑器创建时经 EditorOptions 取初值，此处只响应偏好变化。
-  $effect(() => {
-    if (!configReady) return;
-    const enabled = config.preferences.headingAdd ?? false;
-    editor?.setHeadingAddEnabled(enabled);
-    if (ready) scheduleConfig();
-  });
-
-  // 编辑器滚动是高亮的唯一驱动；rAF 节流避免每个滚动事件都遍历标题。
-  // editor 是普通变量，不参与依赖追踪；依赖 active 使编辑器创建后重新挂载监听。
-  $effect(() => {
-    if (!active) return;
-    const view = editor?.view;
-    if (!view) return;
-    let frame = 0;
-    const schedule = (): void => {
-      if (frame) return;
-      frame = requestAnimationFrame(() => { frame = 0; if (outlineVisible) activeHeadingFrom = computeActiveHeading(); });
-    };
-    view.scrollDOM.addEventListener('scroll', schedule, { passive: true });
-    return () => { view.scrollDOM.removeEventListener('scroll', schedule); if (frame) cancelAnimationFrame(frame); };
-  });
-  // 模式切换、正文编辑和进入大纲都会移动章节位置；滚动事件不覆盖这些来源，需主动重算。
-  $effect(() => {
-    void version;
-    void mode;
-    if (!outlineVisible) return;
-    const frame = requestAnimationFrame(() => { activeHeadingFrom = computeActiveHeading(); });
-    return () => cancelAnimationFrame(frame);
-  });
-  // 高亮跟随正文滚动移动时，大纲列表同步滚动保持当前条目可见。
-  $effect(() => {
-    if (!outlineVisible || activeHeadingFrom === null) return;
-    void activeHeadingFrom;
-    void tick().then(() => document.querySelector('.outline-item.outline-active')?.scrollIntoView({ block: 'nearest' }));
-  });
-  let initialMaterialReady: Promise<void> | undefined;
-  // 显式明暗同步原生窗口；system 解除原生覆盖，避免 WebView 的媒体查询被上一次显式模式锁住。
-  $effect(() => {
-    if (!configReady) return;
-    const update = windowMaterial.update(selectedWindowMaterial, config.preferences.theme, config.preferences.keepTransparentOnBlur ?? false)
-      .catch(error => { toast = $t("窗口材质应用失败：{error}", { error: errorMessage(error) }); });
-    initialMaterialReady ??= update;
-    // 材质偏好走同一配置队列；普通主题禁用控件时仍保留用户上次选择。
-    if (ready) scheduleConfig();
-  });
-
-  /**
-   * 开始内部项目拖动；只记录稳定 ID，排序在成功放下时提交。
-   * Windows 上依赖窗口配置 dragDropEnabled=false，避免原生文件拖放拦截 HTML 拖放事件。
-   */
-  function startProjectDrag(event: DragEvent, id: string): void {
-    if (!event.dataTransfer) return;
-    event.dataTransfer.effectAllowed = 'move';
-    event.dataTransfer.setData('application/x-taskrail-project', id);
-    draggedProjectId = id;
-    projectDropTarget = null;
+  function themeSupportsBlur(theme: ThemeDefinition): boolean {
+    if (theme.monochrome) return false;
+    const lightMaterial = theme.appearance?.light['window-material'];
+    const darkMaterial = theme.appearance?.dark['window-material'];
+    return (
+      lightMaterial === 'acrylic' ||
+      lightMaterial === 'blur' ||
+      lightMaterial === 'transparent' ||
+      darkMaterial === 'acrylic' ||
+      darkMaterial === 'blur' ||
+      darkMaterial === 'transparent'
+    );
   }
 
-  /** 根据目标行中线显示插入位置；外部拖入和自身目标不参与排序。 */
-  function previewProjectDrop(event: DragEvent, id: string): void {
-    if (!draggedProjectId || draggedProjectId === id) { projectDropTarget = null; return; }
-    event.preventDefault();
-    if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
-    const bounds = (event.currentTarget as HTMLElement).getBoundingClientRect();
-    projectDropTarget = { id, after: event.clientY >= bounds.top + bounds.height / 2 };
-  }
-
-  /** 按完整项目数组移动源项，保留隐藏项相对顺序及当前会话，并复用配置保存队列。 */
-  function dropProject(event: DragEvent, id: string): void {
-    previewProjectDrop(event, id);
-    const sourceId = draggedProjectId;
-    const target = projectDropTarget;
-    draggedProjectId = null; projectDropTarget = null;
-    if (!sourceId || !target) return;
-    const source = config.projects.find(project => project.id === sourceId);
-    if (!source) return;
-    // 先移除源项再定位目标，避免向下移动时的索引偏移；筛选只影响显示。
-    const reordered = config.projects.filter(project => project.id !== sourceId);
-    const targetIndex = reordered.findIndex(project => project.id === target.id);
-    if (targetIndex < 0) return;
-    reordered.splice(targetIndex + Number(target.after), 0, source);
-    if (reordered.every((project, index) => project.id === config.projects[index].id)) return;
-    config.projects = reordered;
-    scheduleConfig();
-  }
-
-  function notify(message: string, undoable = false): void {
-    toast = message; toastUndo = undoable; clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => { toast = ''; }, TOAST_DURATION_MS);
-  }
-
-  /**
-   * 函数职责：安装更新前保存全部已打开文档与配置，并禁止继续输入。
-   * 输入说明：只由更新协调器在签名验证成功且用户点击安装后调用。
-   * 输出说明：全部保存成功返回 true；失败由协调器解除编辑锁并保留安装包。
-   * 实现思路：锁定界面、捕获定位、等待所有保存器和配置队列，再允许原生安装退出。
-   */
-  async function prepareUpdateInstall(): Promise<boolean> {
-    updateInstalling = true;
-    // 撤销提示位于主界面外；进入保存屏障后不能再从提示条产生新的正文事务。
-    toast = ''; toastUndo = false; clearTimeout(toastTimer);
-    await tick();
-    if (canvasPanel && !await canvasPanel.flush()) { updateInstalling = false; return false; }
-    captureUI(); clearTimeout(configTimer);
-    await captureWindowPlacement();
-    const saved = await Promise.all([...sessions.values()].map(session => session.saver.flush()));
-    const configured = await persistConfig();
-    return saved.every(Boolean) && configured;
-  }
-
-  /** 更新偏好与普通配置走同一持久化队列；禁用自动下载不会打断已经开始的校验。 */
-  function updatePreferences(autoCheck: boolean, autoDownload: boolean): void {
-    config.preferences.autoCheckUpdates = autoCheck;
-    config.preferences.autoDownloadUpdates = autoDownload;
-    updater?.setAutoDownload(autoDownload); scheduleConfig();
-  }
-
-  /** 校验完整成功后才更新主题列表；重复 ID 必须先移除，避免无提示覆盖用户的配色。 */
-  async function importTheme(event: Event): Promise<void> {
-    const input = event.currentTarget as HTMLInputElement;
-    const file = input.files?.[0];
-    if (!file || themeImportBusy) return;
-    themeImportBusy = true; dialogError = '';
-    try {
-      if (file.size > 65536) throw new Error($t("THEME_INVALID: 主题文件不能超过 64 KiB。"));
-      const theme = parseTheme(await file.text());
-      if (themes.some(existing => existing.id === theme.id)) throw new Error($t("THEME_DUPLICATE: 此主题 ID 已存在，请修改文件中的 id 或先移除已有主题。"));
-      config.customThemes = [...(config.customThemes ?? []), theme];
-      config.preferences.themeId = theme.id;
-      await persistConfig();
-    } catch (error) { dialogError = errorMessage(error); }
-    finally { input.value = ''; themeImportBusy = false; }
-  }
-
-  /** 移除只作用于应用保存的主题副本，并回退到内置主题；原始 JSON 文件不变。 */
-  function removeTheme(): void {
-    config.customThemes = (config.customThemes ?? []).filter(theme => theme.id !== selectedTheme.id);
-    config.preferences.themeId = 'paper'; dialogError = '';
-  }
-
-  /** 桌面 WebView 不依赖浏览器下载行为，必须经系统对话框与文件端口保存；取消不写入，失败保留错误反馈。 */
-  async function exportThemeTemplate(): Promise<void> {
-    if (themeExportBusy) return;
-    themeExportBusy = true; dialogError = '';
-    // 内置 ID 改为可导入的自定义 ID，完整保留两个模式供用户编辑。
-    const template = { ...selectedTheme, id: `custom-${selectedTheme.id}`.slice(0, 64), name: $t("{name}（自制）", { name: selectedTheme.name }).slice(0, 80) };
-    try {
-      const text = JSON.stringify(template, null, 2);
-      if (mobile && native) { await (files as import('./lib/files/android').AndroidFilePort).exportText(text, `${template.id}.json`); return; }
-      if (desktop) {
-        const { save } = await import('@tauri-apps/plugin-dialog');
-        const path = await save({ title: $t("保存主题模板"), defaultPath: `${template.id}.json`, filters: [{ name: $t("JSON 主题"), extensions: ['json'] }] });
-        if (!path) return;
-        await files.create(path, text);
-        notify($t("主题模板已保存"));
-        return;
-      }
-      const url = URL.createObjectURL(new Blob([text], { type: 'application/json;charset=utf-8' }));
-      const anchor = document.createElement('a'); anchor.href = url; anchor.download = `${template.id}.json`;
-      document.body.append(anchor);
-      try { anchor.click(); }
-      finally { anchor.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000); }
-    } catch (error) { dialogError = $t("主题模板保存失败：{error}", { error: errorMessage(error) }); }
-    finally { themeExportBusy = false; }
-  }
-
-  /** 配置保存独立排队，保证较旧的界面快照不能覆盖新配置。 */
-  function scheduleConfig(): void {
-    clearTimeout(configTimer);
-    configTimer = setTimeout(() => { void persistConfig(); }, 250);
-  }
-  async function persistConfig(): Promise<boolean> {
-    if (!files || !configReady) return false;
-    captureUI();
-    const snapshot = JSON.parse(JSON.stringify(config)) as AppConfig;
-    configQueue = configQueue.catch(() => {}).then(() => files.saveConfig(snapshot));
-    try { await configQueue; configError = ''; return true; }
-    catch (error) { configError = $t("配置保存失败：{error}", { error: errorMessage(error) }); notify(configError); return false; }
-  }
-  /**
-   * 函数职责：把普通模式的窗口几何写入配置，供下次启动恢复。
-   * 输入说明：仅桌面环境由关闭与更新安装流程调用，必须在 persistConfig 前完成。
-   * 输出说明：卡片模式先还原普通几何再读取；最大化时读不到普通几何，保留既有记录只更新 maximized 标记。
-   * 实现思路：几何读取失败不阻止关闭流程，下次启动沿用既有记录或默认居中。
-   */
-  async function captureWindowPlacement(): Promise<void> {
-    if (!desktop) return;
-    try {
-      const { getCurrentWindow } = await import('@tauri-apps/api/window');
-      const appWindow = getCurrentWindow();
-      // 关闭请求一旦发出即还原卡片几何；随后保存失败取消关闭时窗口保持普通模式。
-      if (cardMode) { await cardWindow?.exit({ animate: false }); cardMode = false; }
-      if (await appWindow.isMaximized()) {
-        config.window = { ...(config.window ?? {}), maximized: true };
-        return;
-      }
-      const [position, size] = await Promise.all([appWindow.outerPosition(), appWindow.innerSize()]);
-      config.window = { x: position.x, y: position.y, width: size.width, height: size.height, maximized: false };
-    } catch { /* 读取失败时 config.window 保持原值。 */ }
-  }
-  function captureUI(): void {
-    if (!active || !editor || switching) return;
-    active.state = editor.state; active.ui = editor.getUIState();
-    // 灵感簿的阅读状态与文件关联独立存放；active 标记最近编辑界面，供启动恢复。
-    if (active.project.id === INSPIRATION_ID) config.inspiration = { ...(config.inspiration ?? { path: active.project.path }), view: active.ui, active: true };
-    else config.projectViews[active.project.id] = active.ui;
-  }
-  function documentChanged(): void {
-    syncController?.markDirty(active?.project.id);
-    if (switching || !active || !editor) return;
-    active.state = editor.state; active.ui = editor.getUIState();
-    active.saver.changed(); version += 1;
-    // 完成事务同时改变排列与自动折叠，界面状态须随正文保存，重新打开才能保留收起结果。
-    scheduleConfig();
-    if (searchOpen || screen === 'all') scheduleIndex();
-  }
-  /** 画布占用唯一正文会话；关闭时先完成附件与正文保存，再恢复编辑焦点。 */
-  function openCanvas(session: CanvasSession): void {
-    if (canvasSession) return;
-    menuOpen = false; searchOpen = false; projectMenu = null; crumbMenu = null;
-    canvasSession = session;
-  }
-  function closeCanvas(): void {
-    const previous = canvasSession;
-    canvasSession = null;
-    void tick().then(() => {
-      previous?.close(); void active?.saver.checkExternal();
-      // 画布编辑期间同步会暂缓该文档；收起后立即交换，不能等到空闲轮询才补发。
-      void syncController?.sync();
-    });
-  }
-  $effect(() => { canvasPanel?.setLocked(updateInstalling || canvasClosing); });
-  /** 摘要展开只保存阅读配置；独立安排写入，不能依赖上一次正文保存尚未结束的定时器。 */
-  function editorUIChanged(): void {
-    if (switching || !active || !editor) return;
-    captureUI(); scheduleConfig();
-  }
-  function freshUI(project: Project): ProjectView {
-    return config.projectViews[project.id] ?? { mode: 'todo', cursor: 0, scrollTop: 0, folded: [] };
-  }
-
-  /**
-   * 异步读文件使用代次检查，快速切换时较早的读取不能抢回当前项目。
-   * 归档整理必须在当前会话与保存器就绪后执行；查询坐标属于整理前快照，须先定位再让事务映射选区。
-   */
-  async function openProject(project: Project, position?: number, targetMode?: ViewMode): Promise<void> {
-    if (mobile) sidebar = false;
-    if (project.archived || projectActionBusy) return;
-    const generation = ++openGeneration;
-    captureUI(); screen = 'project'; missing = null; fatal = ''; menuOpen = false; toast = '';
-    try {
-      let session: ProjectSession | null | undefined = sessions.get(project.id);
-      if (!session) {
-        const disk = await files.read(project.path);
-        session = await buildSession(project, disk, generation);
-        if (!session) return;
-      }
-      if (generation !== openGeneration) { switching = false; return; }
-      switching = true; active = session; config.activeProjectId = project.id;
-      // 打开任何项目都结束“上次停留在灵感簿”的恢复标记。
-      if (config.inspiration) config.inspiration = { ...config.inspiration, active: false };
-      resourceDocumentPath = project.path;
-      editor!.restoreState(session.state, targetMode ? { ...session.ui, mode: targetMode } : session.ui); switching = false;
-      version += 1; scheduleConfig();
-      if (position !== undefined) { searchOpen = false; await tick(); editor!.focusAt(position); }
-      // 手机端切换项目不主动聚焦编辑器：软键盘会在切换瞬间弹出，遮住刚打开的正文。
-      else if (!mobile) editor!.view.focus();
-      if (!session.saver.hasProtectedRecovery) editor!.normalizeArchive();
-      // 仅切换模式或定位不会触发正文回调，仍须同步会话，供标签状态和下次恢复使用。
-      captureUI(); version += 1;
-    } catch (error) {
-      if (generation !== openGeneration) return;
-      switching = false; fatal = errorMessage(error); missing = project;
-    }
-  }
-
-  /**
-   * 函数职责：打开灵感簿会话，首次进入时在托管位置创建文件；已关联但文件缺失时交给缺失横幅。
-   * 输入说明：position 与 targetMode 供搜索定位；伪项目身份不写入 activeProjectId。
-   * 输出说明：界面停留在灵感簿；配置中的路径与阅读状态随之建立，active 标记恢复入口。
-   * 实现思路：与 openProject 共用会话构建；仅对文件创建和配置字段分流做差异处理。
-   */
-  async function openInspiration(position?: number, targetMode?: ViewMode): Promise<void> {
-    if (mobile) sidebar = false;
-    if (projectActionBusy) return;
-    const generation = ++openGeneration;
-    captureUI(); screen = 'project'; missing = null; fatal = ''; menuOpen = false; toast = ''; dialog = null;
-    try {
-      let session: ProjectSession | null | undefined = sessions.get(INSPIRATION_ID);
-      let firstCreate = false;
-      if (!session) {
-        const knownPath = config.inspiration?.path;
-        const path = knownPath ?? await defaultInspirationPath();
-        let disk: FileSnapshot;
-        try {
-          disk = await files.read(path);
-        } catch (error) {
-          // 首次进入时托管文件尚不存在，直接创建；已有路径但读不到则提供重建与重新定位。
-          if (knownPath) { fatal = errorMessage(error); missing = inspirationProject(path); return; }
-          disk = await files.create(path, INSPIRATION_TEXT);
-          firstCreate = true;
-        }
-        if (generation !== openGeneration) return;
-        config.inspiration = { ...config.inspiration, path };
-        session = await buildSession(inspirationProject(path), disk, generation);
-        if (!session) return;
-      }
-      if (generation !== openGeneration) { switching = false; return; }
-      switching = true; active = session;
-      config.inspiration = { ...(config.inspiration ?? { path: session.project.path }), active: true };
-      resourceDocumentPath = session.project.path;
-      editor!.restoreState(session.state, targetMode ? { ...session.ui, mode: targetMode } : session.ui); switching = false;
-      version += 1; scheduleConfig();
-      // 新建文件时光标落到标题后的末尾，点开即可输入。
-      const cursor = position ?? (firstCreate ? session.state.doc.length : undefined);
-      if (cursor !== undefined) { searchOpen = false; await tick(); editor!.focusAt(cursor); }
-      // 手机端点击灵感等入口切换会话同样不主动拉起键盘；新建文件时定位到标题末尾属于主动输入，保留聚焦。
-      else if (!mobile) editor!.view.focus();
-      if (!session.saver.hasProtectedRecovery) editor!.normalizeArchive();
-      captureUI(); version += 1;
-    } catch (error) {
-      if (generation !== openGeneration) return;
-      switching = false; fatal = errorMessage(error); missing = sessions.get(INSPIRATION_ID)?.project ?? null;
-    }
-  }
-
-  /**
-   * 函数职责：为缺失的灵感簿重建空文件并重新打开，不删除或改写磁盘上的旧文件。
-   * 输入说明：只由缺失横幅在灵感簿缺失时触发。
-   * 输出说明：重建成功后清空错误界面；旧阅读状态一并作废，避免把光标与折叠套到新文档。
-   * 实现思路：原路径能重新读取则直接复用，读不到才创建新空文件。
-   */
-  async function recreateInspiration(): Promise<void> {
-    if (missing?.id !== INSPIRATION_ID) return;
-    const path = config.inspiration?.path ?? missing.path;
-    try {
-      let disk: FileSnapshot;
-      try { disk = await files.read(path); }
-      catch { disk = await files.create(path, INSPIRATION_TEXT); }
-      ++openGeneration;
-      sessions.get(INSPIRATION_ID)?.stopWatch();
-      sessions.get(INSPIRATION_ID)?.saver.dispose();
-      sessions.delete(INSPIRATION_ID);
-      config.inspiration = { path };
-      missing = null; fatal = '';
-      // 新文件与首次创建一致，光标落到标题后的末尾。
-      await openInspiration(INSPIRATION_TEXT.length);
-      scheduleConfig();
-    } catch (error) { fatal = errorMessage(error); }
-  }
-
-  /**
-   * 函数职责：为文档路径构建可复用的编辑会话，覆盖恢复草稿、保存协调器与文件监听。
-   * 输入说明：project 为会话身份（真实项目或灵感簿伪项目）；disk 是磁盘基线；generation 使较早的读取失效。
-   * 输出说明：会话写入 sessions 后返回；代次失效时返回 null，调用方直接结束本次打开。
-   * 实现思路：编辑器实例全局唯一，按需创建或换入状态；阅读状态按会话身份分流到配置的不同字段。
-   */
-  async function buildSession(project: Project, disk: FileSnapshot, generation: number): Promise<ProjectSession | null> {
-    let draft: RecoveryDraft | null = null;
-    let recoveryWarning = '';
-    try { draft = await files.loadRecovery(project.path); }
-    catch (error) { recoveryWarning = $t("恢复草稿无法读取：{error}", { error: errorMessage(error) }); }
-    if (generation !== openGeneration) return null;
-    const ui = project.id === INSPIRATION_ID
-      ? config.inspiration?.view ?? { mode: 'todo' as ViewMode, cursor: 0, scrollTop: 0, folded: [] }
-      : freshUI(project);
-    resourceDocumentPath = project.path;
-    switching = true;
-    if (!editor) editor = new EditorController(editorHost, {
-      text: disk.text, mode: ui.mode, onChange: documentChanged, onUIChange: editorUIChanged,
-      onStatus: message => notify(message, message.includes($t("可撤销"))),
-      resolveResource: url => native ? resolveDocumentResource(resourceDocumentPath, url, convertFileSrc) : url,
-      openLink: openDocumentLink,
-      openCanvas,
-      resolveCanvasImage: async asset => {
-        const path = resourceDocumentPath;
-        const bytes = await canvasAssets.read(path, asset);
-        return new Blob([bytes as BlobPart], { type: asset.mimeType });
-      },
-      headingAddEnabled: config.preferences.headingAdd ?? false, nativeSelection: mobile,
-    });
-    else editor.restoreState(editor.createState(disk.text, ui.mode));
-    editor.setUIState(ui);
-    const current: ProjectSession = {
-      project, state: editor.state, ui, recoveryWarning, stopWatch: () => {}, status: { kind: 'saved', message: $t("所有更改已保存") },
-      saver: undefined as unknown as SaveCoordinator,
-    };
-    current.saver = new SaveCoordinator({
-      files, snapshot: disk, getText: () => current.state.doc.toString(), preserveRecovery: !!recoveryWarning || !!draft && draft.text !== disk.text,
-      canReload: () => active?.project.id !== project.id || !editor?.view.composing && !canvasSession,
-      reload: (text, reason) => {
-        if (active?.project.id === project.id && editor) {
-          const target = editor;
-          switching = true;
-          try {
-            if (reason !== 'sync') { target.setText(text, true); current.state = target.state; }
-            // 同步接收按差异逐帧写入视图；会话正文立即按最终文本记录，保存与版本比较都以最终文档为准，
-            // 不把逐帧中间状态当作本地修改，也不让再次接收读到中间文本。
-            else {
-              current.state = target.createState(text, current.ui.mode);
-              target.setSynchronizedText(text, () => {
-                if (active?.project.id !== project.id) return;
-                current.state = target.state; version += 1;
-              });
-            }
-          } finally {
-            switching = false;
+  function createThemeTemplate(source: ThemeDefinition): ThemeDefinition {
+    const candidateId = `${source.id}-copy`.slice(0, 64);
+    return {
+      ...source,
+      id: candidateId,
+      name: `${source.name} Copy`,
+      light: { ...source.light },
+      dark: { ...source.dark },
+      ...(source.appearance
+        ? {
+            appearance: {
+              light: { ...source.appearance.light },
+              dark: { ...source.appearance.dark },
+            },
           }
-          if (reason === 'external' && !current.saver.hasProtectedRecovery) target.normalizeArchive();
-        } else if (editor) current.state = editor.createState(text, current.ui.mode);
-        version += 1; scheduleIndex();
-      },
-      onStatus: status => { current.status = status; version += 1; },
-    });
-    sessions.set(project.id, current);
-    void files.watch(project.path, () => { void current.saver.checkExternal(); indexCache.delete(project.id); })
-      .then(stop => { if (sessions.has(project.id)) current.stopWatch = stop; else stop(); })
-      .catch(error => notify($t("文件监听暂不可用：{error}", { error: errorMessage(error) })));
-    if (draft && draft.text !== disk.text) { recovery = { project, disk, text: draft.text }; dialog = 'recovery'; }
-    return current;
+        : {}),
+    };
   }
 
-  function setMode(next: ViewMode): void {
-    if (!active || !editor) return;
-    editor.setMode(next, !active.saver.hasProtectedRecovery); captureUI(); version += 1; scheduleConfig();
-  }
-  /** 切换当前分区的源码与预览；定位恢复由编辑器负责，应用只同步持久化界面状态。 */
-  function toggleSource(): void {
-    if (!active || !editor) return;
-    editor.toggleSource(!active.saver.hasProtectedRecovery);
-    captureUI(); version += 1; scheduleConfig();
-  }
-  async function showAll(): Promise<void> { if (mobile) sidebar = false; captureUI(); screen = 'all'; query = ''; searchOpen = false; toast = ''; await updateIndex(); }
-  /** Svelte 只管理挂载点；内容由正文共享渲染器生成，更新时整体替换只读 DOM。 */
-  function taskTitle(node: HTMLElement, result: AggregateResult): { update: (next: AggregateResult) => void } {
-    const update = (next: AggregateResult): void => {
-      node.replaceChildren(renderTaskTitle(next.model, next.item, {
-        resolveResource: url => resolveDocumentResource(next.path, url, path => native ? convertFileSrc(path) : path),
-      }));
+  const sectionMeta = $derived.by(() => {
+    const _lang = $locale;
+    switch (activeSection) {
+      case 'bounties':
+        return {
+          title: $t('悬赏板'),
+          subtitle: $t('悬赏大厅与项目工作流'),
+          description: $t('集中浏览公开悬赏、筛选项目与状态流转，跟进 Agent 认领、交付与验收。'),
+        };
+      case 'inbox':
+        return {
+          title: $t('待我处理'),
+          subtitle: $t('待补充信息与验收裁决'),
+          description: $t('聚合需要人工介入或我方响应的阻塞悬赏、待验收交付与超时预警。'),
+        };
+      case 'agents':
+        return {
+          title: $t('Agent 名录'),
+          subtitle: $t('已注册 Agent 与能力档案'),
+          description: $t('查看接入悬赏板的外部 Agent 身份、擅长领域、当前租约负载与历史交付记录。'),
+        };
+      case 'settings':
+        return {
+          title: $t('设置'),
+          subtitle: $t('工作台外观、排版与扩展配置'),
+          description: $t('管理界面语言、内置与自制主题、原生玻璃材质、阅读排版及工作台扩展分组。'),
+        };
+    }
+  });
+
+  const sampleCriteriaMarkdown = $derived(
+    $locale === 'en'
+      ? '- [x] Passes `cargo test` & `npm test`\n- [ ] Complexity bound $O(n \\log n)$ verified\n\n$$\n\\text{Score} = \\sum_{i=1}^{k} w_i \\cdot \\mathbb{I}(\\text{check}_i)\n$$'
+      : '- [x] 通过 `cargo test` 与 `npm test`\n- [ ] 验证复杂度上界 $O(n \\log n)$\n\n$$\n\\text{Score} = \\sum_{i=1}^{k} w_i \\cdot \\mathbb{I}(\\text{check}_i)\n$$',
+  );
+
+  const renderMarkdownAction: Action<HTMLElement, string> = (node, source) => {
+    const update = (next: string) => {
+      node.replaceChildren(renderMarkdown(next));
     };
-    update(result);
+    update(source);
     return { update };
-  }
-  interface AggregateGuide { level: number; continues: boolean; drop: boolean }
-  /**
-   * 计算一行任务需要绘制的竖向连线：各级章节干线、各层任务祖先干线，以及有可见子任务时从复选框下延的连线。
-   * 章节干线按标题链逐级右移；continues 为 false 的干线在本行分支处收尾，避免行末悬垂；只统计当前分页内的行，翻页边界不会画出断头线。
-   */
-  function aggregateGuides(rows: AggregateResult[], index: number): AggregateGuide[] {
-    const result = rows[index];
-    const chain = result.sectionChain;
-    const continuesBelow = (within: number): boolean => rows.some((row, at) => at > index && row.from < within);
-    const continuesHeading = (from: number): boolean => rows.some((row, at) => at > index && row.sectionChain.some(heading => heading.from === from));
-    const guides: AggregateGuide[] = chain.map((heading, level) => ({ level, continues: continuesHeading(heading.from), drop: false }));
-    // 无章节的任务没有章节干线，但仍从层级 1 起算，保持普通任务与章节任务各自的复选框列对齐。
-    const base = Math.max(chain.length, 1);
-    for (let level = 1; level <= result.depth; level++) guides.push({ level: base + level - 1, continues: continuesBelow(result.ancestorTos[level - 1]), drop: false });
-    if (continuesBelow(result.item.to)) guides.push({ level: base + result.depth, continues: true, drop: true });
-    return guides;
-  }
-  /** 返回本行需要新显示的章节标题及其在链中的绝对深度：与上一行共享的祖先前缀不重复渲染，分页首行重新显示整条链。 */
-  function aggregateHeadings(rows: AggregateResult[], index: number): (AggregateResult['sectionChain'][number] & { depth: number })[] {
-    const chain = rows[index].sectionChain;
-    const previous = index > 0 ? rows[index - 1].sectionChain : [];
-    let shared = 0;
-    while (shared < chain.length && shared < previous.length && chain[shared].from === previous[shared].from) shared++;
-    return chain.slice(shared).map((heading, offset) => ({ ...heading, depth: shared + offset }));
-  }
-  /** 任务行缩进层数：章节链在一级标题之下从零起算，加上任务祖先层数。 */
-  function aggregateDepth(result: AggregateResult): number {
-    return Math.max(result.sectionChain.length - 1, 0) + result.depth;
-  }
-  function scheduleIndex(): void { clearTimeout(searchTimer); searchTimer = setTimeout(() => { void updateIndex(); }, 350); }
-  /** 查询缓存只持有不可编辑语法投影；正文变化才重建，保存反馈不触发重复解析。 */
-  function modelForProject(projectId: string, text: string): DocumentModel {
-    const session = sessions.get(projectId);
-    if (session) return getDocumentModel(session.state);
-    const previous = indexCache.get(projectId);
-    if (previous?.text === text) return previous.model;
-    const model = parseDocument(text); indexCache.set(projectId, { text, model }); return model;
-  }
-  async function updateIndex(): Promise<void> {
-    const generation = ++indexGeneration; indexing = true;
-    const found: TaskResult[] = [];
-    const allFound: AggregateResult[] = [];
-    for (const project of availableProjects) {
-      if (generation !== indexGeneration) return;
-      try {
-        const text = sessions.get(project.id)?.state.doc.toString() ?? (await files.read(project.path)).text;
-        const model = modelForProject(project.id, text);
-        for (const result of searchTasks(model, query, searchOpen && includeArchived)) {
-          found.push({ projectId: project.id, projectName: project.name, from: result.from, title: result.title, section: result.heading, checked: result.archived });
-        }
-        if (screen === 'all') {
-          // 一级标题（含文档标题与系统归档）不进入全部待办分组，只重置二级标题的作用域；
-          // 二级至六级标题按原文位置维护祖先链，任务携带整条链供聚合视图分级显示，同名章节靠位置区分。
-          const chain: DocumentModel['headings'] = [];
-          let headingIndex = -1;
-          for (const result of searchTasks(model, '', false)) {
-            while (headingIndex + 1 < model.headings.length && model.headings[headingIndex + 1].from < result.from) {
-              const heading = model.headings[++headingIndex];
-              while (chain.length && chain.at(-1)!.level >= heading.level) chain.pop();
-              if (heading.level > 1) chain.push(heading);
-            }
-            allFound.push({ projectId: project.id, projectName: project.name, from: result.from, title: result.title, section: chain.at(-1)?.text ?? '', checked: false, model, item: result.item, path: project.path, depth: result.depth, ancestorTos: result.ancestorTos, sectionChain: chain.map(({ from, text }) => ({ from, text })) });
-          }
-        }
-      } catch { /* 失效路径由项目打开流程提供重新定位，不阻止其他项目查询。 */ }
-      // 每个项目之间让出事件循环，索引不同时创建多个编辑器。
-      await new Promise(resolve => setTimeout(resolve, 0));
-    }
-    // 灵感簿任务参与全局搜索，但不进入全部待办聚合；文件缺失由打开流程提供重建与重新定位。
-    if (config.inspiration) {
-      if (generation !== indexGeneration) return;
-      try {
-        const text = sessions.get(INSPIRATION_ID)?.state.doc.toString() ?? (await files.read(config.inspiration.path)).text;
-        const model = modelForProject(INSPIRATION_ID, text);
-        for (const result of searchTasks(model, query, searchOpen && includeArchived)) {
-          found.push({ projectId: INSPIRATION_ID, projectName: $t("灵感"), from: result.from, title: result.title, section: result.heading, checked: result.archived });
-        }
-      } catch { /* 缺失的灵感簿文件不阻塞其他项目的查询。 */ }
-    }
-    if (generation === indexGeneration) { results = found; resultLimit = 100; aggregateResults = allFound; indexing = false; }
-  }
-  async function locate(result: TaskResult): Promise<void> {
-    if (result.projectId === INSPIRATION_ID) {
-      await openInspiration(result.from, result.checked ? 'archive' : 'todo');
-      return;
-    }
-    const project = config.projects.find(item => item.id === result.projectId);
-    if (project) {
-      await openProject(project, result.from, result.checked ? 'archive' : 'todo');
-    }
+  };
+
+  function showToast(message: string): void {
+    toast = message;
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => {
+      toast = '';
+    }, 4000);
   }
 
-  function openDialog(next: typeof dialog): void {
-    if (mobile && next === 'help') return;
-    menuOpen = false; projectMenu = null; dialogError = ''; dialog = next;
-    if (next === 'remove') removeTarget = active?.project ?? null;
-    if (next === 'project') { projectName = ''; projectPath = ''; createFile = false; }
-    if (next === 'rename') projectName = active?.project.name ?? '';
-  }
-  /** 对话框将键盘焦点限制在当前操作内，关闭时恢复触发控件。 */
-  function modalFocus(node: HTMLElement) {
-    const previous = document.activeElement as HTMLElement | null;
-    const focusable = () => [...node.querySelectorAll<HTMLElement>('button:not(:disabled):not([tabindex="-1"]), input:not([type="hidden"]):not([type="file"]):not(:disabled), select:not(:disabled), textarea:not(:disabled), summary, [tabindex="0"]')]
-      .filter(element => {
-        if (element.closest('[hidden]') || getComputedStyle(element).display === 'none') return false;
-        // 收起的 details 只有直属 summary 能接收焦点；主题操作和帮助正文不能进入 Tab 循环。
-        const closed = element.closest('details:not([open])');
-        return !closed || element === closed.querySelector(':scope > summary');
-      });
-    // 设置页从首个选择器开始；图标网格可指定初始格子。隐藏的文件导入控件不能占据初始焦点或 Tab 循环。
-    (focusable().find(element => element.matches('[data-autofocus]')) ?? focusable().find(element => element.matches('[role="combobox"], input, select, textarea')) ?? focusable()[0] ?? node).focus();
-    const trap = (event: KeyboardEvent) => {
-      if (event.key !== 'Tab') return;
-      const elements = focusable(); const first = elements[0]; const last = elements.at(-1);
-      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
-      if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
-    };
-    node.addEventListener('keydown', trap);
-    return { destroy() { node.removeEventListener('keydown', trap); previous?.focus(); } };
-  }
-  async function choosePath(create: boolean): Promise<void> {
-    try {
-      const path = await files.chooseFile(create);
-      if (path) { projectPath = path; createFile = create; if (!projectName) projectName = mobile ? $t('新项目') : path.split(/[\\/]/).pop()?.replace(/\.(md|markdown|txt)$/i, '') ?? $t("新项目"); }
-    } catch (error) { dialogError = errorMessage(error); }
-  }
-  async function addProject(): Promise<void> {
-    if (!projectName.trim() || !mobile && !projectPath) { dialogError = mobile ? $t('填写项目名称。') : $t("填写项目名称并选择 Markdown 文件。"); return; }
-    if (addingProject) return;
-    addingProject = true;
-    try {
-      // 手机新建直接使用应用私有目录；用户选择过导入副本时沿用该副本。
-      if (mobile && !projectPath) { await choosePath(true); if (!projectPath) return; }
-      if (config.projects.some(item => documentPathKey(item.path) === documentPathKey(projectPath))) throw new Error($t("这个文件已经关联到项目。"));
-      if (config.inspiration && documentPathKey(config.inspiration.path) === documentPathKey(projectPath)) throw new Error($t("这个文件已用作灵感簿。"));
-      if (createFile) await files.create(projectPath, `# ${projectName.trim()}\n\n- [ ] \n`);
-      else await files.read(projectPath);
-      const project = { id: crypto.randomUUID(), name: projectName.trim(), path: projectPath };
-      config.projects = [...config.projects, project]; dialog = null; await openProject(project); scheduleConfig(); scheduleIndex();
-    } catch (error) { dialogError = errorMessage(error); }
-    finally { addingProject = false; }
-  }
-  function renameProject(): void {
-    syncController?.markDirty(active?.project.id);
-    if (!active || !projectName.trim()) return;
-    const project = config.projects.find(item => item.id === active!.project.id)!;
-    project.name = projectName.trim(); active.project = project; version += 1; dialog = null; scheduleConfig();
-  }
-  /** 图标对话框只修改目标项目的本机配置，不要求先切换到该项目。 */
-  function openIconPicker(project: Project): void {
-    iconTarget = project;
-    openDialog('icon');
-  }
-  /**
-   * 函数职责：保存或清除目标项目图标并持久化本机配置。
-   * 输入说明：icon 为 null 表示恢复默认；其他值是选择器给出的表情或 Lucide 引用。
-   * 输出说明：只修改目标项目；配置写入失败由既有错误横幅处理，内存中的图标保留。
-   * 实现思路：按 id 重新定位配置对象，避免菜单持有旧引用；活动会话同步替换项目对象。
-   * 约束条件：图标属于本机界面配置，不进入同步文档的项目资料，因此不触发同步脏标记。
-   */
-  function saveProjectIcon(icon: IconReference | null): void {
-    const target = iconTarget;
-    if (!target) return;
-    const project = config.projects.find(item => item.id === target.id);
-    if (!project) { iconTarget = null; dialog = null; return; }
-    const value = icon ? serializeProjectIcon(icon) : null;
-    if (value) project.icon = value; else delete project.icon;
-    if (active?.project.id === project.id) active.project = project;
-    iconTarget = null; dialog = null; version += 1; scheduleConfig();
-  }
-  /**
-   * 函数职责：归档或解除指定项目的关联，统一维护会话生命周期。
-   * 输入说明：目标来自项目菜单；archive 为 true 时保留配置和阅读位置。
-   * 输出说明：保存失败保留项目；归档保留正文，删除时只有 Android 清理私有文件，桌面仅移除关联。
-   * 实现思路：先捕获并保存编辑状态，再停止目标监听、更新配置和刷新查询。
-   */
-  async function retireProject(project: Project, archive: boolean): Promise<void> {
-    if (projectActionBusy || !config.projects.some(item => item.id === project.id)) return;
-    projectMenu = null; projectActionBusy = true;
-    captureUI();
-    try {
-      const session = sessions.get(project.id);
-      if (session && !await session.saver.flush()) {
-        const message = $t("仍有未保存内容，请先处理保存失败或冲突，再归档或解除关联。");
-        if (dialog) dialogError = message; else notify(message);
-        return;
-      }
-      if (!archive) {
-        const synced = Object.values(syncController?.engine.snapshot().records ?? {}).find(record => record.binding?.localId === project.id);
-        if (synced) await syncController!.engine.disable(synced.document.id);
-        // 同步队列完成暂停后才删除私有副本，防止已排队的远端写入重新创建文件。
-        if (android) {
-          if (!files.removeOwned) throw new Error('手机文件端口不支持删除私有文档');
-          await files.removeOwned(project.path);
-        }
-      }
-      // 保存等待期间阻止编辑和项目切换；同时使此前尚未完成的文件读取失效。
-      ++openGeneration;
-      session?.stopWatch(); session?.saver.dispose(); sessions.delete(project.id);
-      indexCache.delete(project.id);
-      if (archive) { project.archived = true; syncController?.markDirty(project.id); }
-      else {
-        config.projects = config.projects.filter(item => item.id !== project.id);
-        delete config.projectViews[project.id];
-      }
-      const replaceActive = active?.project.id === project.id;
-      if (replaceActive) {
-        active = null; config.activeProjectId = null;
-        // 灵感簿会话仍依赖同一个编辑器；只有没有任何存活会话时才释放它。
-        if (sessions.size === 0) { editor?.destroy(); editor = undefined; }
-      }
-      if (missing?.id === project.id) { missing = null; fatal = ''; }
-      dialog = null;
-      // 立即撤销旧索引的发布资格，避免延迟搜索把已归档项目重新带回结果。
-      ++indexGeneration;
-      results = results.filter(item => item.projectId !== project.id);
-      aggregateResults = aggregateResults.filter(item => item.projectId !== project.id);
-      projectActionBusy = false;
-      const next = config.projects.find(item => !item.archived);
-      if (replaceActive && screen === 'project') {
-        if (next) await openProject(next);
-        // 最后一个项目被移走后落到灵感簿，避免只剩空白欢迎页。
-        else if (config.inspiration || sessions.has(INSPIRATION_ID)) await openInspiration();
-      }
-      if (android && !archive) await persistConfig(); else scheduleConfig();
-      scheduleIndex();
-      if (!archive) void syncController?.sync();
-    } catch (error) {
-      if (dialog) dialogError = errorMessage(error); else notify(errorMessage(error));
-    } finally { projectActionBusy = false; }
-  }
-  async function removeProject(): Promise<void> {
-    if (removeTarget) await retireProject(removeTarget, false);
-  }
-  /** 恢复仅改变关联状态；不读取文件，失效路径仍由正常打开流程处理。 */
-  function restoreProject(project: Project): void {
-    project.archived = false; syncController?.markDirty(project.id); scheduleConfig(); scheduleIndex();
-  }
-  function showProjectMenu(event: MouseEvent, project: Project): void {
-    event.preventDefault();
-    if (projectActionBusy) return;
-    const bounds = (event.currentTarget as HTMLElement).getBoundingClientRect();
-    projectMenu = { project, x: Math.max(8, Math.min(event.clientX || bounds.left, window.innerWidth - 230)), y: Math.max(8, Math.min(event.clientY || bounds.bottom, window.innerHeight - 150)) };
-    menuOpen = false;
-    void tick().then(() => document.querySelector<HTMLElement>('[data-project-menu] button')?.focus());
-  }
-
-  /** 切换列表锚定面包屑项目名下方；键盘焦点进入列表便于方向键选择。 */
-  function showCrumbMenu(event: MouseEvent): void {
-    const bounds = (event.currentTarget as HTMLElement).getBoundingClientRect();
-    crumbMenu = { x: Math.min(bounds.left, window.innerWidth - 230), y: bounds.bottom + 6 };
-    void tick().then(() => document.querySelector<HTMLElement>('[data-crumb-menu] button')?.focus());
-  }
-  /** 菜单关闭时回到原项目行；右键操作不改变当前文档。 */
-  function closeProjectMenu(): void {
-    const path = projectMenu?.project.path;
-    projectMenu = null;
-    if (path) [...document.querySelectorAll<HTMLButtonElement>('.project-list button')].find(button => button.title === path)?.focus();
-  }
-  async function relocate(): Promise<void> {
-    const project = missing ?? active?.project;
-    if (!project) return;
-    try {
-      const path = await files.chooseFile(false); if (!path) return;
-      if (config.projects.some(item => item.id !== project.id && documentPathKey(item.path) === documentPathKey(path))) throw new Error($t("这个文件已经关联到另一个项目。"));
-      if (project.id !== INSPIRATION_ID && config.inspiration && documentPathKey(config.inspiration.path) === documentPathKey(path)) throw new Error($t("这个文件已用作灵感簿。"));
-      const disk = await files.read(path);
-      const session = sessions.get(project.id);
-      // 新文件与内存草稿可能不同；先持久化待恢复文本，打开后展示双方内容供选择。
-      if (session?.saver.hasLocalChanges && session.state.doc.toString() !== disk.text) {
-        await files.saveRecovery({ path, text: session.state.doc.toString(), baseRevision: disk.revision, savedAt: Date.now() });
-      }
-      session?.stopWatch(); session?.saver.dispose(); sessions.delete(project.id);
-      if (project.id === INSPIRATION_ID) {
-        config.inspiration = { path, active: true };
-        await openInspiration();
-      } else {
-        project.path = path;
-        await openProject(project);
-      }
-      scheduleConfig();
-    } catch (error) { fatal = errorMessage(error); }
-  }
-  async function save(): Promise<void> { if (canvasPanel && !await canvasPanel.flush()) return; if (active) { captureUI(); if (await active.saver.flush()) notify($t("已保存")); } }
-  /** 系统对话框确定输出路径后才写入；浏览器预览使用下载，不把附件挤入 localStorage。 */
-  async function downloadCanvasFile(blob: Blob, name: string): Promise<void> {
-    const extension = blob.type === 'image/png' ? 'png' : 'zip';
-    const basename = name.replace(/\.(?:png|zip)$/i, '').replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_').slice(0, 110) || 'canvas';
-    const safeName = `${basename}.${extension}`;
-    if (native) {
-      const { save } = await import('@tauri-apps/plugin-dialog');
-      const path = await save({ defaultPath: safeName, filters: [{ name: extension.toUpperCase(), extensions: [extension] }] });
-      if (!path) return;
-      const bytes = new Uint8Array(await blob.arrayBuffer());
-      if (android) { const { writeFile } = await import('@tauri-apps/plugin-fs'); await writeFile(path, bytes); }
-      else await nativeSaveCanvasFile(path, bytes);
-      return;
-    }
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a'); link.href = url; link.download = safeName; link.click();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-  }
-  async function exportCanvasBundle(): Promise<void> {
-    if (!active || bundleBusy) return;
-    bundleBusy = true; menuOpen = false;
-    try {
-      captureUI();
-      const current = active;
-      const text = current.state.doc.toString();
-      const path = current.project.path, name = current.project.name;
-      const { exportBundle } = await import('./lib/canvas/bundle');
-      const bytes = await exportBundle({ text, documentPath: path, assets: canvasAssetsFromText(text), port: canvasAssets });
-      await downloadCanvasFile(new Blob([bytes as BlobPart], { type: 'application/zip' }), `${name}.zip`);
-    } catch (error) { notify(errorMessage(error)); }
-    finally { bundleBusy = false; }
-  }
-  async function importCanvasBundle(event: Event): Promise<void> {
-    const input = event.currentTarget as HTMLInputElement;
-    const file = input.files?.[0];
-    if (!file || bundleBusy) return;
-    bundleBusy = true; menuOpen = false;
-    try {
-      const { importBundle, MAX_CANVAS_BUNDLE_BYTES } = await import('./lib/canvas/bundle');
-      if (file.size > MAX_CANVAS_BUNDLE_BYTES) throw new Error($t('完整文档包不能超过 128 MiB。'));
-      const path = native ? android ? await (files as import('./lib/files/android').AndroidFilePort).managedPath('导入') : await files.chooseFile(true) : `browser/import-${crypto.randomUUID()}.md`;
-      if (!path) return;
-      const imported = await importBundle({ bytes: new Uint8Array(await file.arrayBuffer()), documentPath: path, port: canvasAssets });
-      await files.create(path, imported.text);
-      const project = { id: crypto.randomUUID(), name: file.name.replace(/\.zip$/i, ''), path };
-      config.projects = [...config.projects, project];
-      await persistConfig(); await openProject(project);
-    } catch (error) { notify(errorMessage(error)); }
-    finally { input.value = ''; bundleBusy = false; }
-  }
-  async function exportMarkdown(text = active?.state.doc.toString() ?? '', name = `${active?.project.name ?? $t("清单")}.md`): Promise<void> {
-    if (mobile && native) {
-      try { if (await (files as import('./lib/files/android').AndroidFilePort).exportText(text, name)) notify($t('副本已保存')); } catch (error) { notify(errorMessage(error)); }
-      return;
-    }
-    if (desktop) {
-      try { const path = await files.chooseFile(true); if (path) { await files.create(path, text); notify($t("副本已保存")); } }
-      catch (error) { notify(errorMessage(error)); }
-      return;
-    }
-    const url = URL.createObjectURL(new Blob([text], { type: 'text/markdown;charset=utf-8' }));
-    const anchor = document.createElement('a'); anchor.href = url; anchor.download = name; anchor.click(); URL.revokeObjectURL(url);
-  }
-  async function resolveConflict(keepLocal: boolean): Promise<void> {
-    const external = active?.status.external; if (!active || !external) return;
-    try {
-      if (keepLocal) await active.saver.keepLocal(external);
-      else await active.saver.acceptExternal(external);
-      dialog = null;
-    } catch (error) { dialogError = errorMessage(error); }
-  }
-  async function recoverDraft(): Promise<void> {
-    if (!recovery || !active || !editor) return;
-    if (recovery.project.id !== active.project.id) { dialogError = $t("请先切换到草稿所属项目再恢复。"); return; }
-    editor.setText(recovery.text); active.state = editor.state;
-    // 恢复操作来自已展示双方全文的对话框，表示采用草稿作为当前编辑内容。
-    active.saver.changed(); dialog = null; recovery = null; version += 1;
-    editor.normalizeArchive();
-  }
-  async function openDocumentLink(url: string): Promise<void> {
-    try {
-      if (url.startsWith('#') && editor) {
-        const slug = decodeURIComponent(url.slice(1)).toLocaleLowerCase();
-        const heading = editor.model.headings.find(item => item.text.toLocaleLowerCase().replace(/\s+/g, '-') === slug);
-        if (heading) editor.focusAt(heading.from);
-        else notify($t("未找到链接对应的章节"));
-        return;
-      }
-      if (native) {
-        const platform = await import('./lib/files/tauri');
-        if (/^(https?:|mailto:)/i.test(url) || url.startsWith('//')) { await platform.openExternalLink(url.startsWith('//') ? `https:${url}` : url); return; }
-        const path = resolveDocumentResource(resourceDocumentPath, url, path => path);
-        const project = config.projects.find(item => documentPathKey(item.path) === documentPathKey(path));
-        if (project) {
-          await openProject(project);
-          const hash = url.indexOf('#'); if (hash >= 0) await openDocumentLink(url.slice(hash));
-        } else await platform.openLocalDocument(path);
-        return;
-      }
-      window.open(url, '_blank', 'noopener,noreferrer');
-    } catch (error) { notify(errorMessage(error)); }
-  }
-  function closeProjectSearch(): void {
-    projectSearchOpen = false;
-    projectFilter = '';
-  }
-
-  function openProjectSearch(): void {
-    // 项目搜索属于导航能力；大纲模式没有搜索入口，先切回导航再展开侧栏。
-    setSidebarView('nav');
-    expandSidebar();
-    projectSearchOpen = true;
-    searchOpen = false;
-    void tick().then(() => document.getElementById('project-filter')?.focus());
-  }
-
-  /** 切换侧栏视图并同步持久化偏好；项目搜索等导航入口切回导航时走同一出口。 */
-  function setSidebarView(next: 'nav' | 'outline'): void {
-    if (sidebarView === next) return;
-    sidebarView = next;
-    if (config.preferences.sidebarView !== next) { config.preferences.sidebarView = next; scheduleConfig(); }
-  }
-
-  /** 手势只在手机注册，状态通过回调即时读取，避免每次抽屉开关重新挂载监听。 */
-  $effect(() => {
-    if (!mobile) return;
-    return registerDrawerGestures({
-      isOpen: () => sidebar,
-      blocked: () => !booted || !!dialog || !!canvasSession || syncOpen || menuOpen || searchOpen || !!crumbMenu || updateInstalling || projectActionBusy,
-      setOpen: open => open ? expandSidebar() : closeSidebar(),
+  function snapshotConfig(): AppConfig {
+    return $state.snapshot({
+      projects,
+      activeProjectId,
+      customThemes,
+      preferences: {
+        ...preferences,
+        workspaceSection: activeSection,
+      },
+      ...(windowPlacement ? { window: windowPlacement } : {}),
     });
+  }
+
+  let configSaveChain: Promise<void> = Promise.resolve();
+  async function persistConfig(): Promise<boolean> {
+    if (configLoadFailed) return false;
+    const config = snapshotConfig();
+    const task = configSaveChain.then(async () => {
+      await files.saveConfig(config);
+    });
+    configSaveChain = task.catch(() => {});
+    try {
+      await task;
+      configSaveFailed = false;
+      return true;
+    } catch (error) {
+      configSaveFailed = true;
+      showToast($t('配置保存失败：{error}', { error: errorMessage(error) }));
+      return false;
+    }
+  }
+
+  async function applyVisualPreferences(): Promise<void> {
+    if (typeof document === 'undefined') return;
+    const root = document.documentElement;
+    applyTheme(root, activeTheme, preferences.theme, systemDark);
+    try {
+      localStorage.setItem(
+        bootThemeKey,
+        JSON.stringify({ definition: activeTheme, mode: preferences.theme }),
+      );
+    } catch {
+      /* 忽略无存储权限环境 */
+    }
+    if (preferences.fontFamily) root.style.setProperty('--user-font-body', preferences.fontFamily);
+    else root.style.removeProperty('--user-font-body');
+    const widthPx = preferences.contentWidth ?? preferences.lineWidth ?? defaultPreferences.contentWidth;
+    const indentChars =
+      typeof preferences.paragraphIndent === 'number'
+        ? preferences.paragraphIndent
+        : preferences.paragraphIndent
+          ? 2
+          : 0;
+    root.style.setProperty('--font-size', `${preferences.fontSize}px`);
+    root.style.setProperty('--content-width', `${widthPx}px`);
+    root.style.setProperty('--line-width', `${widthPx}px`);
+    root.style.setProperty('--paragraph-indent', indentChars > 0 ? `${indentChars}em` : '0em');
+
+    if (desktopMaterialSupported && windowMaterial) {
+      const material = resolveWindowMaterial(activeTheme, preferences.theme, systemDark);
+      const keepOnBlur =
+        themeSupportsBlur(activeTheme) && Boolean(preferences.keepTransparentOnBlur);
+      try {
+        await windowMaterial.update(material, preferences.theme, keepOnBlur);
+      } catch (error) {
+        showToast($t('窗口材质应用失败：{error}', { error: errorMessage(error) }));
+      }
+    } else {
+      root.dataset.windowTransparent = 'false';
+    }
+  }
+
+  $effect(() => {
+    const _resolved = configResolved;
+    const _theme = activeTheme;
+    const _mode = preferences.theme;
+    const _dark = systemDark;
+    const _blur = preferences.keepTransparentOnBlur;
+    const _fontFamily = preferences.fontFamily;
+    const _fontSize = preferences.fontSize;
+    const _contentWidth = preferences.contentWidth;
+    const _lineWidth = preferences.lineWidth;
+    const _indent = preferences.paragraphIndent;
+    if (!_resolved) return;
+    void applyVisualPreferences();
   });
 
-  /** 收起侧栏同时写入持久化展开意愿；大纲模式内手动收起在退出大纲后仍然生效。 */
-  function closeSidebar(): void {
-    sidebar = false;
-    if (config.preferences.sidebarOpen !== false) { config.preferences.sidebarOpen = false; scheduleConfig(); }
-  }
-
-  function expandSidebar(): void {
-    sidebar = true;
-    if (!config.preferences.sidebarOpen) { config.preferences.sidebarOpen = true; scheduleConfig(); }
-  }
-
-  /**
-   * 底栏大纲按钮只切换侧栏的导航/大纲视图，不负责展开收起。
-   * 从收起状态进入大纲是临时展开，不改写持久化意愿；切回导航时恢复进入前的展开状态。
-   */
-  function toggleOutlineView(): void {
-    if (outlineVisible) {
-      setSidebarView('nav');
-      sidebar = mobile ? false : config.preferences.sidebarOpen ?? true;
-    } else {
-      setSidebarView('outline');
-      if (!sidebar) sidebar = true;
-    }
-  }
-
-  function jumpToHeading(from: number): void {
-    if (!editor) return;
-    editor.focusAt(from);
-    // 定位可能不触发滚动事件（目标已在视口内），主动按视口规则重算一次高亮。
-    requestAnimationFrame(() => { if (outlineVisible) activeHeadingFrom = computeActiveHeading(); });
-  }
-
-  /** 视口顶部以上最后一个标题即当前章节；候选不在当前大纲列表中时不产生高亮。 */
-  function computeActiveHeading(): number | null {
-    if (!editor || !active || screen !== 'project') return null;
-    const view = editor.view;
-    const scroller = view.scrollDOM;
-    const positions = editor.model.headings.map(heading => ({ from: heading.from, top: view.lineBlockAt(heading.from).top }));
-    const listed = new Set(outlineItems.filter(entry => entry.visible).map(entry => entry.from));
-    return activeOutlineFrom(positions, scroller.scrollTop, listed, scroller.scrollHeight - scroller.clientHeight);
-  }
-
-  /** 关闭浮层的那次按下：正文获得焦点后，浏览器仍会按默认行为在 mousedown 上把焦点交给
-   *  编辑器并唤起输入法，只在 pointerdown 上取消默认行为盖不住它，需在紧随其后的 mousedown
-   *  再取消一次。只在该次按下后的短窗口内生效，触摸被取消等情况下不会误伤后续点击。 */
-  let suppressFocusPress = 0;
-
-  function suppressDismissFocus(event: MouseEvent): void {
-    if (performance.now() - suppressFocusPress > 500) return;
-    suppressFocusPress = 0;
-    event.preventDefault();
-    event.stopPropagation();
-  }
-
-  /** 在弹窗外按下鼠标即关闭；不能用 click 判定：弹窗内按下拖动选择文本、移出窗口松开时，
-   *  浏览器会把 click 合成到窗口根节点，导致误关。捕获阶段先关闭已有弹窗，避免打开按钮的
-   *  同一次点击立即将新弹窗关闭；桌面标题栏也算外部；仅主键关闭，与原 click 语义一致。
-   *  设备同步面板与普通弹窗同为独立浮层，按下面板外空白处也直接关闭整个面板。
-   *  手机端遮罩在按下瞬间移除，随后合成的 mousedown/click 会落到遮罩下方的编辑器并主动聚焦，
-   *  立即唤起输入法；取消这次 pointerdown 的默认行为并停止传播，编辑器的轻触手势拿不到这次按下，
-   *  焦点不会转移，弹窗仍只关闭一次。 */
-  function dismissDialog(event: PointerEvent): void {
-    if ((!dialog && !syncOpen) || updateInstalling || projectActionBusy) return;
-    if (event.button !== 0) return;
-    if (event.target instanceof Element && !event.target.closest('[role="dialog"]')) {
-      dialog = null; syncOpen = false;
-      if (mobile) { event.preventDefault(); event.stopPropagation(); suppressFocusPress = performance.now(); }
-    }
-  }
-
-  /**
-   * 捕获按下事件，避免编辑器阻止 click 冒泡导致浮层不关闭；触发按钮和浮层内部保留原操作。
-   * 手机端关闭浮层的那一次按下同时取消默认行为并停止传播：点击落在浮层下方的编辑器上时，
-   * 默认的焦点转移会立即唤起输入法，编辑器也可能把这次轻触当成点空白并主动聚焦；
-   * 两者都阻止后先关浮层、再点一次才进入编辑，与弹窗遮罩的处理一致。
-   */
-  function dismissPopovers(event: MouseEvent): void {
-    if (event.button !== 0) return;
-    const target = event.target;
-    if (!(target instanceof Element)) return;
-    let dismissed = false;
-    if (projectSearchOpen && !target.closest('[data-project-search]')) { closeProjectSearch(); dismissed = true; }
-    if (searchOpen && !target.closest('[data-global-search]')) { searchOpen = false; dismissed = true; }
-    if (menuOpen && !target.closest('[data-more-menu]')) { menuOpen = false; dismissed = true; }
-    if (projectMenu && !target.closest('[data-project-menu]')) { projectMenu = null; dismissed = true; }
-    if (crumbMenu && !target.closest('[data-crumb-menu]')) { crumbMenu = null; dismissed = true; }
-    if (dismissed && mobile) { event.preventDefault(); event.stopPropagation(); suppressFocusPress = performance.now(); }
-  }
-
-  function keydown(event: KeyboardEvent): void {
-    if (canvasSession) return;
-    if (updateInstalling || projectActionBusy) { event.preventDefault(); return; }
-    if (event.isComposing) return;
-    if (event.key === 'Escape') { closeProjectMenu(); dialog = null; searchOpen = false; closeProjectSearch(); menuOpen = false; crumbMenu = null; return; }
-    if (!(event.ctrlKey || event.metaKey)) return;
-    if (event.key.toLowerCase() === 'n' && !event.shiftKey && !event.altKey) {
-      // 全部待办仍保留后台编辑器；只有当前项目且未被弹窗或独立输入框占用时才能追加任务。
-      if (dialog || screen !== 'project' || !active || !editor || editor.view.composing) return;
-      if (event.target instanceof Element && event.target.closest('input, textarea, select')) return;
-      event.preventDefault();
-      if (event.repeat) return;
-      editor.insertTask(); menuOpen = false;
-    }
-    if (event.key.toLowerCase() === 's') { event.preventDefault(); void save(); }
-    if (event.key.toLowerCase() === 'p') { event.preventDefault(); openProjectSearch(); }
-    if (event.key.toLowerCase() === 'i' && !event.shiftKey && !event.altKey) {
-      event.preventDefault();
-      if (!event.repeat) void openInspiration();
-    }
-    if (event.key.toLowerCase() === 'f' && event.shiftKey) { event.preventDefault(); closeProjectSearch(); searchOpen = true; scheduleIndex(); void tick().then(() => document.getElementById('global-search')?.focus()); }
-  }
-
-  /** 灵感同步首次启用时创建托管文件；已有失效路径不静默重建。 */
-  async function ensureSyncInspiration(): Promise<string> {
-    if (config.inspiration) { await files.read(config.inspiration.path); return config.inspiration.path; }
-    const path = await defaultInspirationPath();
-    try { await files.read(path); } catch { await files.create(path, INSPIRATION_TEXT); }
-    config.inspiration = { path };
-    if (!await persistConfig()) throw new Error('灵感配置保存失败');
-    return path;
-  }
-  async function initializeSync(): Promise<void> {
-    const documents = new SessionSyncDocuments({
-      files, config: () => config, session: id => sessions.get(id), capture: captureUI,
-      assets: canvasAssets,
-      composing: id => active?.project.id === id && (!!editor?.view.composing || !!canvasSession),
-      persist: persistConfig, changed: () => { version += 1; indexCache.clear(); scheduleIndex(); },
-      inspiration: ensureSyncInspiration,
-      receivePath: async name => mobile ? (files as import('./lib/files/android').AndroidFilePort).managedPath(name) : files.chooseFile(true),
+  function waitNextPaintFrames(): Promise<void> {
+    return new Promise<void>(resolve => {
+      let settled = false;
+      const done = () => {
+        if (settled) return;
+        settled = true;
+        resolve();
+      };
+      const timer = setTimeout(done, 48);
+      if (typeof requestAnimationFrame === 'function') {
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => {
+            clearTimeout(timer);
+            done();
+          });
+        });
+      }
     });
-    const changed = () => { syncRevision += 1; };
-    const engine = new SyncEngine(documents, nativeSyncStore, changed);
-    syncController = new SyncController(engine, nativeSyncTransport, desktop, changed);
-    try { await syncController.start(); }
-    catch (error) { syncError = errorMessage(error); syncController.stop(); syncController = undefined; }
+  }
+
+  function applyLoadedConfig(loaded: AppConfig | null): void {
+    const config = loaded ?? emptyAppConfig();
+    projects = config.projects;
+    activeProjectId =
+      config.activeProjectId ?? (config.projects.length > 0 ? config.projects[0].id : null);
+    customThemes = config.customThemes ?? [];
+    const mergedPrefs = { ...defaultPreferences, ...config.preferences };
+    const resolvedLocale = mergedPrefs.locale ?? mergedPrefs.language ?? 'zh-CN';
+    const resolvedWidth = mergedPrefs.contentWidth ?? mergedPrefs.lineWidth ?? defaultPreferences.contentWidth;
+    const resolvedIndent =
+      typeof mergedPrefs.paragraphIndent === 'number'
+        ? mergedPrefs.paragraphIndent
+        : mergedPrefs.paragraphIndent
+          ? 2
+          : 0;
+    const resolvedSidebarOpen =
+      mergedPrefs.sidebarOpen !== undefined
+        ? mergedPrefs.sidebarOpen
+        : mergedPrefs.sidebarCollapsed !== undefined
+          ? !mergedPrefs.sidebarCollapsed
+          : true;
+    let resolvedDefaultIcon = mergedPrefs.defaultProjectIcon;
+    if (resolvedDefaultIcon) {
+      const parsed = parseProjectIcon(resolvedDefaultIcon);
+      resolvedDefaultIcon = parsed ? serializeProjectIcon(parsed) : undefined;
+    }
+    preferences = {
+      ...mergedPrefs,
+      locale: resolvedLocale,
+      language: resolvedLocale,
+      contentWidth: resolvedWidth,
+      lineWidth: resolvedWidth,
+      paragraphIndent: resolvedIndent,
+      sidebarOpen: resolvedSidebarOpen,
+      sidebarCollapsed: !resolvedSidebarOpen,
+      ...(resolvedDefaultIcon !== undefined ? { defaultProjectIcon: resolvedDefaultIcon } : {}),
+    };
+    windowPlacement = config.window ? { ...config.window } : undefined;
+    activeSection = preferences.workspaceSection ?? 'bounties';
+    setLocalePreference(resolvedLocale);
+  }
+
+  async function retryLoadConfig(): Promise<void> {
+    try {
+      const loaded = await files.loadConfig();
+      configLoadFailed = false;
+      configLoadError = '';
+      applyLoadedConfig(loaded);
+      await applyVisualPreferences();
+    } catch (error) {
+      configLoadFailed = true;
+      configLoadError = errorMessage(error);
+      showToast(configLoadError);
+    }
+  }
+
+  function selectSection(section: WorkspaceSection): void {
+    activeSection = section;
+    preferences = { ...preferences, workspaceSection: section };
+    mobileSidebarOpen = false;
+    void persistConfig();
+  }
+
+  function selectProject(projectId: string): void {
+    activeProjectId = projectId;
+    void persistConfig();
+  }
+
+  function toggleSidebar(collapsed: boolean): void {
+    preferences = { ...preferences, sidebarOpen: !collapsed, sidebarCollapsed: collapsed };
+    if (!collapsed && files.isMobile) mobileSidebarOpen = true;
+    else if (collapsed && files.isMobile) mobileSidebarOpen = false;
+    void persistConfig();
+  }
+
+  function handleSelectLanguage(language: LocalePreference): void {
+    setLocalePreference(language);
+    preferences = { ...preferences, locale: language, language };
+    void persistConfig();
+  }
+
+  function handleSelectThemeId(themeId: string): void {
+    themeError = '';
+    preferences = { ...preferences, themeId };
+    void persistConfig();
+  }
+
+  function handleSelectThemeMode(theme: ThemeMode): void {
+    preferences = { ...preferences, theme };
+    void persistConfig();
+  }
+
+  function handleToggleKeepTransparentOnBlur(enabled: boolean): void {
+    preferences = { ...preferences, keepTransparentOnBlur: enabled };
+    void persistConfig();
+  }
+
+  function handleChangeFontFamily(fontFamily: string): void {
+    preferences = { ...preferences, fontFamily };
+    void persistConfig();
+  }
+
+  function handleChangeFontSize(fontSize: number): void {
+    preferences = { ...preferences, fontSize: Math.min(20, Math.max(14, fontSize)) };
+    void persistConfig();
+  }
+
+  function handleChangeLineWidth(lineWidth: number): void {
+    const clamped = Math.min(900, Math.max(600, lineWidth));
+    preferences = { ...preferences, contentWidth: clamped, lineWidth: clamped };
+    void persistConfig();
+  }
+
+  function handleChangeParagraphIndent(indent: number): void {
+    const clamped = Math.min(4, Math.max(0, Math.round(indent)));
+    preferences = { ...preferences, paragraphIndent: clamped };
+    void persistConfig();
+  }
+
+  async function handleImportThemeFile(event: Event): Promise<void> {
+    const input = event.currentTarget as HTMLInputElement;
+    const file = input.files?.[0];
+    if (!file || importingTheme) return;
+    themeError = '';
+    if (file.size > 65536) {
+      themeError = $t('THEME_INVALID: 主题文件不能超过 64 KiB。');
+      input.value = '';
+      return;
+    }
+    importingTheme = true;
+    try {
+      const text = await file.text();
+      const parsed = parseTheme(text);
+      if (allThemes.some(item => item.id === parsed.id)) {
+        themeError = $t('THEME_DUPLICATE: 此主题 ID 已存在，请修改文件中的 id 或先移除已有主题。');
+        return;
+      }
+      customThemes = [...customThemes, parsed];
+      preferences = { ...preferences, themeId: parsed.id };
+      await persistConfig();
+    } catch (error) {
+      themeError = errorMessage(error);
+    } finally {
+      input.value = '';
+      importingTheme = false;
+    }
+  }
+
+  async function handleExportThemeTemplate(): Promise<void> {
+    themeError = '';
+    const template = createThemeTemplate(activeTheme);
+    const text = `${JSON.stringify(template, null, 2)}\n`;
+    try {
+      if (files.exportText) {
+        const saved = await files.exportText(text, `${template.id}.json`);
+        if (saved) showToast($t('主题模板已保存'));
+      }
+    } catch (error) {
+      showToast($t('主题模板保存失败：{error}', { error: errorMessage(error) }));
+    }
+  }
+
+  function handleRemoveActiveTheme(): void {
+    if (!customThemes.some(item => item.id === activeTheme.id)) return;
+    const removedId = activeTheme.id;
+    customThemes = customThemes.filter(item => item.id !== removedId);
+    preferences = { ...preferences, themeId: defaultThemeId };
+    themeError = '';
+    void persistConfig();
+  }
+
+  function handlePickProjectIcon(icon: ProjectIconValue): void {
+    const serialized = serializeProjectIcon(icon);
+    if (activeProject) {
+      const targetId = activeProject.id;
+      projects = projects.map(project =>
+        project.id === targetId ? { ...project, icon: serialized } : project,
+      );
+    } else {
+      preferences = { ...preferences, defaultProjectIcon: serialized };
+    }
+    void persistConfig();
+    iconPickerOpen = false;
+  }
+
+  function handleResetProjectIcon(): void {
+    if (activeProject) {
+      const targetId = activeProject.id;
+      projects = projects.map(project => {
+        if (project.id !== targetId) return project;
+        const { icon: _removed, ...rest } = project;
+        return rest;
+      });
+    } else {
+      const { defaultProjectIcon: _removed, ...rest } = preferences;
+      preferences = rest;
+    }
+    void persistConfig();
+    iconPickerOpen = false;
+  }
+
+  async function openExternalLink(url: string): Promise<void> {
+    try {
+      if (files.openExternalLink) {
+        await files.openExternalLink(url);
+      } else {
+        window.open(url, '_blank', 'noopener,noreferrer');
+      }
+    } catch (error) {
+      showToast(errorMessage(error));
+    }
+  }
+
+  const updateCoordinator = new UpdateCoordinator({
+    port: updatePort,
+    autoDownload: true,
+    onStatus: (status: UpdateStatus) => {
+      updateStatus = status;
+      if (status.kind === 'ready' && status.version && !updateDialogOpen) {
+        showToast($t('Taskrail {version} 已下载，可在更新面板安装。', { version: status.version }));
+      }
+    },
+    beforeInstall: async () => {
+      await configSaveChain;
+      return !configSaveFailed && !configLoadFailed;
+    },
+  });
+
+  function handleUpdatePreferences(autoCheck: boolean, autoDownload: boolean): void {
+    preferences = { ...preferences, autoCheckUpdates: autoCheck, autoDownloadUpdates: autoDownload };
+    updateCoordinator.setAutoDownload(autoDownload);
+    void persistConfig();
   }
 
   onMount(() => {
-    document.documentElement.classList.toggle('mobile-platform', mobile);
-    const motionPreference = window.matchMedia('(prefers-reduced-motion: reduce)');
-    const updateMotionPreference = () => { reducedMotion = motionPreference.matches; };
-    updateMotionPreference(); motionPreference.addEventListener('change', updateMotionPreference);
-    const colorPreference = window.matchMedia('(prefers-color-scheme: dark)');
-    const updateSystemTheme = () => { systemDark = colorPreference.matches; };
-    updateSystemTheme(); colorPreference.addEventListener('change', updateSystemTheme);
-    let unlistenClose = () => {};
-    let unlistenBack = () => {};
-    let unlistenRestore = () => {};
     let disposed = false;
-    const revealDesktopWindow = async () => {
-      if (disposed || !onready) return;
-      await tick();
-      if (initialMaterialReady) await initialMaterialReady;
-      await tick();
-      windowMaterial.showBackdropVeil('hold');
-      await Promise.race([
-        new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))),
-        new Promise<void>(resolve => setTimeout(resolve, 48)),
-      ]);
-      if (!disposed) {
-        onready();
-        windowMaterial.showBackdropVeil('fade');
-      }
-    };
-    const initialize = async () => {
+    const cleanups: Array<() => void> = [];
+
+    if (typeof window !== 'undefined' && typeof window.matchMedia === 'function') {
+      const media = window.matchMedia('(prefers-color-scheme: dark)');
+      const onMediaChange = (event: MediaQueryListEvent) => {
+        systemDark = event.matches;
+      };
+      media.addEventListener?.('change', onMediaChange);
+      cleanups.push(() => media.removeEventListener?.('change', onMediaChange));
+    }
+
+    if (files.isMobile) {
+      cleanups.push(
+        registerDrawerGestures({
+          isOpen: () => mobileSidebarOpen,
+          blocked: () => iconPickerOpen || updateDialogOpen,
+          setOpen: open => {
+            mobileSidebarOpen = open;
+            preferences = { ...preferences, sidebarOpen: open, sidebarCollapsed: !open };
+          },
+        }),
+      );
+    }
+
+    if (capabilities.desktop) {
       try {
-        files = native ? mobile ? new (await import('./lib/files/android')).AndroidFilePort() : new (await import('./lib/files/tauri')).TauriFilePort() : new BrowserFilePort();
-        const loaded = validateAppConfig(await files.loadConfig());
-        if (loaded) config = { ...loaded, preferences: { ...defaultPreferences, ...loaded.preferences }, projectViews: loaded.projectViews ?? {} };
-        else {
-          // 首次启动没有历史配置：立即按系统语言初始化，保证随后的初始文件以界面语言命名；缺省偏好的旧配置仍为简体中文。
-          config.preferences.locale = 'system';
-          setLocalePreference('system');
-          if (!native) {
-            const path = `${$t('浏览器')}/${$t('开始')}.md`;
-            try { await files.create(path, welcomeText); } catch { /* 重新初始化配置时复用已有预览文件。 */ }
-            config.projects = [{ id: 'welcome', name: $t('开始'), path }]; config.activeProjectId = 'welcome';
-          }
+        const win = getCurrentWindow();
+        if (typeof win?.onCloseRequested === 'function') {
+          let closing = false;
+          void win
+            .onCloseRequested(async event => {
+              if (closing) return;
+              event.preventDefault();
+              closing = true;
+              try {
+                if (!configLoadFailed) {
+                  const maximized = await win.isMaximized();
+                  if (maximized) {
+                    windowPlacement = {
+                      ...(windowPlacement ?? {}),
+                      maximized: true,
+                    };
+                  } else {
+                    const [pos, size] = await Promise.all([win.outerPosition(), win.innerSize()]);
+                    windowPlacement = {
+                      width: size.width,
+                      height: size.height,
+                      x: pos.x,
+                      y: pos.y,
+                      maximized: false,
+                    };
+                  }
+                  await persistConfig();
+                }
+              } catch {
+                /* 忽略窗口坐标读取或保存异常，继续关闭流程 */
+              } finally {
+                await win.destroy();
+              }
+            })
+            .then(unlisten => {
+              if (disposed) unlisten();
+              else cleanups.push(unlisten);
+            })
+            .catch(() => {});
         }
-        sidebar = mobile ? false : config.preferences.sidebarOpen ?? true;
-        sidebarView = config.preferences.sidebarView ?? 'nav';
-        if (disposed) return; configReady = true; ready = true;
-        const project = availableProjects.find(item => item.id === config.activeProjectId) ?? availableProjects[0];
-        // openProject/openInspiration 内部已把读取失败转为 fatal 横幅；finally 只保证 booted 必置位。
+      } catch {
+        /* 非桌面或测试环境忽略 */
+      }
+      try {
+        void listen('taskrail:window-restored', () => {
+          if (!disposed) windowMaterial?.showBackdropVeil('fade');
+        })
+          .then(unlisten => {
+            if (disposed) unlisten();
+            else cleanups.push(unlisten);
+          })
+          .catch(() => {});
+      } catch {
+        /* 非桌面或测试环境忽略 */
+      }
+    }
+
+    void (async () => {
+      if (capabilities.native) {
         try {
-          if (config.inspiration?.active) await openInspiration();
-          else if (project) await openProject(project);
-          else config.activeProjectId = null;
-        } finally {
-          if (!disposed) booted = true;
-        }
-        await revealDesktopWindow();
-        if (native) await initializeSync();
-        if (android) {
-          const { onBackButtonPress, exit } = await import('@tauri-apps/api/app');
-          const back = await onBackButtonPress(() => {
-            if (canvasSession) { void canvasPanel?.close(); return; }
-            if (syncOpen) { syncOpen = false; return; }
-            if (dialog) { dialog = null; return; }
-            if (searchOpen) { searchOpen = false; return; }
-            if (sidebar) { sidebar = false; return; }
-            void (async () => {
-              captureUI();
-              const saved = await Promise.all([...sessions.values()].map(session => session.saver.flush()));
-              if (saved.every(Boolean) && await persistConfig()) await exit(0);
-              else notify($t('仍有正文或配置未保存，请处理保存失败后关闭。'));
-            })();
-          });
-          unlistenBack = () => { void back.unregister(); };
-        }
-        if (desktop) {
-          const [{ getCurrentWindow }, { listen }] = await Promise.all([
-            import('@tauri-apps/api/window'),
-            import('@tauri-apps/api/event'),
-          ]);
-          if (disposed) return;
-          const restored = await listen('taskrail:window-restored', () => {
-            if (!disposed) windowMaterial.showBackdropVeil('fade');
-          });
-          if (disposed) restored();
-          else unlistenRestore = restored;
-          unlistenClose = await getCurrentWindow().onCloseRequested(async event => {
-            event.preventDefault();
-            if (updateInstalling || canvasClosing) return;
-            canvasClosing = true;
-            try {
-              await tick();
-              if (canvasPanel && !await canvasPanel.flush()) return;
-              captureUI();
-              await captureWindowPlacement();
-              const saved = await Promise.all([...sessions.values()].map(session => session.saver.flush()));
-              const configured = await persistConfig();
-              // 安装已接管退出时，旧关闭请求不能销毁窗口。
-              if (updateInstalling) return;
-              if (saved.every(Boolean) && configured) await getCurrentWindow().destroy();
-              else notify($t("仍有正文或配置未保存，请处理保存失败后关闭。"));
-            } finally { canvasClosing = false; }
-          });
-        }
-        if (native) {
-          // 更新初始化独立于正文加载；检查失败只进入更新面板，不使编辑器变为不可用。
-          const port = android ? new (await import('./lib/updater/android')).AndroidUpdatePort() : new (await import('./lib/updater/tauri')).TauriUpdatePort();
-          if (disposed) return;
-          updater = new UpdateCoordinator({
-            port, autoDownload: config.preferences.autoDownloadUpdates ?? true,
-            beforeInstall: prepareUpdateInstall, afterInstallFailure: () => { updateInstalling = false; },
-            afterInstallHandoff: () => { updateInstalling = false; },
-            onStatus: status => {
-              updateStatus = status;
-              if (status.kind === 'ready') notify($t("Taskrail {version} 已下载，可在更新面板安装。", { version: status.version ?? packageInfo.version }));
-            },
-          });
-          if (config.preferences.autoCheckUpdates ?? true) void updater.check();
-        }
-      } catch (error) {
-        fatal = errorMessage(error);
-        if (!disposed) {
-          ready = true;
-          booted = true;
-          void revealDesktopWindow();
+          currentVersion = await getVersion();
+        } catch {
+          /* 测试或浏览器环境下保留默认版本号 */
         }
       }
-    };
-    void initialize();
-    const beforeUnload = () => { void (async () => { if (canvasPanel && !await canvasPanel.flush()) return; captureUI(); void persistConfig(); for (const session of sessions.values()) void session.saver.flush(); })(); };
-    const focus = () => { for (const session of sessions.values()) void session.saver.checkExternal(); };
-    const visibility = () => { if (document.hidden) beforeUnload(); };
-    document.addEventListener('visibilitychange', visibility);
-    const viewport = () => { if (mobile) document.documentElement.style.setProperty('--mobile-height', `${window.visualViewport?.height ?? window.innerHeight}px`); };
-    viewport(); window.visualViewport?.addEventListener('resize', viewport);
-    window.addEventListener('beforeunload', beforeUnload); window.addEventListener('focus', focus);
+
+      try {
+        const loaded = await files.loadConfig();
+        if (disposed) return;
+        configLoadFailed = false;
+        configLoadError = '';
+        applyLoadedConfig(loaded);
+      } catch (error) {
+        if (!disposed) {
+          configLoadFailed = true;
+          configLoadError = errorMessage(error);
+          setLocalePreference(defaultPreferences.locale ?? 'zh-CN');
+          showToast(configLoadError);
+        }
+      }
+
+      if (disposed) return;
+      loading = false;
+      await applyVisualPreferences();
+      if (disposed) return;
+      configResolved = true;
+      booted = true;
+      windowMaterial?.showBackdropVeil('hold');
+      await tick();
+      await waitNextPaintFrames();
+      if (disposed) return;
+      onready?.();
+      windowMaterial?.showBackdropVeil('fade');
+
+      if (!disposed && updateSupported) {
+        updateCoordinator.setAutoDownload(preferences.autoDownloadUpdates ?? true);
+        if (preferences.autoCheckUpdates ?? true) {
+          void updateCoordinator.check();
+        }
+      }
+    })();
+
     return () => {
-      motionPreference.removeEventListener('change', updateMotionPreference);
-      colorPreference.removeEventListener('change', updateSystemTheme);
-      document.removeEventListener('visibilitychange', visibility); window.visualViewport?.removeEventListener('resize', viewport);
-      disposed = true; unlistenClose(); unlistenBack(); unlistenRestore(); windowMaterial.dispose(); window.removeEventListener('beforeunload', beforeUnload); window.removeEventListener('focus', focus);
-      clearTimeout(searchTimer); clearTimeout(configTimer); clearTimeout(toastTimer);
-      updater?.dispose(); syncController?.stop();
-      for (const session of sessions.values()) { session.stopWatch(); session.saver.dispose(); } editor?.destroy();
+      disposed = true;
+      for (const cleanup of cleanups) cleanup();
     };
+  });
+
+  onDestroy(() => {
+    if (toastTimer) clearTimeout(toastTimer);
+    windowMaterial?.dispose();
+    updateCoordinator.dispose();
   });
 </script>
 
-<svelte:window onkeydown={keydown} onpointerdowncapture={event => { dismissDialog(event); dismissPopovers(event); }} onmousedowncapture={suppressDismissFocus} onclick={dismissPopovers} />
+<div
+  class="app-shell"
+  class:booted
+  class:desktop-window={capabilities.desktop}
+  class:sidebar-collapsed={sidebarCollapsed}
+  class:mobile-sidebar-open={mobileSidebarOpen}
+>
+  {#if files.isMobile && mobileSidebarOpen && !sidebarCollapsed}
+    <button
+      type="button"
+      class="sidebar-backdrop"
+      aria-label={$t('收起导航栏')}
+      onclick={() => toggleSidebar(true)}
+    ></button>
+  {/if}
 
-<input class="canvas-bundle-input" type="file" accept=".zip,application/zip" bind:this={bundleInput} onchange={importCanvasBundle} tabindex="-1" aria-hidden="true"/>
-<div class="app-shell" bind:this={appShell} class:booted class:sidebar-hidden={!sidebar || cardMode} class:card-mode={cardMode} class:card-transitioning={cardTransitioning} class:desktop-window={desktop} class:mobile-app={mobile} inert={updateInstalling || canvasClosing || cardTransitioning || projectActionBusy || syncOpen || !!canvasSession}>
-
-  {#if mobile && sidebar}<button class="drawer-scrim" aria-label="关闭项目导航" onclick={() => sidebar = false}></button>{/if}
-  {#if sidebar && !cardMode}
-    <!-- 固定侧栏内容宽度，由外层裁切随网格收放，避免动画期间文字和按钮反复换行。 -->
-    <div class="sidebar-slot">
-    <aside class="sidebar" aria-label={outlineVisible ? $t("大纲目录") : $t("项目导航")} inert={!sidebar || cardMode} transition:fly={{ x: -16, duration: reducedMotion || cardTransitioning ? 0 : 180, easing: cubicOut }}>
-      <div class="brand" data-tauri-drag-region={desktop ? true : undefined}><img src={appIcon} width="32" height="32" alt="" draggable={false} /><span>Taskrail</span><button class="icon-button sidebar-close" onclick={closeSidebar} aria-label={$t("收起项目导航")}><svg width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m13 4-6 6 6 6"/></svg></button></div>
-      {#if outlineVisible}
-        {#key previewMode}
-          <nav class="outline-list" aria-label={$t("大纲目录")}>
-            {#each outlineItems as entry (entry.from)}
-              <button class="outline-item" class:outline-active={entry.from === activeHeadingFrom} disabled={!entry.visible} style:--depth={entry.level - 1} title={entry.text} onclick={() => jumpToHeading(entry.from)}>{entry.text}</button>
-            {:else}
-              <p class="outline-empty">{$t("暂无标题")}</p>
-            {/each}
-          </nav>
-        {/key}
-      {:else}
-      <button class:nav-active={screen === 'all'} class="nav-item all-nav" onclick={showAll}><svg width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="14" height="14" rx="2"/><path d="M6 7h8M6 10h8M6 13h5"/></svg> {$t("全部待办")} <svg class="shortcut" width="12" height="12" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 7H5a2 2 0 1 1 2-2v10a2 2 0 1 1-2-2h10a2 2 0 1 1-2 2V5a2 2 0 1 1 2 2H7Z"/></svg></button>
-      <button class:nav-active={screen === 'project' && active?.project.id === INSPIRATION_ID} class="nav-item inspiration-nav" onclick={() => void openInspiration()} title={$t("灵感 (Ctrl I)")}><svg width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 2.5a5.5 5.5 0 0 0-3.3 9.9c.8.6 1.3 1.5 1.3 2.4v.7h4v-.7c0-.9.5-1.8 1.3-2.4A5.5 5.5 0 0 0 10 2.5Z"/><path d="M8.5 17.5h3"/></svg> {$t("灵感")}</button>
-      <div class="sidebar-section"><span>{$t("项目")}</span><div class="project-actions">
-        <div class="project-search" data-project-search>
-          <button class="icon-button" aria-label={$t("查找项目")} title={$t("查找项目 (Ctrl P)")} aria-expanded={projectSearchOpen} aria-controls="project-search-panel" onclick={() => projectSearchOpen ? closeProjectSearch() : openProjectSearch()}><svg width="16" height="16" viewBox="0 0 20 20" aria-hidden="true"><circle cx="8" cy="8" r="5.5" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="m12 12 5 5" stroke="currentColor" stroke-width="1.7"/></svg></button>
+  <aside class="sidebar" aria-label={$t('工作台导航')}>
+    <div class="sidebar-header">
+      <div class="brand-lockup">
+        <span class="brand-mark" aria-hidden="true">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="2" y="2.5" width="12" height="11" rx="2.5" />
+            <path d="M5.2 6h5.6M5.2 9.5h3.5" />
+          </svg>
+        </span>
+        <div class="brand-copy">
+          <span class="brand-title">Taskrail</span>
+          <span class="brand-subtitle">{$t('Agent 悬赏工作台')}</span>
         </div>
-        <button class="icon-button" aria-label={$t("新增项目")} onclick={() => openDialog('project')}><svg width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M10 3v14M3 10h14"/></svg></button>
-      </div></div>
-      {#if projectSearchOpen}<div id="project-search-panel" class="project-search-panel" data-project-search><input id="project-filter" class="project-filter" aria-label={$t("快速查找项目")} placeholder={$t("查找项目…")} bind:value={projectFilter} /></div>{/if}
-      <nav class="project-list">
-        {#each visibleProjects as project (project.id)}
-          <button class="nav-item" class:nav-active={screen === 'project' && active?.project.id === project.id}
-            class:project-dragging={draggedProjectId === project.id}
-            class:project-drop-before={projectDropTarget?.id === project.id && !projectDropTarget.after}
-            class:project-drop-after={projectDropTarget?.id === project.id && projectDropTarget.after}
-            draggable="true" ondragstart={event => startProjectDrag(event, project.id)}
-            ondragover={event => previewProjectDrop(event, project.id)} ondrop={event => dropProject(event, project.id)}
-            ondragleave={event => { if (!(event.relatedTarget instanceof Node) || !event.currentTarget.contains(event.relatedTarget)) projectDropTarget = null; }}
-            ondragend={() => { draggedProjectId = null; projectDropTarget = null; }}
-            oncontextmenu={event => showProjectMenu(event, project)}
-            onkeydown={event => { if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) { event.preventDefault(); showProjectMenu(event as unknown as MouseEvent, project); } }}
-            onclick={() => openProject(project)} title={project.path}><ProjectIcon icon={project.icon}/><span class="project-name">{project.name}</span></button>
-        {/each}
-      </nav>
-      <div class="sidebar-bottom"><button class="icon-button" aria-label={$t("设置")} onclick={() => openDialog('settings')}><svg width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m8 2-.5 2-1.5.9-2-.6-2 3.4 1.5 1.4v1.8L2 12.3l2 3.4 2-.6 1.5.9.5 2h4l.5-2 1.5-.9 2 .6 2-3.4-1.5-1.4V9.1L18 7.7l-2-3.4-2 .6-1.5-.9-.5-2Z"/><circle cx="10" cy="10" r="3"/></svg></button></div>
+      </div>
+      <button
+        type="button"
+        class="icon-button sidebar-collapse-btn"
+        aria-label={$t('收起导航栏')}
+        title={$t('收起导航栏')}
+        onclick={() => toggleSidebar(true)}
+      >
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <rect x="2" y="2.5" width="12" height="11" rx="2" />
+          <path d="M6 2.5v11M10.5 6 8.5 8l2 2" />
+        </svg>
+      </button>
+    </div>
+
+    <nav class="workspace-nav" aria-label={$t('工作台导航')}>
+      <button
+        type="button"
+        class="workspace-nav-item"
+        class:active={activeSection === 'bounties'}
+        aria-current={activeSection === 'bounties' ? 'page' : undefined}
+        data-nav-section="bounties"
+        onclick={() => selectSection('bounties')}
+      >
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <rect x="2" y="2.5" width="12" height="11" rx="2" />
+          <path d="M5.5 6h5M5.5 9h5M5.5 11.5h3" />
+        </svg>
+        <span class="workspace-nav-label">{$t('悬赏板')}</span>
+      </button>
+
+      <button
+        type="button"
+        class="workspace-nav-item"
+        class:active={activeSection === 'inbox'}
+        aria-current={activeSection === 'inbox' ? 'page' : undefined}
+        data-nav-section="inbox"
+        onclick={() => selectSection('inbox')}
+      >
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M2.5 9.5h3.2l1.1 1.8h2.4l1.1-1.8h3.2" />
+          <rect x="2.2" y="3" width="11.6" height="10" rx="2" />
+        </svg>
+        <span class="workspace-nav-label">{$t('待我处理')}</span>
+      </button>
+
+      <button
+        type="button"
+        class="workspace-nav-item"
+        class:active={activeSection === 'agents'}
+        aria-current={activeSection === 'agents' ? 'page' : undefined}
+        data-nav-section="agents"
+        onclick={() => selectSection('agents')}
+      >
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <rect x="3" y="4" width="10" height="8.5" rx="2.2" />
+          <path d="M8 2v2M5.8 7.8h.01M10.2 7.8h.01M6 10.2h4" />
+        </svg>
+        <span class="workspace-nav-label">{$t('Agent 名录')}</span>
+      </button>
+
+      <button
+        type="button"
+        class="workspace-nav-item"
+        class:active={activeSection === 'settings'}
+        aria-current={activeSection === 'settings' ? 'page' : undefined}
+        data-nav-section="settings"
+        onclick={() => selectSection('settings')}
+      >
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <circle cx="8" cy="8" r="2.2" />
+          <path d="M8 2.2v1.4M8 12.4v1.4M2.2 8h1.4M12.4 8h1.4M3.9 3.9l1 1M11.1 11.1l1 1M12.1 3.9l-1 1M4.9 11.1l-1 1" />
+        </svg>
+        <span class="workspace-nav-label">{$t('设置')}</span>
+      </button>
+    </nav>
+  </aside>
+
+  <main class="workspace">
+    <header class="topbar" data-tauri-drag-region={capabilities.desktop ? true : undefined}>
+      <div class="topbar-start">
+        {#if sidebarCollapsed || files.isMobile}
+          <button
+            type="button"
+            class="icon-button sidebar-expand-btn"
+            aria-label={$t('展开导航栏')}
+            title={$t('展开导航栏')}
+            onclick={() => toggleSidebar(false)}
+          >
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <rect x="2" y="2.5" width="12" height="11" rx="2" />
+              <path d="M6 2.5v11M8.5 6l2 2-2 2" />
+            </svg>
+          </button>
+        {/if}
+
+        <div class="topbar-heading" data-tauri-drag-region={capabilities.desktop ? true : undefined}>
+          <span class="topbar-title">{sectionMeta.title}</span>
+          <span class="topbar-divider" aria-hidden="true">/</span>
+          <span class="topbar-subtitle">{sectionMeta.subtitle}</span>
+        </div>
+      </div>
+
+      <div class="topbar-actions">
+        {#if updateStatus.kind === 'available' || updateStatus.kind === 'downloading' || updateStatus.kind === 'ready'}
+          <button
+            type="button"
+            class="update-badge"
+            onclick={() => {
+              updateDialogOpen = true;
+            }}
+          >
+            {#if updateStatus.kind === 'ready'}
+              {$t('更新已就绪')}
+            {:else if updateStatus.kind === 'downloading'}
+              {$t('正在下载更新…')}
+            {:else}
+              {$t('发现新版本')}
+            {/if}
+          </button>
+        {/if}
+
+        <button
+          type="button"
+          class="icon-button"
+          aria-label={$t('应用更新')}
+          title={$t('应用更新')}
+          onclick={() => {
+            updateDialogOpen = true;
+          }}
+        >
+          <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M8 2.5v7.2M5.2 6.9 8 9.7l2.8-2.8M3 12.8h10" />
+          </svg>
+        </button>
+
+        {#if capabilities.desktop}
+          <WindowControls onerror={message => showToast(message)} />
+        {/if}
+      </div>
+    </header>
+
+    {#if configLoadFailed}
+      <div class="status-banner" role="alert" data-status="config-load-failed">
+        <span>{configLoadError || $t('项目配置格式无效，原配置已保留，请修复配置后重新打开应用。')}</span>
+        <button type="button" onclick={() => void retryLoadConfig()}>{$t('重试加载配置')}</button>
+      </div>
+    {:else if configSaveFailed}
+      <div class="status-banner" role="alert" data-status="config-save-failed">
+        <span>{$t('配置保存失败：{error}', { error: $t('未保存') })}</span>
+        <button type="button" onclick={() => void persistConfig()}>{$t('重试配置保存')}</button>
+      </div>
+    {/if}
+
+    <div class="workspace-body" data-active-section={activeSection}>
+      {#if loading}
+        <div class="workspace-loading" role="status">
+          <p>{$t('正在加载…')}</p>
+        </div>
+      {:else if activeSection === 'bounties'}
+        <section class="workspace-view" aria-labelledby="view-heading-bounties" data-view="bounties">
+          <header class="view-hero">
+            <div class="view-hero-copy">
+              <h1 id="view-heading-bounties" class="view-title">{$t('悬赏板')}</h1>
+              <p class="view-description">{sectionMeta.description}</p>
+            </div>
+            <div class="view-hero-actions">
+              {#if projects.length > 1}
+                <div class="filter-pills" role="group" aria-label={$t('切换项目')}>
+                  {#each projects as project (project.id)}
+                    <button
+                      type="button"
+                      class="filter-pill"
+                      class:active={activeProject?.id === project.id}
+                      data-project-id={project.id}
+                      onclick={() => selectProject(project.id)}
+                    >
+                      <ProjectIcon icon={project.icon} />
+                      <span>{project.name}</span>
+                    </button>
+                  {/each}
+                </div>
+              {/if}
+              <button
+                type="button"
+                class="project-badge-button"
+                aria-label={$t('设置项目图标')}
+                title={$t('设置项目图标')}
+                onclick={() => {
+                  iconPickerOpen = true;
+                }}
+              >
+                <ProjectIcon icon={currentProjectIcon} />
+                <span>{activeProject?.name ?? $t('全部项目')}</span>
+              </button>
+              <button type="button" class="primary" disabled title={$t('发布悬赏')}>
+                + {$t('发布悬赏')}
+              </button>
+            </div>
+          </header>
+
+          <div class="workspace-toolbar" data-slot="bounty-toolbar">
+            <div class="filter-pills" role="group" aria-label={$t('全部状态')}>
+              {#each [
+                { id: 'all', label: $t('全部状态') },
+                { id: 'OPEN', label: $t('悬赏中') },
+                { id: 'CLAIMED', label: $t('进行中') },
+                { id: 'WAITING_INFO', label: $t('待补充信息') },
+                { id: 'SUBMITTED', label: $t('待验收') },
+                { id: 'APPROVED', label: $t('已通过') },
+              ] as item (item.id)}
+                <button
+                  type="button"
+                  class="filter-pill"
+                  class:active={bountyStateFilter === item.id}
+                  onclick={() => {
+                    bountyStateFilter = item.id as typeof bountyStateFilter;
+                  }}
+                >
+                  {item.label}
+                </button>
+              {/each}
+            </div>
+
+            <div class="toolbar-search">
+              <input
+                type="search"
+                class="toolbar-search-input"
+                aria-label={$t('搜索悬赏标题、编号或标签…')}
+                placeholder={$t('搜索悬赏标题、编号或标签…')}
+                bind:value={bountySearchQuery}
+              />
+            </div>
+          </div>
+
+          <div class="skeleton-stage" data-slot="bounty-list-region">
+            <div class="empty-state-card">
+              <div class="empty-state-icon" aria-hidden="true">
+                <ProjectIcon icon={currentProjectIcon} large />
+              </div>
+              <h2 class="empty-state-title">{$t('暂无悬赏任务')}</h2>
+              <p class="empty-state-copy">
+                {$t('发布新悬赏后，将在这里按项目与状态筛选浏览任务详情、验收条件和交付记录。')}
+              </p>
+            </div>
+
+            <div class="skeleton-grid">
+              <article class="skeleton-card">
+                <span class="skeleton-badge">{$t('任务流转')}</span>
+                <h3>{$t('生命周期状态流转')}</h3>
+                <p>{$t('支持从悬赏发布、认领执行、提问澄清、提交交付到验收通过或驳回重开的完整流转及超时自动释放。')}</p>
+              </article>
+
+              <article class="skeleton-card">
+                <span class="skeleton-badge">{$t('排版与公式')}</span>
+                <h3>{$t('结构化交付与验收')}</h3>
+                <div class="markdown-preview-sample" use:renderMarkdownAction={sampleCriteriaMarkdown}></div>
+              </article>
+
+              <article class="skeleton-card">
+                <span class="skeleton-badge">{$t('项目图标')}</span>
+                <h3>{$t('项目归属与图标标识')}</h3>
+                <p>{$t('通过卡片与详情头部标识所属项目，侧栏保持极简顶层入口。')}</p>
+                <div class="skeleton-card-footer">
+                  <button
+                    type="button"
+                    class="secondary-action"
+                    onclick={() => {
+                      iconPickerOpen = true;
+                    }}
+                  >
+                    <ProjectIcon icon={currentProjectIcon} />
+                    <span>{$t('选择项目图标')}</span>
+                  </button>
+                </div>
+              </article>
+            </div>
+          </div>
+        </section>
+      {:else if activeSection === 'inbox'}
+        <section class="workspace-view" aria-labelledby="view-heading-inbox" data-view="inbox">
+          <header class="view-hero">
+            <div class="view-hero-copy">
+              <h1 id="view-heading-inbox" class="view-title">{$t('待我处理')}</h1>
+              <p class="view-description">{sectionMeta.description}</p>
+            </div>
+          </header>
+
+          <div class="workspace-toolbar" data-slot="inbox-toolbar">
+            <div class="filter-pills" role="group" aria-label={$t('待我处理')}>
+              {#each [
+                { id: 'all', label: $t('全部待办项') },
+                { id: 'WAITING_INFO', label: $t('待回答提问') },
+                { id: 'SUBMITTED', label: $t('待验收交付') },
+                { id: 'expiring', label: $t('即将超时') },
+              ] as item (item.id)}
+                <button
+                  type="button"
+                  class="filter-pill"
+                  class:active={inboxFilter === item.id}
+                  onclick={() => {
+                    inboxFilter = item.id as typeof inboxFilter;
+                  }}
+                >
+                  {item.label}
+                </button>
+              {/each}
+            </div>
+          </div>
+
+          <div class="skeleton-stage" data-slot="inbox-region">
+            <div class="empty-state-card">
+              <h2 class="empty-state-title">{$t('当前没有待处理事项')}</h2>
+              <p class="empty-state-copy">
+                {$t('当 Agent 请求补充信息（租约计时暂停）或提交交付等待验收时，相关任务会自动汇聚到此视图。')}
+              </p>
+            </div>
+
+            <div class="skeleton-grid two-columns">
+              <article class="skeleton-card">
+                <span class="skeleton-badge">{$t('提问澄清')}</span>
+                <h3>{$t('提问期间租约暂停')}</h3>
+                <p>{$t('Agent 请求补充信息期间自动暂停租约倒计时，回复后恢复计时。')}</p>
+              </article>
+
+              <article class="skeleton-card">
+                <span class="skeleton-badge">{$t('待验收')}</span>
+                <h3>{$t('交付验收与重开')}</h3>
+                <p>{$t('支持一键通过验收或附带反馈意见驳回重开。')}</p>
+              </article>
+            </div>
+          </div>
+        </section>
+      {:else if activeSection === 'agents'}
+        <section class="workspace-view" aria-labelledby="view-heading-agents" data-view="agents">
+          <header class="view-hero">
+            <div class="view-hero-copy">
+              <h1 id="view-heading-agents" class="view-title">{$t('Agent 名录')}</h1>
+              <p class="view-description">{sectionMeta.description}</p>
+            </div>
+            <div class="view-hero-actions">
+              <span class="protocol-pill">{$t('接入指南')}</span>
+            </div>
+          </header>
+
+          <div class="workspace-toolbar" data-slot="agents-toolbar">
+            <div class="filter-pills" role="group" aria-label={$t('Agent 名录')}>
+              {#each [
+                { id: 'all', label: $t('全部 Agent') },
+                { id: 'idle', label: $t('空闲可接单') },
+                { id: 'busy', label: $t('执行任务中') },
+              ] as item (item.id)}
+                <button
+                  type="button"
+                  class="filter-pill"
+                  class:active={agentFilter === item.id}
+                  onclick={() => {
+                    agentFilter = item.id as typeof agentFilter;
+                  }}
+                >
+                  {item.label}
+                </button>
+              {/each}
+            </div>
+          </div>
+
+          <div class="skeleton-stage" data-slot="agents-region">
+            <div class="empty-state-card">
+              <h2 class="empty-state-title">{$t('暂无已注册的 Agent')}</h2>
+              <p class="empty-state-copy">
+                {$t('外部 Agent 可阅读接入说明自助完成注册并获取专属凭证，在此展示能力标签与履约统计。')}
+              </p>
+            </div>
+
+            <div class="skeleton-grid two-columns">
+              <article class="skeleton-card">
+                <span class="skeleton-badge">{$t('接入规范')}</span>
+                <h3>{$t('自助准入与鉴权')}</h3>
+                <p>{$t('提供标准化接入说明，Agent 完成注册后凭专属访问凭证认领与交付悬赏。')}</p>
+              </article>
+
+              <article class="skeleton-card">
+                <span class="skeleton-badge">{$t('履约档案')}</span>
+                <h3>{$t('信誉与交付追踪')}</h3>
+                <p>{$t('记录完成数、按时交付率与验收通过记录，辅助多 Agent 协作调度。')}</p>
+              </article>
+            </div>
+          </div>
+        </section>
+      {:else if activeSection === 'settings'}
+        <section class="workspace-view workspace-settings-view" aria-labelledby="view-heading-settings" data-view="settings">
+          <header class="view-hero">
+            <div class="view-hero-copy">
+              <h1 id="view-heading-settings" class="view-title">{$t('设置')}</h1>
+              <p class="view-description">{sectionMeta.description}</p>
+            </div>
+          </header>
+
+          <div class="workspace-settings-surface">
+            <SettingsPanel
+              {preferences}
+              themes={allThemes}
+              {activeTheme}
+              {customThemes}
+              {desktopMaterialSupported}
+              {importingTheme}
+              {themeError}
+              onSelectLanguage={handleSelectLanguage}
+              onSelectThemeId={handleSelectThemeId}
+              onSelectThemeMode={handleSelectThemeMode}
+              onToggleKeepTransparentOnBlur={handleToggleKeepTransparentOnBlur}
+              onChangeFontFamily={handleChangeFontFamily}
+              onChangeFontSize={handleChangeFontSize}
+              onChangeLineWidth={handleChangeLineWidth}
+              onChangeParagraphIndent={handleChangeParagraphIndent}
+              onImportThemeFile={handleImportThemeFile}
+              onExportThemeTemplate={handleExportThemeTemplate}
+              onRemoveActiveTheme={handleRemoveActiveTheme}
+            />
+          </div>
+        </section>
       {/if}
-    </aside>
+    </div>
+  </main>
+
+  {#if iconPickerOpen}
+    <div
+      class="modal-backdrop"
+      role="presentation"
+      onclick={event => {
+        if (event.target === event.currentTarget) iconPickerOpen = false;
+      }}
+    >
+      <div class="modal-dialog icon-picker-dialog" role="dialog" aria-modal="true" aria-label={$t('设置项目图标')}>
+        <div class="modal-header">
+          <h2 class="modal-title">{$t('设置项目图标')}</h2>
+          <button
+            type="button"
+            class="icon-button"
+            aria-label={$t('关闭对话框')}
+            onclick={() => {
+              iconPickerOpen = false;
+            }}
+          >
+            ✕
+          </button>
+        </div>
+        <ProjectIconPicker
+          projectName={activeProject?.name ?? $t('全部项目')}
+          icon={currentProjectIcon}
+          mobile={Boolean(files.isMobile)}
+          onSelect={handlePickProjectIcon}
+          onReset={handleResetProjectIcon}
+        />
+      </div>
     </div>
   {/if}
 
-  <main class="main-pane">
-    {#if cardMode}
-      <!-- 拖动区独占顶部留白，不覆盖编辑器；正文滚动后仍可选中文字。 -->
-      <div class="card-drag-region" data-tauri-drag-region={desktop ? true : undefined} aria-hidden="true"></div>
-    {/if}
-    <!-- 拖动仅命中顶部非交互区域；按钮保留点击行为，Tauri 处理拖动和双击最大化。 -->
-    {#if !cardMode}
-    <header class="topbar" data-tauri-drag-region={desktop ? true : undefined}>
-      <div class="breadcrumb" data-tauri-drag-region={desktop ? true : undefined}>{#if !sidebar}<button class="icon-button" aria-label={$t("展开项目导航")} onclick={expandSidebar}><svg width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><path d="M5 6h10M5 10h10M5 14h10"/></svg></button>{/if}<span class="crumb-label">{$t("工作空间")}</span><span class="crumb-divider">/</span>{#if screen === 'project' && active}<button class="crumb-project" data-crumb-menu aria-label={$t("切换项目")} title={$t("切换项目")} aria-expanded={!!crumbMenu} onclick={showCrumbMenu}><span>{active.project.id === INSPIRATION_ID ? $t("灵感") : active.project.name}</span><svg width="12" height="12" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 8 4 4 4-4"/></svg></button>{:else}<strong>{screen === 'all' ? $t("全部待办") : $t("欢迎")}</strong>{/if}{#if screen === 'project' && hasUnsavedChanges}<span class="unsaved-mark" role="status" aria-label={$t("未保存")} title={$t("未保存")}>*</span>{/if}</div>
-      <div class="top-actions"><button class="search-button" data-global-search aria-expanded={searchOpen} onclick={() => { searchOpen = !searchOpen; scheduleIndex(); void tick().then(() => document.getElementById('global-search')?.focus()); }}><svg width="16" height="16" viewBox="0 0 20 20" aria-hidden="true"><circle cx="8" cy="8" r="5.5" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="m12 12 5 5" stroke="currentColor" stroke-width="1.7"/></svg>{$t("搜索")}<span class="key-hint">Ctrl ⇧ F</span></button><button class="icon-button" data-more-menu aria-label={$t("更多操作")} aria-expanded={menuOpen} onclick={() => menuOpen = !menuOpen}><svg width="18" height="18" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><circle cx="4" cy="10" r="1.5"/><circle cx="10" cy="10" r="1.5"/><circle cx="16" cy="10" r="1.5"/></svg></button>{#if desktop}<WindowControls onerror={notify} />{/if}</div>
-      {#if menuOpen}<div class="dropdown" data-more-menu role="menu">
-        {#if screen === 'project' && active}
-        <button role="menuitem" onclick={save}>{$t("保存")} <kbd>Ctrl S</kbd></button>
-        <button role="menuitem" onclick={() => { editor?.insertTask(); menuOpen = false; }}>{$t("新增任务")} <kbd>Ctrl N</kbd></button>
-        <button role="menuitem" disabled={mode !== 'todo'} onclick={() => { editor?.insertCanvas(); menuOpen = false; }}>{$t('插入画布')}</button>
-        <hr/>{#if active.project.id !== INSPIRATION_ID}<button role="menuitem" onclick={() => openDialog('rename')}>{$t("重命名项目")}</button><button role="menuitem" onclick={() => { if (active) openIconPicker(active.project); }}>{$t("设置项目图标")}</button>{/if}
-        <button role="menuitem" onclick={() => exportMarkdown()}>{$t("另存 Markdown 副本")}</button>
-        <button role="menuitem" disabled={bundleBusy} onclick={exportCanvasBundle}>{$t('导出完整文档')}</button>
-        {#if active.project.id !== INSPIRATION_ID}<button role="menuitem" onclick={() => openDialog('remove')}>{$t(mobile ? '删除项目' : '移除项目关联')}</button>{/if}
-        <hr/>{/if}<button role="menuitem" disabled={bundleBusy} onclick={() => { menuOpen = false; bundleInput.click(); }}>{$t('导入完整文档')}</button><button role="menuitem" onclick={() => openDialog('project')}>{$t("新增项目")}</button><button role="menuitem" onclick={() => openDialog('archived-projects')}>{$t("查看归档项目")}</button><button role="menuitem" onclick={() => openDialog('settings')}>{$t("阅读与外观")}</button><button role="menuitem" onclick={() => openDialog('updates')}>{$t("检查更新")}</button>{#if native}<button role="menuitem" onclick={() => { syncOpen = true; menuOpen = false; }}>设备同步</button>{/if}{#if !mobile}<button role="menuitem" onclick={() => openDialog('help')}>{$t("快捷键")}</button>{/if}
-      </div>{/if}
-    </header>
-    {/if}
-
-    {#if searchOpen}
-      <section class="search-panel" data-global-search aria-label={$t("跨项目搜索")}>
-        <div class="search-row"><input id="global-search" aria-label={$t("搜索所有项目")} placeholder={$t("搜索任务和正文…")} bind:value={query} /><button class="icon-button" aria-label={$t("关闭搜索")} onclick={() => searchOpen = false}><svg width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 5 10 10M15 5 5 15"/></svg></button></div>
-        <label class="check-label"><input type="checkbox" bind:checked={includeArchived}/> {$t("包含归档")}</label>
-        <div class="search-results">{#each results.slice(0, resultLimit) as result}<button class="search-result" onclick={() => locate(result)}><span>{result.checked ? $t("已完成") : $t("待办")} · {result.title}</span><small>{result.projectName}{result.section ? ` / ${result.section}` : ''}</small></button>{:else}<p class="muted">{indexing ? $t("正在搜索…") : $t("没有匹配的任务")}</p>{/each}{#if resultLimit < results.length}<button class="load-more" onclick={() => resultLimit += 100}>{$t('显示更多（还有 {count} 条）', { count: results.length - resultLimit })}</button>{/if}</div>
-      </section>
-    {/if}
-
-    {#if screen === 'project' && !cardMode}
-      <div class="viewbar"><div class="tabs" aria-label={$t("文档视图")}>{#each [['todo',$t("待办"),counts.todo],['archive',$t("归档"),counts.archive]] as tab}<button class:tab-active={previewMode === tab[0]} onclick={() => setMode(tab[0] as ViewMode)}>{tab[1]}{#if tab[2] !== null}<span>{tab[2]}</span>{/if}</button>{/each}</div></div>
-    {/if}
-
-    {#if fatal}<div class="error-banner" role="alert">{fatal}{#if missing}<button onclick={relocate}>{$t("重新定位文件")}</button>{/if}{#if missing?.id === INSPIRATION_ID}<button onclick={recreateInspiration}>{$t("新建空灵感簿")}</button>{/if}</div>{/if}
-    {#if syncError}<div class="error-banner" role="alert">{syncError}</div>{/if}
-    {#if configError}<div class="error-banner" role="alert">{configError}<button onclick={() => persistConfig()}>{$t("重试配置保存")}</button></div>{/if}
-    {#if active?.recoveryWarning}<div class="error-banner" role="alert">{active.recoveryWarning}{$t("。当前显示完好的 Markdown 原文件。")}</div>{/if}
-    {#if saveStatus?.kind === 'conflict'}<div class="conflict-banner" role="status">{$t("磁盘文件有新的修改，你的编辑已保留。")}<button onclick={() => openDialog('conflict')}>{$t("比较并处理")}</button></div>{/if}
-    {#if saveStatus?.kind === 'error'}<div class="error-banner" role="alert">{$t('保存失败：{error}', { error: saveStatus.message })}<button onclick={save}>{$t("重试保存")}</button><button onclick={() => exportMarkdown()}>{$t("另存副本")}</button><button onclick={relocate}>{$t("重新定位文件")}</button></div>{/if}
-
-    <div class="editor-region" class:offscreen={screen !== 'project' || !active || !!missing} bind:this={editorHost}></div>
-    {#if booted && !active && screen === 'project' && !fatal}
-      <section class="empty-state"><div class="empty-mark">T<span>↳</span></div><p class="eyebrow">{$t("为想法留白")}</p><h1>{$t("从一份清单开始。")}</h1><p>{$t("写下要做的事，完成后收进归档。")}<br/>{$t("你的 Markdown 文件，始终由你掌握。")}</p><button class="primary" onclick={() => openDialog('project')} disabled={!ready}>{$t("关联或新建项目")}</button><button class="text-button" onclick={() => openDialog('help')}>{$t("查看快捷键")} <svg width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 10h14m-5-5 5 5-5 5"/></svg></button></section>
-    {/if}
-    {#if screen === 'all'}
-      <section class="aggregate"><p class="eyebrow">{$t("工作空间")}</p><h1>{$t("全部待办")}<span>{aggregateResults.length}</span></h1>
-        {#each availableProjects as project}
-          {@const projectResults = aggregateResults.filter(result => result.projectId === project.id)}
-          {@const limit = aggregateLimits[project.id] ?? 100}
-          {@const visibleResults = projectResults.slice(0, limit)}
-          {#if projectResults.length}
-            <section class="aggregate-group">
-              <h2>{project.name}<span>{projectResults.length}</span></h2>
-              {#each visibleResults as result, index}
-                {@const headings = aggregateHeadings(visibleResults, index)}
-                {#each headings as heading}
-                  <h3 class="aggregate-section-heading" style:--depth={heading.depth}><span>{heading.text}</span></h3>
-                {/each}
-                <button class="aggregate-task" class:aggregate-section-task={result.sectionChain.length > 0} class:aggregate-nested={result.depth > 0} style:--depth={aggregateDepth(result)} aria-label={result.title} onclick={() => locate(result)}>{#each aggregateGuides(visibleResults, index) as guide}<i class="task-guide" class:task-guide-end={!guide.continues} class:task-guide-drop={guide.drop} style:--level={guide.level} aria-hidden="true"></i>{/each}<span class="readonly-box" aria-hidden="true"></span><span class="aggregate-content"><span class="aggregate-title" use:taskTitle={result}></span></span><svg class="result-arrow" width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 15 15 5M5 5h10v10"/></svg></button>
-              {/each}
-              {#if projectResults.length > limit}<button class="load-more" onclick={() => aggregateLimits[project.id] = limit + 100}>{$t('显示更多（还有 {count} 条）', { count: projectResults.length - limit })}</button>{/if}
-            </section>
-          {/if}
-        {/each}
-        {#if !aggregateResults.length}<p class="all-clear">{indexing ? $t("正在读取项目…") : $t("暂时没有待办。给自己留一点空闲。")}</p>{/if}
-      </section>
-    {/if}
-    {#if mobile && active && screen === 'project'}
-      <div class="mobile-edit-tools" role="toolbar" aria-label="编辑操作">
-        {#each [['task','新增任务'],['outdent','减少缩进'],['indent','增加缩进'],['up','上移'],['down','下移'],['undo','撤销'],['redo','重做']] as action}
-          <button aria-label={action[1]} title={action[1]} onpointerdown={event => event.preventDefault()} onclick={() => editor?.mobileCommand(action[0] as 'task' | 'indent' | 'outdent' | 'up' | 'down' | 'undo' | 'redo')}>
-            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              {#if action[0] === 'task'}<rect x="3" y="4" width="10" height="10" rx="2"/><path d="m5.5 9 2 2 3.5-4M17 14v7m-3.5-3.5h7M3 20h6"/>
-              {:else if action[0] === 'indent'}<path d="M3 4h18M11 9h10m-10 6h10M3 20h18m-18-12 4 4-4 4"/>
-              {:else if action[0] === 'outdent'}<path d="M3 4h18M11 9h10m-10 6h10M3 20h18M7 8l-4 4 4 4"/>
-              {:else if action[0] === 'up'}<path d="M5 4h14m-7 16V8m-5 5 5-5 5 5"/>
-              {:else if action[0] === 'down'}<path d="M5 20h14M12 4v12m-5-5 5 5 5-5"/>
-              {:else if action[0] === 'undo'}<path d="m8 5-5 5 5 5M3 10h11a6 6 0 0 1 0 12" transform="translate(0 -2)"/>
-              {:else}<path d="m16 5 5 5-5 5m5-5H10a6 6 0 0 0 0 12" transform="translate(0 -2)"/>{/if}
-            </svg>
+  {#if updateDialogOpen}
+    <div
+      class="modal-backdrop"
+      role="presentation"
+      onclick={event => {
+        if (event.target === event.currentTarget) updateDialogOpen = false;
+      }}
+    >
+      <div class="modal-dialog update-dialog" role="dialog" aria-modal="true" aria-label={$t('应用更新')}>
+        <div class="modal-header">
+          <h2 class="modal-title">{$t('应用更新')}</h2>
+          <button
+            type="button"
+            class="icon-button"
+            aria-label={$t('关闭对话框')}
+            onclick={() => {
+              updateDialogOpen = false;
+            }}
+          >
+            ✕
           </button>
-        {/each}
+        </div>
+        <UpdatePanel
+          supported={updateSupported}
+          mobile={Boolean(files.isMobile)}
+          {currentVersion}
+          status={updateStatus}
+          autoCheck={preferences.autoCheckUpdates ?? true}
+          autoDownload={preferences.autoDownloadUpdates ?? true}
+          onCheck={() => void updateCoordinator.check()}
+          onDownload={() => void updateCoordinator.download()}
+          onInstall={() => void updateCoordinator.install()}
+          onRetry={() => void updateCoordinator.retry()}
+          onPreferences={handleUpdatePreferences}
+          onOpenLink={url => void openExternalLink(url)}
+        />
       </div>
-    {/if}
-    <div class="statusbar-dock">
-      <footer class="statusbar" data-tauri-drag-region={desktop && cardMode ? true : undefined}>
-        <div class="statusbar-actions">
-          <button class="source-button" class:source-active={screen === 'project' && mode === 'source'} aria-label={mode === 'source' ? $t("返回预览") : $t("查看源码")} title={mode === 'source' ? $t("返回预览") : $t("查看源码")} aria-pressed={screen === 'project' && mode === 'source'} disabled={screen !== 'project' || !active} onclick={toggleSource}><svg width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 5-4 5 4 5m8-10 4 5-4 5M12 3 8 17"/></svg></button>
-          <button class="outline-button" class:outline-active={outlineVisible} aria-label={outlineVisible ? $t("返回导航") : $t("大纲目录")} title={outlineVisible ? $t("返回导航") : $t("大纲目录")} aria-pressed={outlineVisible} disabled={screen !== 'project' || !active} onclick={toggleOutlineView}><svg width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.5 5.5h.01M3.5 10h.01M3.5 14.5h.01M8 5.5h8.5M8 10h8.5M8 14.5h8.5"/></svg></button>
-          {#if !mobile}<button class="card-button" aria-label={cardMode ? $t("退出卡片模式") : $t("进入卡片模式")} title={cardMode ? $t("退出卡片模式") : $t("进入卡片模式")} aria-pressed={cardMode} disabled={cardTransitioning} onclick={toggleCardMode}><svg width="17" height="19" viewBox="0 0 20 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="2.5" width="13" height="19" rx="2"/><path d="M7 7h6M7 11h6M7 15h3"/></svg></button>{/if}
-        </div>
-        {#if desktop && ['available', 'ready', 'downloading'].includes(updateStatus.kind)}<button onclick={() => openDialog('updates')}>{updateStatus.kind === 'ready' ? $t("更新已就绪") : updateStatus.kind === 'downloading' ? `${$t("正在下载更新…")}${updateDownloadSize}` : $t("发现新版本")}</button>
-        {:else if syncNotice}<button class="sync-status" onclick={() => syncOpen = true}>{syncLabel}</button>{/if}<button aria-label={$t("快捷键")} onclick={() => openDialog('help')}>{#if screen === 'project' && active}{$t('{count} 字', { count: characterCount })}{:else}{$t("快捷键")}{/if}</button>
-      </footer>
     </div>
-  </main>
+  {/if}
+
+  {#if toast}
+    <div class="toast-bar" role="status" aria-live="polite">
+      <span>{toast}</span>
+      <button
+        type="button"
+        class="icon-button toast-dismiss"
+        aria-label={$t('关闭提示')}
+        onclick={() => {
+          toast = '';
+        }}
+      >
+        ✕
+      </button>
+    </div>
+  {/if}
 </div>
-
-{#if canvasSession && active}
-  <CanvasPanel bind:this={canvasPanel} session={canvasSession} documentPath={active.project.path} assets={canvasAssets} theme={resolvedThemeMode} {desktop} documentSaved={saveStatus?.kind === 'saved'} onClose={closeCanvas} onSave={async () => { captureUI(); return await active?.saver.flush() ?? false; }} onDownload={downloadCanvasFile} onError={notify}/>
-{/if}
-
-{#if syncOpen && syncController}<SyncPanel controller={syncController} revision={syncRevision} projects={config.projects} focus={modalFocus} ensureInspiration={async () => { await ensureSyncInspiration(); }} onClose={() => syncOpen = false}/>{/if}
-{#if syncOpen && !syncController}<div class="modal-backdrop"><div class="modal" role="dialog" aria-modal="true" aria-label="设备同步" tabindex="-1"><p>{syncError || '同步尚未就绪'}</p><button onclick={() => syncOpen = false}>关闭</button></div></div>{/if}
-
-{#if projectMenu}
-  <div class="dropdown project-context-menu" data-project-menu role="menu" tabindex="-1" aria-label={$t("项目操作")} style:left={`${projectMenu.x}px`} style:top={`${projectMenu.y}px`}
-    onkeydown={event => {
-      if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
-        event.preventDefault();
-        const buttons = [...event.currentTarget.querySelectorAll<HTMLButtonElement>('button')];
-        const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
-        buttons[event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1 : (index + (event.key === 'ArrowUp' ? -1 : 1) + buttons.length) % buttons.length]?.focus();
-      }
-      if (event.key === 'Tab') projectMenu = null;
-    }}>
-    <button role="menuitem" onclick={() => { const target = projectMenu?.project; if (target) openIconPicker(target); }}>{$t("设置项目图标")}</button>
-    <button role="menuitem" onclick={() => { if (projectMenu) void retireProject(projectMenu.project, true); }}>{$t("归档项目")}</button>
-    <button role="menuitem" onclick={() => { const target = projectMenu?.project; openDialog('remove'); removeTarget = target ?? null; }}>{$t("删除项目")}</button>
-  </div>
-{/if}
-
-{#if crumbMenu}
-  <div class="dropdown crumb-menu" data-crumb-menu role="menu" tabindex="-1" aria-label={$t("切换项目")} style:left={`${crumbMenu.x}px`} style:top={`${crumbMenu.y}px`}
-    onkeydown={event => {
-      if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
-        event.preventDefault();
-        const buttons = [...event.currentTarget.querySelectorAll<HTMLButtonElement>('button')];
-        const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
-        buttons[event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1 : (index + (event.key === 'ArrowUp' ? -1 : 1) + buttons.length) % buttons.length]?.focus();
-      }
-      if (event.key === 'Tab') crumbMenu = null;
-    }}>
-    <button role="menuitem" class:crumb-current={active?.project.id === INSPIRATION_ID} onclick={() => { crumbMenu = null; void openInspiration(); }}><span>{$t("灵感")}</span></button>
-    {#each availableProjects as project (project.id)}
-      <button role="menuitem" class:crumb-current={active?.project.id === project.id} onclick={() => { const target = project; crumbMenu = null; void openProject(target); }}><span>{project.name}</span></button>
-    {/each}
-  </div>
-{/if}
-
-{#if toast}<div class="toast" role="status" inert={updateInstalling || projectActionBusy}><span>{toast}</span>{#if toastUndo}<button onclick={() => { if (!updateInstalling && !projectActionBusy) { editor?.undo(); toast = ''; } }}>{$t("撤销")}</button>{/if}<button aria-label={$t("关闭提示")} onclick={() => toast = ''}><svg width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 5 10 10M15 5 5 15"/></svg></button></div>{/if}
-
-{#if dialog}
-  <div class="modal-backdrop" role="presentation">
-    <div class="modal" class:settings-modal={dialog === 'settings'} class:wide={dialog === 'conflict' || dialog === 'recovery'} role="dialog" aria-modal="true" aria-labelledby="dialog-title" tabindex="-1" use:modalFocus>
-      <button class="modal-close icon-button" aria-label={$t("关闭对话框")} disabled={updateInstalling || projectActionBusy} onclick={() => dialog = null}><svg width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><path d="m5 5 10 10M15 5 5 15"/></svg></button>
-      {#if dialog === 'project'}
-        {#if mobile}<h2 id="dialog-title">{$t('新建项目')}</h2>{:else}<p class="eyebrow">{$t("项目")}</p><h2 id="dialog-title">{$t("给一份清单一个位置")}</h2><p class="muted">{$t("关联已有 Markdown，或选择位置新建文件。")}</p>{/if}
-        <label>{$t("项目名称")}<input placeholder={$t("例如：工作、阅读、生活")} bind:value={projectName}/></label>
-        <div class="file-buttons"><button disabled={addingProject} onclick={() => choosePath(false)}>{mobile ? $t(projectPath && !createFile ? '重新选择导入文件' : '导入 Markdown') : $t("选择已有文件")}</button>{#if !mobile}<button disabled={addingProject} onclick={() => choosePath(true)}>{$t("新建清单文件")}</button>{/if}</div>
-        {#if projectPath && !mobile}<p class="file-path">{projectPath}</p>{/if}
-        {#if !native}<p class="small muted">{$t("浏览器模式会导入文件副本。桌面应用直接关联本地原文件。")}</p>{/if}
-        <button class="primary" disabled={addingProject} onclick={addProject}>{mobile && !projectPath ? $t('创建项目') : $t("添加项目")}</button>
-      {:else if dialog === 'rename'}
-        <h2 id="dialog-title">{$t("重命名项目")}</h2><label>{$t("项目名称")}<input bind:value={projectName}/></label><button class="primary" onclick={renameProject}>{$t("保存名称")}</button>
-      {:else if dialog === 'icon'}
-        <ProjectIconPicker projectName={iconTarget?.name ?? ''} icon={iconTarget?.icon} {mobile} onSelect={saveProjectIcon} onReset={() => saveProjectIcon(null)}/>
-      {:else if dialog === 'remove'}
-        <h2 id="dialog-title">{$t('删除「{name}」项目？', { name: removeTarget?.name ?? '' })}</h2><p>{mobile ? $t('将删除手机上的文档和恢复草稿。导入来源及电脑上的文件不受影响。') : $t("Markdown 文件会保留在原位置。你可以随时重新关联。")}</p><div class="modal-actions"><button onclick={() => dialog = null}>{$t("取消")}</button><button class="primary" disabled={projectActionBusy} onclick={removeProject}>{$t("删除项目")}</button></div>
-      {:else if dialog === 'archived-projects'}
-        <h2 id="dialog-title">{$t("归档项目")}</h2><p class="muted">{$t("恢复后，项目会重新显示在左侧列表中。")}</p>
-        <div class="archived-project-list">
-          {#each archivedProjects as project (project.id)}
-            <div class="archived-project-row"><div><strong>{project.name}</strong><small title={project.path}>{project.path}</small></div><button aria-label={$t("恢复项目：{name}", { name: project.name })} onclick={() => restoreProject(project)}>{$t("恢复项目")}</button></div>
-          {:else}<p class="muted">{$t("暂无归档项目")}</p>{/each}
-        </div>
-      {:else if dialog === 'settings'}
-        <SettingsPanel bind:preferences={config.preferences} {themes} material={selectedWindowMaterial} {desktop} {configReady}
-          importBusy={themeImportBusy} exportBusy={themeExportBusy} canRemoveTheme={config.customThemes?.some(theme => theme.id === selectedTheme.id) ?? false}
-          onImport={importTheme} onExport={exportThemeTemplate} onRemove={removeTheme}/>
-      {:else if dialog === 'updates'}
-        <h2 id="dialog-title">{$t("应用更新")}</h2>
-        <UpdatePanel supported={native} {mobile} currentVersion={packageInfo.version} status={updateStatus}
-          autoCheck={config.preferences.autoCheckUpdates ?? true} autoDownload={config.preferences.autoDownloadUpdates ?? true}
-          onCheck={() => { void updater?.check(); }} onDownload={() => { void updater?.download(); }}
-          onInstall={() => { void updater?.install(); }} onRetry={() => { void updater?.retry(); }} onPreferences={updatePreferences}
-          onOpenLink={url => void openDocumentLink(url)}/>
-      {:else if dialog === 'help'}
-        <h2 id="dialog-title">{$t("快捷键")}</h2>
-        <dl class="shortcuts"><dt>Ctrl N</dt><dd>{$t("新增任务")}</dd><dt>Enter</dt><dd>{$t("继续任务；空任务退出列表")}</dd><dt>Shift Enter</dt><dd>{$t("在任务正文中换行")}</dd><dt>Tab / Shift Tab</dt><dd>{$t("整项缩进 / 反缩进")}</dd><dt>Ctrl Z / Ctrl Shift Z</dt><dd>{$t("撤销 / 重做当前项目的编辑")}</dd><dt>Ctrl S</dt><dd>{$t("立即保存")}</dd><dt>Ctrl P</dt><dd>{$t("快速查找项目")}</dd><dt>Ctrl I</dt><dd>{$t("跳转到灵感簿")}</dd><dt>Ctrl Shift F</dt><dd>{$t("跨项目搜索")}</dd></dl>
-      {:else if dialog === 'conflict'}
-        <p class="eyebrow">{$t("外部修改")}</p><h2 id="dialog-title">{$t("选择要保留的内容")}</h2><p class="muted">{$t("可先另存副本，再选择版本；也可以关闭此窗口，在编辑器中手动合并。")}</p>
-        <div class="compare"><label>{$t("当前编辑")}<textarea readonly value={active?.state.doc.toString()}></textarea></label><label>{$t("磁盘版本")}<textarea readonly value={active?.status.external?.text}></textarea></label></div>
-        <div class="modal-actions"><button onclick={() => exportMarkdown()}>{$t("另存当前副本")}</button><button onclick={() => resolveConflict(false)}>{$t("选用磁盘版本")}</button><button class="primary" onclick={() => resolveConflict(true)}>{$t("保留当前编辑")}</button></div>
-      {:else if dialog === 'recovery'}
-        <p class="eyebrow">{$t("编辑恢复")}</p><h2 id="dialog-title">{$t("发现一份未写入文件的草稿")}</h2><p>{$t("草稿与磁盘内容均保留。恢复后可继续编辑，也可先另存草稿副本。")}</p>
-        <div class="compare"><label>{$t("恢复草稿")}<textarea readonly value={recovery?.text}></textarea></label><label>{$t("磁盘内容")}<textarea readonly value={recovery?.disk.text}></textarea></label></div>
-        <div class="modal-actions"><button onclick={() => exportMarkdown(recovery?.text)}>{$t("另存草稿副本")}</button><button onclick={() => { dialog = null; }}>{$t("暂不恢复")}</button><button class="primary" onclick={recoverDraft}>{$t("恢复草稿继续编辑")}</button></div>
-      {/if}
-      {#if dialogError}<p class="dialog-error" role="alert">{dialogError}</p>{/if}
-    </div>
-  </div>
-{/if}

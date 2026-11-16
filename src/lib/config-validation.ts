@@ -1,99 +1,239 @@
 /**
- * 文件职责：在应用状态赋值前校验持久化配置形状。
- * 定义范围：配置边界验证；不写入磁盘，不以默认配置覆盖无法读取的原数据。
+ * 文件职责：验证应用持久化配置的边界与字段契约。
+ * 定义范围：项目元数据（含项目图标）、自定义主题、界面/排版/工作台分区偏好与桌面窗口坐标校验。
  */
-import type { AppConfig } from './contracts';
-import { builtInThemes, validateTheme } from './themes';
+import { defaultPreferences, defaultThemeId } from './config-defaults';
+import type { AppConfig, Preferences, Project, WindowPlacement, WorkspaceSection } from './contracts';
 import { translate } from './i18n';
-import { parseProjectIcon } from './project-icons';
-import { documentPathKey } from './resource-paths';
+import type { LocalePreference } from './i18n';
+import { parseProjectIcon, serializeProjectIcon } from './project-icons';
+import { builtInThemes, validateTheme, type ThemeDefinition, type ThemeMode } from './themes';
 
-/**
- * 函数职责：拒绝会使界面崩溃或同文件形成双会话的配置。
- * 输入说明：值来自不可信的持久化边界；null 表示首次使用。
- * 输出说明：合法配置原样返回；非法配置抛 STATE_CONFIG_INVALID，原文件保持不动。
- * 实现思路：验证项目关联和界面状态的必要字段，偏好缺失字段由应用默认值补齐。
- */
+const WORKSPACE_SECTIONS = new Set<WorkspaceSection>(['bounties', 'inbox', 'agents', 'settings']);
+
+function invalidConfig(): never {
+  throw new Error(
+    `STATE_CONFIG_INVALID: ${translate('项目配置格式无效，原配置已保留，请修复配置后重新打开应用。')}`,
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function finiteNumberInRange(value: unknown, min: number, max: number, fallback: number): number {
+  if (value === undefined) return fallback;
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < min || value > max) invalidConfig();
+  return value;
+}
+
+function booleanOrDefault(value: unknown, fallback: boolean): boolean {
+  if (value === undefined) return fallback;
+  if (typeof value !== 'boolean') invalidConfig();
+  return value;
+}
+
+function validateFontFamily(value: unknown): string {
+  if (value === undefined) return defaultPreferences.fontFamily;
+  if (typeof value !== 'string') invalidConfig();
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.length > 512 || /[;{}<>]|url\s*\(/i.test(trimmed)) invalidConfig();
+  return trimmed;
+}
+
+function validateProject(value: unknown): Project {
+  if (!isRecord(value)) invalidConfig();
+  const { id, name, path, icon, archived } = value;
+  if (typeof id !== 'string' || !id.trim()) invalidConfig();
+  if (typeof name !== 'string' || !name.trim()) invalidConfig();
+  if (typeof path !== 'string' || !path.trim()) invalidConfig();
+  if (archived !== undefined && typeof archived !== 'boolean') invalidConfig();
+  let normalizedIcon: Project['icon'];
+  if (icon !== undefined) {
+    const parsedIcon = parseProjectIcon(icon);
+    if (!parsedIcon) invalidConfig();
+    normalizedIcon = serializeProjectIcon(parsedIcon);
+  }
+  return {
+    id,
+    name: name.trim(),
+    path: path.trim(),
+    ...(normalizedIcon !== undefined ? { icon: normalizedIcon } : {}),
+    ...(archived !== undefined ? { archived } : {}),
+  };
+}
+
+function validateCustomThemes(value: unknown): ThemeDefinition[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) invalidConfig();
+  const seen = new Set(builtInThemes.map(theme => theme.id));
+  return value.map(item => {
+    let theme: ThemeDefinition;
+    try {
+      theme = validateTheme(item);
+    } catch {
+      invalidConfig();
+    }
+    if (seen.has(theme.id)) invalidConfig();
+    seen.add(theme.id);
+    return theme;
+  });
+}
+
+function validateParagraphIndent(value: unknown, fallback: number): number {
+  if (value === undefined) return fallback;
+  if (typeof value === 'boolean') return value ? 2 : 0;
+  return finiteNumberInRange(value, 0, 4, fallback);
+}
+
+function validateLocalePreference(value: Record<string, unknown>): LocalePreference {
+  const hasLocale = value.locale !== undefined;
+  const hasLanguage = value.language !== undefined;
+  if (hasLocale && value.locale !== 'zh-CN' && value.locale !== 'en' && value.locale !== 'system') {
+    invalidConfig();
+  }
+  if (hasLanguage && value.language !== 'zh-CN' && value.language !== 'en' && value.language !== 'system') {
+    invalidConfig();
+  }
+  const localeVal = value.locale as LocalePreference | undefined;
+  const languageVal = value.language as LocalePreference | undefined;
+  const fallback = defaultPreferences.locale ?? 'zh-CN';
+  if (localeVal !== undefined && languageVal !== undefined) {
+    if (localeVal !== fallback) return localeVal;
+    if (languageVal !== fallback) return languageVal;
+    return localeVal;
+  }
+  return localeVal ?? languageVal ?? fallback;
+}
+
+function validateContentWidth(value: Record<string, unknown>): number {
+  const fallback = defaultPreferences.contentWidth;
+  const hasContentWidth = value.contentWidth !== undefined;
+  const hasLineWidth = value.lineWidth !== undefined;
+  const contentWidthVal = hasContentWidth
+    ? finiteNumberInRange(value.contentWidth, 560, 960, fallback)
+    : undefined;
+  const lineWidthVal = hasLineWidth ? finiteNumberInRange(value.lineWidth, 560, 960, fallback) : undefined;
+  if (contentWidthVal !== undefined && lineWidthVal !== undefined) {
+    if (contentWidthVal !== fallback) return contentWidthVal;
+    if (lineWidthVal !== fallback) return lineWidthVal;
+    return contentWidthVal;
+  }
+  return contentWidthVal ?? lineWidthVal ?? fallback;
+}
+
+function validateSidebarOpen(value: Record<string, unknown>): boolean {
+  const hasSidebarOpen = value.sidebarOpen !== undefined;
+  const hasSidebarCollapsed = value.sidebarCollapsed !== undefined;
+  if (hasSidebarOpen && typeof value.sidebarOpen !== 'boolean') invalidConfig();
+  if (hasSidebarCollapsed && typeof value.sidebarCollapsed !== 'boolean') invalidConfig();
+  const openVal = value.sidebarOpen as boolean | undefined;
+  const collapsedVal = value.sidebarCollapsed as boolean | undefined;
+  if (openVal !== undefined && collapsedVal !== undefined) {
+    if (openVal === false || collapsedVal === true) return false;
+    return true;
+  }
+  if (openVal !== undefined) return openVal;
+  if (collapsedVal !== undefined) return !collapsedVal;
+  return defaultPreferences.sidebarOpen ?? true;
+}
+
+function validatePreferences(value: unknown, customThemes: ThemeDefinition[]): Preferences {
+  if (value === undefined) return { ...defaultPreferences };
+  if (!isRecord(value)) invalidConfig();
+  const locale = validateLocalePreference(value);
+  const theme = value.theme ?? defaultPreferences.theme;
+  if (theme !== 'light' && theme !== 'dark' && theme !== 'system') invalidConfig();
+  const themeIds = new Set([...builtInThemes, ...customThemes].map(item => item.id));
+  const themeId = value.themeId ?? defaultThemeId;
+  if (typeof themeId !== 'string' || !themeIds.has(themeId)) invalidConfig();
+
+  const workspaceSectionValue =
+    value.workspaceSection === undefined
+      ? (defaultPreferences.workspaceSection ?? 'bounties')
+      : value.workspaceSection;
+  if (
+    typeof workspaceSectionValue !== 'string' ||
+    !WORKSPACE_SECTIONS.has(workspaceSectionValue as WorkspaceSection)
+  ) {
+    invalidConfig();
+  }
+
+  let defaultProjectIcon: string | undefined;
+  if (value.defaultProjectIcon !== undefined) {
+    const parsedIcon = parseProjectIcon(value.defaultProjectIcon);
+    if (!parsedIcon) invalidConfig();
+    defaultProjectIcon = serializeProjectIcon(parsedIcon);
+  }
+
+  const contentWidth = validateContentWidth(value);
+  const paragraphIndent = validateParagraphIndent(value.paragraphIndent, defaultPreferences.paragraphIndent);
+  const sidebarOpen = validateSidebarOpen(value);
+
+  return {
+    locale,
+    language: locale,
+    theme: theme as ThemeMode,
+    themeId,
+    keepTransparentOnBlur: booleanOrDefault(
+      value.keepTransparentOnBlur,
+      defaultPreferences.keepTransparentOnBlur ?? false,
+    ),
+    fontFamily: validateFontFamily(value.fontFamily),
+    fontSize: finiteNumberInRange(value.fontSize, 13, 22, defaultPreferences.fontSize),
+    contentWidth,
+    lineWidth: contentWidth,
+    paragraphIndent,
+    sidebarOpen,
+    sidebarCollapsed: !sidebarOpen,
+    workspaceSection: workspaceSectionValue as WorkspaceSection,
+    ...(defaultProjectIcon !== undefined ? { defaultProjectIcon } : {}),
+    autoCheckUpdates: booleanOrDefault(value.autoCheckUpdates, defaultPreferences.autoCheckUpdates ?? true),
+    autoDownloadUpdates: booleanOrDefault(
+      value.autoDownloadUpdates,
+      defaultPreferences.autoDownloadUpdates ?? true,
+    ),
+  };
+}
+
+function validateWindowPlacement(value: unknown): WindowPlacement | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) invalidConfig();
+  const width = value.width === undefined ? undefined : finiteNumberInRange(value.width, 320, 10000, 1180);
+  const height = value.height === undefined ? undefined : finiteNumberInRange(value.height, 240, 10000, 780);
+  const x = value.x === undefined ? undefined : finiteNumberInRange(value.x, -32000, 32000, 0);
+  const y = value.y === undefined ? undefined : finiteNumberInRange(value.y, -32000, 32000, 0);
+  const maximized = value.maximized === undefined ? undefined : booleanOrDefault(value.maximized, false);
+  return {
+    ...(width !== undefined ? { width } : {}),
+    ...(height !== undefined ? { height } : {}),
+    ...(x !== undefined ? { x } : {}),
+    ...(y !== undefined ? { y } : {}),
+    ...(maximized !== undefined ? { maximized } : {}),
+  };
+}
+
 export function validateAppConfig(value: unknown): AppConfig | null {
-  if (value === null) return null;
-  const fail = (): never => { throw new Error(`STATE_CONFIG_INVALID: ${translate('项目配置格式无效，原配置已保留，请修复配置后重新打开应用。')}`); };
-  if (!record(value) || !Array.isArray(value.projects)) return fail();
-  const identities = new Set<string>(); const paths = new Set<string>();
-  for (const project of value.projects) {
-    if (!record(project) || !nonempty(project.id) || !nonempty(project.name) || !nonempty(project.path)) return fail();
-    if (project.archived !== undefined && typeof project.archived !== 'boolean') return fail();
-    // 图标只接受 `emoji:表情` 或 `lucide:名称`；Lucide 名称只做语法校验，未知图标由渲染层回退。
-    if (project.icon !== undefined && parseProjectIcon(project.icon) === null) return fail();
-    const path = documentPathKey(project.path);
-    if (identities.has(project.id) || paths.has(path)) return fail();
-    identities.add(project.id); paths.add(path);
+  if (value === null || value === undefined) return null;
+  if (!isRecord(value) || !Array.isArray(value.projects)) invalidConfig();
+  // 容忍旧单文件版本遗留顶层字段（projectViews, inspiration, headingAdd, canvasPreview, sidebarView）并忽略
+  const projects = value.projects.map(validateProject);
+  const ids = new Set<string>();
+  for (const project of projects) {
+    if (ids.has(project.id)) invalidConfig();
+    ids.add(project.id);
   }
-  if (value.activeProjectId !== null && value.activeProjectId !== undefined && typeof value.activeProjectId !== 'string') return fail();
-  const themeIds = new Set(builtInThemes.map(theme => theme.id));
-  if (value.customThemes !== undefined) {
-    if (!Array.isArray(value.customThemes)) return fail();
-    for (const source of value.customThemes) {
-      try {
-        const theme = validateTheme(source);
-        if (themeIds.has(theme.id)) return fail();
-        themeIds.add(theme.id);
-      } catch { return fail(); }
-    }
+  const activeProjectId = value.activeProjectId ?? null;
+  if (activeProjectId !== null && (typeof activeProjectId !== 'string' || !ids.has(activeProjectId))) {
+    invalidConfig();
   }
-  if (value.preferences !== undefined) {
-    if (!record(value.preferences)) return fail();
-    const p = value.preferences;
-    if (p.canvasPreview !== undefined && (typeof p.canvasPreview !== 'string' || !['compact', 'medium', 'spacious'].includes(p.canvasPreview))) return fail();
-    // 旧配置允许缺省；未知语言标识由翻译层回退，便于跨版本共享配置。
-    if (p.locale !== undefined && typeof p.locale !== 'string') return fail();
-    for (const flag of [p.autoCheckUpdates, p.autoDownloadUpdates, p.keepTransparentOnBlur, p.sidebarOpen, p.headingAdd]) if (flag !== undefined && typeof flag !== 'boolean') return fail();
-    if (p.sidebarView !== undefined && p.sidebarView !== 'nav' && p.sidebarView !== 'outline') return fail();
-    if (p.theme !== undefined && (typeof p.theme !== 'string' || !['light', 'dark', 'system'].includes(p.theme))) return fail();
-    if (p.themeId !== undefined && (typeof p.themeId !== 'string' || !themeIds.has(p.themeId))) return fail();
-    if (p.fontFamily !== undefined && typeof p.fontFamily !== 'string') return fail();
-    for (const number of [p.fontSize, p.contentWidth]) if (number !== undefined && (typeof number !== 'number' || !Number.isFinite(number) || number <= 0)) return fail();
-    // 段首缩进以字符为单位，0 表示关闭；负值会让正文首行超出段落左边界。
-    if (p.paragraphIndent !== undefined && (typeof p.paragraphIndent !== 'number' || !Number.isFinite(p.paragraphIndent) || p.paragraphIndent < 0)) return fail();
-  }
-  // 窗口几何为物理像素；坐标允许多显示器负值，尺寸必须为正。
-  if (value.window !== undefined) {
-    if (!record(value.window)) return fail();
-    const w = value.window;
-    for (const coordinate of [w.x, w.y]) if (coordinate !== undefined && !Number.isFinite(coordinate)) return fail();
-    for (const length of [w.width, w.height]) if (length !== undefined && (typeof length !== 'number' || !Number.isFinite(length) || length <= 0)) return fail();
-    if (w.maximized !== undefined && typeof w.maximized !== 'boolean') return fail();
-  }
-  if (value.projectViews !== undefined) {
-    if (!record(value.projectViews)) return fail();
-    for (const view of Object.values(value.projectViews)) if (!validView(view)) return fail();
-  }
-  if (value.inspiration !== undefined) {
-    if (!record(value.inspiration) || !nonempty(value.inspiration.path)) return fail();
-    if (value.inspiration.active !== undefined && typeof value.inspiration.active !== 'boolean') return fail();
-    if (value.inspiration.view !== undefined && !validView(value.inspiration.view)) return fail();
-  }
-  return value as unknown as AppConfig;
+  const customThemes = validateCustomThemes(value.customThemes);
+  const window = validateWindowPlacement(value.window);
+  return {
+    projects,
+    activeProjectId,
+    customThemes,
+    preferences: validatePreferences(value.preferences, customThemes),
+    ...(window ? { window } : {}),
+  };
 }
-/**
- * 函数职责：验证项目与灵感簿共用的阅读状态形状，保证恢复逻辑不会遇到非法坐标。
- * 输入说明：值来自不可信的持久化边界；字段允许旧配置缺省。
- * 输出说明：形状合法返回 true；调用方负责整体配置的失败处理。
- */
-function validView(view: unknown): boolean {
-  if (!record(view) || !['todo', 'archive', 'source'].includes(String(view.mode))) return false;
-  if (typeof view.cursor !== 'number' || !Number.isSafeInteger(view.cursor) || view.cursor < 0) return false;
-  if (typeof view.scrollTop !== 'number' || !Number.isFinite(view.scrollTop) || view.scrollTop < 0) return false;
-  if (!Array.isArray(view.folded) || view.folded.some(key => typeof key !== 'string')) return false;
-  if (view.expandedCompletedGroups !== undefined && (!Array.isArray(view.expandedCompletedGroups) || view.expandedCompletedGroups.some(key => typeof key !== 'string'))) return false;
-  if (view.sourceView !== undefined && view.sourceView !== 'todo' && view.sourceView !== 'archive') return false;
-  if (view.sourceReturn !== undefined) {
-    if (!record(view.sourceReturn)) return false;
-    for (const key of ['cursor', 'scrollTop', 'anchor', 'offset']) {
-      const coordinate = view.sourceReturn[key];
-      if (typeof coordinate !== 'number' || !Number.isFinite(coordinate) || (key !== 'offset' && coordinate < 0)) return false;
-    }
-  }
-  return true;
-}
-function record(value: unknown): value is Record<string, unknown> { return typeof value === 'object' && value !== null && !Array.isArray(value); }
-function nonempty(value: unknown): value is string { return typeof value === 'string' && value.trim().length > 0; }

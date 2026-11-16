@@ -1,2392 +1,447 @@
 /**
- * 文件职责：通过公开 DOM 和浏览器文件端口验证真实 App 的编辑保存闭环。
- * 定义范围：任务编辑、项目隔离、搜索、主题持久化及桌面窗口控制与退出保存。
+ * 文件职责：验证悬赏板工作台外壳（App.svelte）的导航切换、主题与窗口材质、语言切换、项目图标选择与配置持久化。
  */
-import { defaultPreferences } from '../config-defaults';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mount, tick, unmount } from 'svelte';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import App from '../../App.svelte';
-import { BrowserFilePort } from '../browser-files';
-import { AndroidFilePort } from '../files/android';
-import { builtInThemes, paletteKeys, parseTheme, type ThemeDefinition } from '../themes';
-import type { AppConfig, Project, ProjectView } from '../contracts';
+import { emptyAppConfig } from '../config-defaults';
+import type { AppConfig, FilePort } from '../contracts';
 import { setLocalePreference } from '../i18n';
-import type { CanvasEngineOptions } from '../canvas/engine-port';
-import { scanCanvasBlocks } from '../canvas/model';
+import { bootThemeKey, builtInThemes, paletteKeys } from '../themes';
 
-const canvasBoundary = vi.hoisted(() => ({
-  edit: null as null | ((elements: Record<string, unknown>[]) => void),
-  tryEdit: null as null | ((elements: Record<string, unknown>[]) => boolean),
-}));
-// jsdom 不提供 Canvas 渲染；只替换白板引擎，保留真实全页组件、提交队列、编辑器和保存器。
-vi.mock('../canvas/engine', async () => {
-  const { CanvasSaveQueue } = await import('../canvas/save-queue');
-  return { mountCanvasEngine: async (options: CanvasEngineOptions) => {
-    const queue = new CanvasSaveQueue(options);
-    let title = options.session.document.title;
-    let elements = [...options.session.document.elements];
-    let locked = false;
-    const update = () => queue.update({ title, elements, files: {} });
-    canvasBoundary.edit = next => { elements = next; update(); };
-    // jsdom 不执行 inert 的浏览器输入阻断；在引擎边界复现浏览器对用户输入的准入条件。
-    canvasBoundary.tryEdit = next => {
-      if (locked) return false;
-      for (let node: HTMLElement | null = options.host; node; node = node.parentElement) if (node.inert) return false;
-      elements = next; update(); return true;
-    };
-    return {
-      setTitle(next: string) { title = next; update(); }, setAppearance() {}, canCloseWithEscape: () => true,
-      setLocked(value: boolean) { locked = value; }, addImage: async () => {},
-      flush: () => queue.flush(), exportPNG: async () => new Blob(), dispose: () => { queue.dispose(); canvasBoundary.edit = null; canvasBoundary.tryEdit = null; },
-    };
-  } };
-});
-
-const desktopBoundary = vi.hoisted(() => ({
-  enabled: false,
-  close: null as null | ((event: { preventDefault: () => void }) => Promise<void>),
-  resized: null as null | (() => void),
-  focused: null as null | ((event: { payload: boolean }) => void),
-  restored: null as null | (() => void),
-  maximized: false,
-  invoke: vi.fn(async () => true),
-  minimize: vi.fn(async () => {}),
-  toggleMaximize: vi.fn(async () => {}),
-  requestClose: vi.fn(async () => {}),
-  destroy: vi.fn(async () => {}),
-  save: vi.fn<() => Promise<string | null>>(async () => null),
-  updateCheck: vi.fn<() => Promise<unknown>>(async () => null),
-  updateInstall: vi.fn(async () => {}),
-  updateDownload: vi.fn(async (_progress: unknown) => {}),
-  updateClose: vi.fn(async () => {}),
-  enterCard: vi.fn<() => Promise<void>>(async () => {}),
-  exitCard: vi.fn<() => Promise<void>>(async () => {}),
-}));
-vi.mock('../sync/native', () => ({ nativeSyncStore: { load: async () => null, save: async () => {} }, nativeSyncTransport: { status: async () => ({ paired: false, listening: false }), disconnect: async () => {} } }));
-vi.mock('@tauri-apps/api/event', () => ({ listen: async (event: string, callback: () => void) => {
-  if (event === 'taskrail:window-restored') {
-    desktopBoundary.restored = callback;
-    return () => { desktopBoundary.restored = null; };
-  }
-  return () => {};
-} }));
-vi.mock('../card-window', () => ({ createCardWindowController: () => ({ enter: desktopBoundary.enterCard, exit: desktopBoundary.exitCard }) }));
-vi.mock('../updater/tauri', () => ({ TauriUpdatePort: class { check = desktopBoundary.updateCheck; } }));
-vi.mock('../updater/android', () => ({ AndroidUpdatePort: class { check = desktopBoundary.updateCheck; } }));
-vi.mock('@tauri-apps/api/app', () => ({ onBackButtonPress: async () => ({ unregister() {} }), exit: vi.fn() }));
-vi.mock('@tauri-apps/plugin-dialog', () => ({ save: desktopBoundary.save }));
-vi.mock('@tauri-apps/api/core', () => ({ isTauri: () => desktopBoundary.enabled, convertFileSrc: (path: string) => path, invoke: desktopBoundary.invoke }));
-// 仅替换桌面 IO 与窗口事件边界，退出决策仍运行生产 App 代码。
-vi.mock('../files/tauri', async () => {
-  const { BrowserFilePort } = await import('../browser-files');
-  return { TauriFilePort: BrowserFilePort, openExternalLink: vi.fn(async () => {}) };
-});
-vi.mock('@tauri-apps/api/window', () => ({ getCurrentWindow: () => ({
-  minimize: desktopBoundary.minimize,
-  toggleMaximize: desktopBoundary.toggleMaximize,
-  isMaximized: async () => desktopBoundary.maximized,
-  isFocused: async () => true,
-  onResized: async (callback: () => void) => {
-    desktopBoundary.resized = callback;
-    return () => { desktopBoundary.resized = null; };
-  },
-  onFocusChanged: async (callback: (event: { payload: boolean }) => void) => {
-    desktopBoundary.focused = callback;
-    return () => { desktopBoundary.focused = null; };
-  },
-  close: desktopBoundary.requestClose,
-  onCloseRequested: async (callback: (event: { preventDefault: () => void }) => Promise<void>) => {
-    desktopBoundary.close = callback;
-    return () => { desktopBoundary.close = null; };
-  },
-  destroy: desktopBoundary.destroy,
-}) }));
-
-const files = new BrowserFilePort();
-it('完成子任务经过自动保存、文件监听重载及重启仍保留父子拓扑，归档只包含完整任务树', async () => {
-  const source = '- [ ] 父\n  - [ ] 子\n    子正文\n  - [ ] 待办\n\n# 归档\n\n- [x] 历史归档\n';
-  const expected = '- [ ] 父\n  - [ ] 待办\n  - [x] 子\n    子正文\n\n# 归档\n\n- [x] 历史归档\n';
-  await start([source]);
-  documentInput().querySelectorAll<HTMLButtonElement>('[role="checkbox"][aria-checked="false"]')[1].click();
-  await tick();
-  await savedText(firstProject, expected);
-  // 等待超过保存与预览刷新窗口，避免只验证点击当下的临时 DOM。
-  await new Promise(resolve => setTimeout(resolve, 1000));
-  expect((await files.read(firstProject.path)).text).toBe(expected);
-  expect(button(/^归档/).textContent?.replace(/\s/g, '')).toBe('归档1');
-  const baseline = await files.read(firstProject.path);
-  const external = expected.replace('- [ ] 父', '- [ ] 外部父');
-  await files.write(firstProject.path, external, baseline.revision);
-  window.dispatchEvent(new StorageEvent('storage', { key: `taskrail:file:${firstProject.path}` }));
-  await vi.waitFor(() => expect(documentInput().textContent).toContain('外部父'));
-  await new Promise(resolve => setTimeout(resolve, 750));
-  expect((await files.read(firstProject.path)).text).toBe(external);
-  expect(button(/^归档/).textContent?.replace(/\s/g, '')).toBe('归档1');
-  await remount();
-  expect((await files.read(firstProject.path)).text).toBe(external);
-  expect(button(/^归档/).textContent?.replace(/\s/g, '')).toBe('归档1');
-});
-describe('应用更新', () => {
-  it('Android 启动检查并自动下载，安装交接后恢复编辑且隐藏快捷键入口', async () => {
-    desktopBoundary.enabled = true;
-    vi.spyOn(window.navigator, 'userAgent', 'get').mockReturnValue('Android 15');
-    const candidate = {
-      version: '0.8.0', currentVersion: '0.7.0', keepsAppRunning: true,
-      download: desktopBoundary.updateDownload, install: desktopBoundary.updateInstall, close: desktopBoundary.updateClose,
-    };
-    desktopBoundary.updateCheck.mockResolvedValue(candidate);
-    await start(['# 清单\n\n- [ ] 任务\n']);
-    await vi.waitFor(() => expect(desktopBoundary.updateDownload).toHaveBeenCalledOnce());
-    expect(desktopBoundary.close).toBeNull();
-    button('更多操作').click(); await tick();
-    expect([...document.querySelectorAll('[role="menuitem"]')].some(item => item.textContent === '快捷键')).toBe(false);
-    button('检查更新').click(); await tick();
-    button('安装更新').click();
-    await vi.waitFor(() => expect(desktopBoundary.updateInstall).toHaveBeenCalledOnce());
-    await vi.waitFor(() => expect(document.querySelector('.app-shell')?.hasAttribute('inert')).toBe(false));
-    expect(button('安装更新')).not.toBeNull();
-    expect((await files.read(firstProject.path)).text).toBe('# 清单\n\n- [ ] 任务\n');
-  });
-  it('后台下载完成后保存最新正文再安装，保存失败可以重试', async () => {
-    desktopBoundary.enabled = true;
-    desktopBoundary.updateCheck.mockResolvedValue({
-      version: '0.1.0-alpha.2', currentVersion: '0.1.0-alpha.1', body: '修复与改进',
-      download: desktopBoundary.updateDownload, install: desktopBoundary.updateInstall, close: desktopBoundary.updateClose,
-    });
-    await start(['- [ ] 初始任务\n']);
-    await vi.waitFor(() => expect(desktopBoundary.updateDownload).toHaveBeenCalledTimes(1));
-    await insertTask(); await paste('安装前必须保存的正文');
-    desktopBoundary.updateInstall.mockImplementation(async () => {
-      expect((await files.read(firstProject.path)).text).toContain('安装前必须保存的正文');
-    });
-    button('更多操作').click(); await tick(); button('检查更新').click(); await tick();
-    await vi.waitFor(() => expect(button('安装并重启')).toBeDefined());
-    const saveConfig = vi.spyOn(BrowserFilePort.prototype, 'saveConfig').mockRejectedValue(new Error('配置只读'));
-    button('安装并重启').click();
-    await vi.waitFor(() => expect(button('重试')).toBeDefined());
-    await vi.waitFor(() => expect(document.querySelector('.app-shell')?.hasAttribute('inert')).toBe(false));
-    expect(desktopBoundary.updateInstall).not.toHaveBeenCalled();
-    saveConfig.mockRestore();
-    button('重试').click();
-    await vi.waitFor(() => expect(desktopBoundary.updateInstall).toHaveBeenCalledTimes(1));
-    expect(await files.loadConfig()).not.toBeNull();
-    expect(desktopBoundary.updateDownload).toHaveBeenCalledTimes(1);
-  });
-  it('安装等待配置保存时，完成任务的撤销提示不能再修改正文', async () => {
-    desktopBoundary.enabled = true;
-    desktopBoundary.updateCheck.mockResolvedValue({
-      version: '0.1.0-alpha.2', currentVersion: '0.1.0-alpha.1',
-      download: desktopBoundary.updateDownload, install: desktopBoundary.updateInstall, close: desktopBoundary.updateClose,
-    });
-    await start(['# 安装保护\n\n- [ ] 安装前完成的任务\n']);
-    await vi.waitFor(async () => expect((await files.loadConfig())?.projectViews[firstProject.id]).toBeDefined());
-    button('完成任务').click(); await tick();
-    expect(button('撤销')).toBeDefined();
-    button('更多操作').click(); await tick(); button('检查更新').click(); await tick();
-    await vi.waitFor(() => expect(button('安装并重启')).toBeDefined());
-    const visibleText = documentInput().textContent;
-    let releaseConfig!: () => void;
-    const configPending = new Promise<void>(resolve => { releaseConfig = resolve; });
-    const writeConfig = BrowserFilePort.prototype.saveConfig;
-    const saveConfig = vi.spyOn(BrowserFilePort.prototype, 'saveConfig').mockImplementation(async config => {
-      await configPending; await writeConfig.call(files, config);
-    });
-    try {
-      button('安装并重启').click();
-      await vi.waitFor(() => expect(saveConfig).toHaveBeenCalledOnce());
-      const completedText = (await files.read(firstProject.path)).text;
-      expect(completedText).toContain('- [x] 安装前完成的任务');
-      expect(desktopBoundary.updateInstall).not.toHaveBeenCalled();
-      // 配置等待点位于正文 flush 之后；此时任何有效撤销都会产生未再次保存的新事务。
-      const undo = [...document.querySelectorAll<HTMLButtonElement>('.toast button')].find(candidate => candidate.textContent?.trim() === '撤销');
-      undo?.click(); await tick();
-      expect(documentInput().textContent).toBe(visibleText);
-      expect((await files.read(firstProject.path)).text).toBe(completedText);
-    } finally { releaseConfig(); }
-    await vi.waitFor(() => expect(desktopBoundary.updateInstall).toHaveBeenCalledOnce());
-  });
-  it('普通关闭已在等待保存时启动安装，关闭请求不能提前销毁窗口', async () => {
-    desktopBoundary.enabled = true;
-    desktopBoundary.updateCheck.mockResolvedValue({
-      version: '0.1.0-alpha.2', currentVersion: '0.1.0-alpha.1',
-      download: desktopBoundary.updateDownload, install: desktopBoundary.updateInstall, close: desktopBoundary.updateClose,
-    });
-    await start(['- [ ] 等待安全安装\n']);
-    await vi.waitFor(async () => expect((await files.loadConfig())?.projectViews[firstProject.id]).toBeDefined());
-    button('更多操作').click(); await tick(); button('检查更新').click(); await tick();
-    await vi.waitFor(() => expect(button('安装并重启')).toBeDefined());
-    let releaseCloseConfig!: () => void;
-    let releaseInstallConfig!: () => void;
-    const closeConfigPending = new Promise<void>(resolve => { releaseCloseConfig = resolve; });
-    const installConfigPending = new Promise<void>(resolve => { releaseInstallConfig = resolve; });
-    const writeConfig = BrowserFilePort.prototype.saveConfig;
-    const saveConfig = vi.spyOn(BrowserFilePort.prototype, 'saveConfig')
-      .mockImplementationOnce(async config => { await closeConfigPending; await writeConfig.call(files, config); })
-      .mockImplementationOnce(async config => { await installConfigPending; await writeConfig.call(files, config); });
-    const close = desktopBoundary.close!({ preventDefault: vi.fn() });
-    try {
-      await vi.waitFor(() => expect(saveConfig).toHaveBeenCalledOnce());
-      button('安装并重启').click(); await tick();
-      await vi.waitFor(() => expect(button('关闭对话框').disabled).toBe(true));
-      pointerDown(document.querySelector<HTMLElement>('.modal-backdrop')!); await tick();
-      expect(document.querySelector('[role="dialog"]')).not.toBeNull();
-      // 先完成普通关闭的配置，再让安装自己的配置保持未完成，避免以最终状态掩盖提前退出。
-      releaseCloseConfig(); await close;
-      await vi.waitFor(() => expect(saveConfig).toHaveBeenCalledTimes(2));
-      expect(desktopBoundary.destroy).not.toHaveBeenCalled();
-      expect(desktopBoundary.updateInstall).not.toHaveBeenCalled();
-    } finally { releaseCloseConfig(); releaseInstallConfig(); await close; }
-    await vi.waitFor(() => expect(desktopBoundary.updateInstall).toHaveBeenCalledOnce());
-    expect(desktopBoundary.destroy).not.toHaveBeenCalled();
-  });
-  it('更新偏好可以持久化，关闭启动检查后重启不会请求更新', async () => {
-    desktopBoundary.enabled = true;
-    await start(['- [ ] 任务\n']);
-    await vi.waitFor(() => expect(desktopBoundary.updateCheck).toHaveBeenCalledTimes(1));
-    button('更多操作').click(); await tick(); button('检查更新').click(); await tick();
-    const check = document.querySelector<HTMLInputElement>('[aria-label="启动时检查更新"]')!;
-    check.click(); await tick();
-    await vi.waitFor(async () => expect((await files.loadConfig())?.preferences.autoCheckUpdates).toBe(false));
-    await remount();
-    await new Promise(resolve => setTimeout(resolve, 100));
-    expect(desktopBoundary.updateCheck).toHaveBeenCalledTimes(1);
-  });
-});
-const firstProject: Project = { id: 'project-a', name: '甲项目', path: '浏览器/甲.md' };
-const secondProject: Project = { id: 'project-b', name: '乙项目', path: '浏览器/乙.md' };
-let mounted: ReturnType<typeof mount> | undefined;
-let container: HTMLDivElement;
-
-/** jsdom 没有排版引擎；只补充几何 API，不替换真实编辑器、保存器或 App 行为。 */
-beforeEach(() => {
-  setLocalePreference('zh-CN');
-  // 首次启动按 navigator.languages 决定界面语言；测试环境固定中文，与断言文案保持一致。
-  Object.defineProperty(window.navigator, 'languages', { configurable: true, value: ['zh-CN'] });
-  desktopBoundary.enabled = false; desktopBoundary.close = null; desktopBoundary.destroy.mockClear();
-  desktopBoundary.resized = null; desktopBoundary.focused = null; desktopBoundary.restored = null; desktopBoundary.maximized = false;
-  delete document.documentElement.dataset.backdropVeil;
-  desktopBoundary.invoke.mockReset().mockResolvedValue(true);
-  desktopBoundary.minimize.mockClear();
-  desktopBoundary.toggleMaximize.mockReset().mockImplementation(async () => {
-    desktopBoundary.maximized = !desktopBoundary.maximized;
-    desktopBoundary.resized?.();
-  });
-  // 自定义关闭按钮与系统关闭共享 CloseRequested，避免测试绕开退出保存契约。
-  desktopBoundary.requestClose.mockReset().mockImplementation(async () => {
-    if (!desktopBoundary.close) throw new Error('窗口关闭监听尚未注册');
-    await desktopBoundary.close({ preventDefault: vi.fn() });
-  });
-  desktopBoundary.save.mockReset().mockResolvedValue(null);
-  desktopBoundary.updateCheck.mockReset().mockResolvedValue(null);
-  desktopBoundary.updateInstall.mockReset().mockResolvedValue(undefined);
-  desktopBoundary.updateDownload.mockReset().mockResolvedValue(undefined);
-  desktopBoundary.updateClose.mockReset().mockResolvedValue(undefined);
-  desktopBoundary.enterCard.mockReset().mockResolvedValue(undefined);
-  desktopBoundary.exitCard.mockReset().mockResolvedValue(undefined);
-  // Node 的实验性同名全局不代表浏览器存储，固定使用 jsdom 的真实 Storage。
-  const browserStorage = (globalThis as unknown as { jsdom: { window: { localStorage: Storage } } }).jsdom.window.localStorage;
-  vi.stubGlobal('localStorage', browserStorage);
-  localStorage.clear(); document.body.replaceChildren();
-  // jsdom 不提供字体测量；此处验证设置和持久化，字体探测按无测量能力回退。
-  vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(null);
-  Range.prototype.getClientRects = () => [] as unknown as DOMRectList;
-  Range.prototype.getBoundingClientRect = () => new DOMRect();
-  // jsdom 未实现滚动 API；大纲列表的跟随滚动只验证调用路径，不验证视觉位置。
-  if (!Element.prototype.scrollIntoView) Element.prototype.scrollIntoView = () => {};
-  // jsdom 未实现 Web 动画；立即完成的假动画让侧栏飞入飞出等 Svelte 过渡走完回调链。
-  if (!Element.prototype.animate) Element.prototype.animate = function () {
-    const animation = { finished: Promise.resolve(), effect: null, playState: 'finished', cancel() {}, onfinish: null as null | (() => void), oncancel: null as null | (() => void) };
-    queueMicrotask(() => animation.onfinish?.());
-    return animation;
-  } as unknown as typeof Element.prototype.animate;
-  if (!window.matchMedia) window.matchMedia = (query: string) => ({ matches: false, media: query, onchange: null, addListener() {}, removeListener() {}, addEventListener() {}, removeEventListener() {}, dispatchEvent: () => false });
-  container = document.createElement('div'); document.body.append(container);
-});
-
-afterEach(async () => {
-  if (mounted) { await unmount(mounted); mounted = undefined; }
-  setLocalePreference('zh-CN');
-  document.body.replaceChildren(); localStorage.clear(); vi.restoreAllMocks(); vi.unstubAllGlobals();
-});
-
-/**
- * 函数职责：以真实 FilePort 写入初始文件及配置后启动 App。
- * 输入说明：项目内容按顺序对应甲、乙；界面偏好只通过持久化配置提供。
- * 输出说明：等到可编辑文档出现，不读取 Svelte 私有状态或 CodeMirror 内部对象。
- * 实现思路：预置正常启动依赖，再挂载生产组件并等待语义 DOM。
- */
-async function start(texts: string[], views: Record<string, ProjectView> = {}): Promise<void> {
-  const projects = [firstProject, secondProject].slice(0, texts.length);
-  for (let index = 0; index < texts.length; index++) await files.create(projects[index].path, texts[index]);
-  const config: AppConfig = { projects, activeProjectId: firstProject.id, preferences: { ...defaultPreferences }, projectViews: views };
-  await files.saveConfig(config);
-  await remount();
-}
-
-/** 重启只重新挂载 App，正文恢复必须经过持久化文件端口。 */
-async function remount(): Promise<void> {
-  if (mounted) await unmount(mounted);
-  mounted = mount(App, { target: container });
-  await tick();
-  await vi.waitFor(() => expect(document.querySelector('[aria-label="Markdown 任务文档"]')).not.toBeNull());
-}
-
-/** 按控件对外声明的名称查找，允许标签后附带任务数或快捷键。 */
-function button(name: string | RegExp): HTMLButtonElement {
-  const result = [...document.querySelectorAll<HTMLButtonElement>('button')].find(candidate => {
-    const label = (candidate.getAttribute('aria-label') ?? candidate.textContent ?? '').replace(/\s+/g, ' ').trim();
-    return typeof name === 'string' ? label === name : name.test(label);
-  });
-  if (!result) throw new Error(`找不到按钮：${String(name)}`);
-  return result;
-}
-
-/** 弹窗由 window 捕获阶段的 pointerdown 关闭；element.click() 不派发 pointerdown，关闭交互需手动构造按下。 */
-function pointerDown(target: Element): void {
-  target.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, button: 0 }));
-}
-
-/** 面包屑项目名在项目界面是切换按钮，全部待办和欢迎页是纯文本。 */
-function crumbName(): string | undefined {
-  return document.querySelector('.breadcrumb .crumb-project, .breadcrumb strong')?.textContent;
-}
-
-/** 通过用户可见路径选择项目，等待导航标题与编辑文档完成切换。 */
-async function switchProject(project: Project): Promise<void> {
-  const control = [...document.querySelectorAll<HTMLButtonElement>('button')].find(candidate => candidate.title === project.path);
-  if (!control) throw new Error(`找不到项目：${project.name}`);
-  control.click(); await tick();
-  await vi.waitFor(() => expect(crumbName()).toBe(project.name));
-}
-
-/** 返回具有公开无障碍名称的真实 CodeMirror 内容区域。 */
-function documentInput(): HTMLElement {
-  const element = document.querySelector<HTMLElement>('[aria-label="Markdown 任务文档"]');
-  if (!element) throw new Error('编辑文档尚未挂载'); return element;
-}
-
-/**
- * 函数职责：通过浏览器粘贴入口向当前选区输入文本。
- * 输入说明：调用前由界面命令设定光标，不访问编辑器状态或 dispatch。
- * 输出说明：真实 CodeMirror 处理剪贴板事件，触发 App 的生产 onChange 路径。
- * 实现思路：jsdom 不提供系统剪贴板，以相同接口提供当前用户粘贴文本。
- */
-async function paste(text: string): Promise<void> {
-  const event = new Event('paste', { bubbles: true, cancelable: true });
-  Object.defineProperty(event, 'clipboardData', { value: { getData: (format: string) => format === 'text/plain' ? text : '', files: [], types: ['text/plain'] } });
-  documentInput().dispatchEvent(event); await tick();
-}
-
-/** 用真实键盘事件覆盖当前项目的编辑历史和应用保存快捷键。 */
-async function shortcut(key: string): Promise<void> {
-  documentInput().dispatchEvent(new KeyboardEvent('keydown', { key, code: `Key${key.toUpperCase()}`, ctrlKey: true, bubbles: true, cancelable: true }));
-  await tick();
-}
-
-/** 通过更多操作菜单新增任务，保留与用户操作相同的编辑事务。 */
-async function insertTask(): Promise<void> {
-  button('更多操作').click(); await tick();
-  button(/^新增任务/).click(); await tick();
-}
-
-/** 等待可从文件端口重新读取的正文，避免将仅有 DOM 变化误判为已保存。 */
-async function savedText(project: Project, expected: string): Promise<void> {
-  await vi.waitFor(async () => expect((await files.read(project.path)).text).toBe(expected), { timeout: 5000 });
-}
-
-describe('弹窗外部关闭', () => {
-  it.each([
-    ['更多操作', '[data-more-menu][role="menu"]'],
-    ['搜索', '.search-panel'],
-    ['切换项目', '.crumb-menu'],
-  ])('%s 在正文阻止冒泡时仍关闭，内部按下保留', async (label, selector) => {
-    await start(['# 清单\n\n- [ ] 任务\n']);
-    (label === '搜索' ? document.querySelector<HTMLButtonElement>('.search-button')! : button(label)).click(); await tick();
-    const popup = document.querySelector<HTMLElement>(selector)!;
-    expect(popup).not.toBeNull();
-    pointerDown(popup); await tick();
-    expect(document.querySelector(selector)).toBe(popup);
-    const content = documentInput();
-    content.addEventListener('pointerdown', event => event.stopPropagation(), { once: true });
-    pointerDown(content); await tick();
-    expect(document.querySelector(selector)).toBeNull();
-  });
-  it('桌面标题栏未被遮罩覆盖的区域也能关闭弹窗并恢复焦点', async () => {
-    desktopBoundary.enabled = true;
-    await start(['# 清单\n']);
-    const trigger = button('设置'); trigger.focus(); trigger.click(); await tick();
-    pointerDown(document.querySelector<HTMLElement>('.crumb-label')!); await tick();
-    expect(document.querySelector('[role="dialog"]')).toBeNull();
-    expect(document.activeElement).toBe(trigger);
-  });
-  it.each(['新增项目', '重命名项目', '移除项目关联', '查看归档项目', '阅读与外观', '检查更新', '快捷键'])('%s 内部按下保留，遮罩上按下关闭', async label => {
-    await start(['# 清单\n']);
-    button('更多操作').click(); await tick();
-    button(label).click(); await tick();
-    const modal = document.querySelector<HTMLElement>('[role="dialog"]')!;
-    expect(modal).not.toBeNull();
-    pointerDown(modal); await tick();
-    pointerDown(modal.querySelector<HTMLElement>('h2')!); await tick();
-    expect(document.querySelector('[role="dialog"]')).toBe(modal);
-    pointerDown(document.querySelector<HTMLElement>('.modal-backdrop')!); await tick();
-    expect(document.querySelector('[role="dialog"]')).toBeNull();
-    expect((await files.read(firstProject.path)).text).toBe('# 清单\n');
-  });
-  it('弹窗内按下拖动选择、移出窗口松开时，弹窗外合成的 click 不关闭弹窗', async () => {
-    await start(['# 清单\n']);
-    button('更多操作').click(); await tick();
-    button('阅读与外观').click(); await tick();
-    const modal = document.querySelector<HTMLElement>('[role="dialog"]')!;
-    // 按下发生在弹窗内部，即拖动选择文本的起点。
-    pointerDown(modal); await tick();
-    // 鼠标移出窗口松开后，浏览器会把 click 的落点合成到弹窗外（此处以遮罩为代表）。
-    document.querySelector<HTMLElement>('.modal-backdrop')!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-    await tick();
-    expect(document.querySelector('[role="dialog"]')).toBe(modal);
-  });
-});
-
-describe('项目归档与删除', () => {
-  function projectButton(project: Project): HTMLButtonElement | undefined {
-    return [...document.querySelectorAll<HTMLButtonElement>('.sidebar button')].find(candidate => candidate.title === project.path);
-  }
-
-  async function openProjectMenu(project: Project): Promise<void> {
-    const control = projectButton(project);
-    expect(control).toBeDefined();
-    control!.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 80, clientY: 140 }));
+async function flush(): Promise<void> {
+  for (let i = 0; i < 6; i += 1) {
+    await Promise.resolve();
     await tick();
   }
-
-  async function openArchivedProjects(): Promise<void> {
-    button('更多操作').click(); await tick();
-    button('查看归档项目').click(); await tick();
-    expect(document.querySelector('[role="dialog"]')?.textContent).toContain('归档项目');
-  }
-
-  it('归档非当前项目保留当前编辑，重启隐藏并可恢复且排除全部待办', async () => {
-    const secondText = '- [ ] 乙项目独有任务\n';
-    await start(['- [ ] 甲项目任务\n', secondText]);
-    await insertTask(); await paste('甲项目持续编辑');
-    await openProjectMenu(secondProject);
-    expect(button('删除项目')).toBeDefined();
-    button('归档项目').click(); await tick();
-    await vi.waitFor(() => expect(projectButton(secondProject)).toBeUndefined());
-    expect(crumbName()).toBe(firstProject.name);
-    expect(documentInput().textContent).toContain('甲项目持续编辑');
-    await vi.waitFor(async () => expect((await files.loadConfig())?.projects.find(project => project.id === secondProject.id)).toMatchObject({ archived: true }));
-    expect((await files.read(secondProject.path)).text).toBe(secondText);
-    await remount();
-    expect(projectButton(secondProject)).toBeUndefined();
-    button(/全部待办/).click(); await tick();
-    await vi.waitFor(() => expect(document.querySelector('.aggregate')?.textContent).toContain('甲项目任务'));
-    expect(document.querySelector('.aggregate')?.textContent).not.toContain('乙项目独有任务');
-    await openArchivedProjects();
-    button(/^恢复项目/).click(); await tick();
-    await vi.waitFor(() => expect(projectButton(secondProject)).toBeDefined());
-    await vi.waitFor(async () => expect((await files.loadConfig())?.projects.find(project => project.id === secondProject.id)?.archived ?? false).toBe(false));
-    button('关闭对话框').click(); await tick();
-    await switchProject(secondProject);
-    expect(documentInput().textContent).toContain('乙项目独有任务');
-    await remount();
-    expect(projectButton(secondProject)).toBeDefined();
-  });
-
-  it('归档当前项目保存编辑并切换到可用项目', async () => {
-    await start(['- [ ] 甲项目任务\n', '- [ ] 乙项目任务\n']);
-    await insertTask(); await paste('归档前的新正文');
-    await openProjectMenu(firstProject); button('归档项目').click(); await tick();
-    await vi.waitFor(() => expect(crumbName()).toBe(secondProject.name));
-    expect((await files.read(firstProject.path)).text).toContain('归档前的新正文');
-    await vi.waitFor(async () => expect((await files.loadConfig())?.projects.find(project => project.id === firstProject.id)).toMatchObject({ archived: true }));
-    await remount();
-    expect(crumbName()).toBe(secondProject.name);
-    expect(projectButton(firstProject)).toBeUndefined();
-  });
-
-  it.each(['归档项目', '删除项目'])('%s当前项目后可恢复已缓存项目并继续编辑', async operation => {
-    await start(['- [ ] 甲项目缓存任务\n', '- [ ] 乙项目任务\n']);
-    await switchProject(secondProject);
-    await openProjectMenu(secondProject); button(operation).click(); await tick();
-    if (operation === '删除项目') { button('删除项目').click(); await tick(); }
-    await vi.waitFor(() => expect(crumbName()).toBe(firstProject.name));
-    expect(documentInput().textContent).toContain('甲项目缓存任务');
-    await insertTask(); await paste('返回缓存项目后继续编辑');
-    await vi.waitFor(async () => expect((await files.read(firstProject.path)).text).toContain('返回缓存项目后继续编辑'));
-  });
-
-  it('归档最后项目后重启仍可通过更多操作恢复', async () => {
-    await start(['- [ ] 归档后可找回\n']);
-    await openProjectMenu(firstProject); button('归档项目').click(); await tick();
-    await vi.waitFor(async () => expect((await files.loadConfig())?.projects[0]).toMatchObject({ archived: true }));
-    expect(document.querySelector('[aria-label="Markdown 任务文档"]')).toBeNull();
-    // 无活动项目时不会挂载编辑器，因此在这个边界直接等待归档管理的公开入口。
-    await unmount(mounted!);
-    mounted = mount(App, { target: container }); await tick();
-    await vi.waitFor(() => expect(button('更多操作')).toBeDefined());
-    expect(projectButton(firstProject)).toBeUndefined();
-    await openArchivedProjects();
-    await vi.waitFor(() => expect(button(/^恢复项目/)).toBeDefined());
-    button(/^恢复项目/).click(); await tick();
-    await vi.waitFor(() => expect(projectButton(firstProject)).toBeDefined());
-    button('关闭对话框').click(); await tick();
-    await switchProject(firstProject);
-    expect(documentInput().textContent).toContain('归档后可找回');
-  });
-
-  it('正文与恢复数据保存失败时归档保留项目及唯一内存草稿', async () => {
-    const original = '- [ ] 磁盘原文\n';
-    await start([original]);
-    vi.spyOn(BrowserFilePort.prototype, 'saveRecovery').mockRejectedValue(new Error('FILE_PERMISSION: 恢复目录不可写'));
-    await insertTask(); await paste('归档不能丢失的草稿');
-    await openProjectMenu(firstProject); button('归档项目').click(); await tick();
-    await new Promise(resolve => setTimeout(resolve, 0)); await tick();
-    expect(projectButton(firstProject)).toBeDefined();
-    expect(documentInput().textContent).toContain('归档不能丢失的草稿');
-    expect((await files.loadConfig())?.projects[0].archived ?? false).toBe(false);
-    expect((await files.read(firstProject.path)).text).toBe(original);
-  });
-
-  it('删除非当前项目只移除选中关联，删除最后项目保留文件并清空编辑器', async () => {
-    const firstText = '- [ ] 甲项目任务\n';
-    const secondText = '- [ ] 乙项目任务\n';
-    await start([firstText, secondText]);
-    await openProjectMenu(secondProject); button('删除项目').click(); await tick();
-    expect(document.querySelector('[role="dialog"]')?.textContent).toContain('删除「乙项目」项目？');
-    button('删除项目').click(); await tick();
-    await vi.waitFor(() => expect(projectButton(secondProject)).toBeUndefined());
-    expect(crumbName()).toBe(firstProject.name);
-    expect(documentInput().textContent).toContain('甲项目任务');
-    expect((await files.read(secondProject.path)).text).toBe(secondText);
-    await vi.waitFor(async () => expect((await files.loadConfig())?.projects.map(project => project.id)).toEqual([firstProject.id]));
-    await openProjectMenu(firstProject); button('删除项目').click(); await tick();
-    button('删除项目').click(); await tick();
-    await vi.waitFor(async () => expect((await files.loadConfig())?.projects).toEqual([]));
-    expect(document.querySelector('[aria-label="Markdown 任务文档"]')).toBeNull();
-    expect((await files.read(firstProject.path)).text).toBe(firstText);
-  });
-});
-
-describe('左栏项目拖动排序', () => {
-  function projectButton(project: Project): HTMLButtonElement {
-    return [...document.querySelectorAll<HTMLButtonElement>('button')].find(candidate => candidate.title === project.path)!;
-  }
-
-  function projectOrder(): string[] {
-    return [...document.querySelectorAll<HTMLButtonElement>('button')]
-      .filter(candidate => [firstProject.path, secondProject.path].includes(candidate.title))
-      .map(candidate => candidate.title);
-  }
-
-  /** jsdom 不提供 DragEvent；保留浏览器事件入口及坐标、传输数据契约。 */
-  function dragEvent(type: string, clientY = 0): Event {
-    const event = new Event(type, { bubbles: true, cancelable: true });
-    Object.defineProperties(event, {
-      clientY: { value: clientY },
-      dataTransfer: { value: { effectAllowed: 'all', dropEffect: 'none', setData: vi.fn(), getData: () => '', types: [] } },
-    });
-    return event;
-  }
-
-  it.each([
-    { name: '拖到项目下半部插入其后', source: firstProject, target: secondProject, clientY: 130 },
-    { name: '拖到项目上半部插入其前', source: secondProject, target: firstProject, clientY: 110 },
-  ])('$name，并保留活动项目及重启后的顺序', async ({ source, target, clientY }) => {
-    await start(['- [ ] 甲任务\n', '- [ ] 乙任务\n']);
-    await vi.waitFor(async () => expect((await files.loadConfig())?.projectViews[firstProject.id]).toBeDefined());
-    const sourceControl = projectButton(source);
-    const targetControl = projectButton(target);
-    expect(sourceControl.draggable).toBe(true);
-    vi.spyOn(targetControl, 'getBoundingClientRect').mockReturnValue({ top: 100, bottom: 140, height: 40 } as DOMRect);
-    sourceControl.dispatchEvent(dragEvent('dragstart')); await tick();
-    targetControl.dispatchEvent(dragEvent('dragover', clientY)); await tick();
-    expect((await files.loadConfig())?.projects.map(project => project.id)).toEqual([firstProject.id, secondProject.id]);
-    targetControl.dispatchEvent(dragEvent('drop', clientY)); await tick();
-    sourceControl.dispatchEvent(dragEvent('dragend')); await tick();
-    await vi.waitFor(async () => expect((await files.loadConfig())?.projects.map(project => project.id)).toEqual([secondProject.id, firstProject.id]));
-    expect(projectOrder()).toEqual([secondProject.path, firstProject.path]);
-    expect((await files.loadConfig())?.activeProjectId).toBe(firstProject.id);
-    expect(crumbName()).toBe(firstProject.name);
-    await remount();
-    expect(projectOrder()).toEqual([secondProject.path, firstProject.path]);
-    expect(crumbName()).toBe(firstProject.name);
-  });
-
-  it('取消拖动及外部拖放不保存项目顺序', async () => {
-    await start(['- [ ] 甲任务\n', '- [ ] 乙任务\n']);
-    await vi.waitFor(async () => expect((await files.loadConfig())?.projectViews[firstProject.id]).toBeDefined());
-    const save = vi.spyOn(BrowserFilePort.prototype, 'saveConfig');
-    const source = projectButton(firstProject);
-    const target = projectButton(secondProject);
-    vi.spyOn(target, 'getBoundingClientRect').mockReturnValue({ top: 100, bottom: 140, height: 40 } as DOMRect);
-    source.dispatchEvent(dragEvent('dragstart')); await tick();
-    target.dispatchEvent(dragEvent('dragover', 130)); await tick();
-    source.dispatchEvent(dragEvent('dragend')); await tick();
-    target.dispatchEvent(dragEvent('dragover', 130));
-    target.dispatchEvent(dragEvent('drop', 130)); await tick();
-    expect(save).not.toHaveBeenCalled();
-    expect(projectOrder()).toEqual([firstProject.path, secondProject.path]);
-    expect((await files.loadConfig())?.projects.map(project => project.id)).toEqual([firstProject.id, secondProject.id]);
-  });
-});
-
-/** 从关联标签定位设置控件，测试不依赖组件状态或固定 DOM 排列。 */
-function themeControl(name: string): HTMLButtonElement {
-  const label = [...document.querySelectorAll('label')].find(candidate => candidate.textContent?.trim() === name);
-  const select = label ? document.getElementById(label.htmlFor) as HTMLButtonElement : null;
-  if (!select) throw new Error(`找不到设置：${name}`);
-  return select;
 }
 
-async function chooseThemeSetting(name: string, value: string): Promise<void> {
-  const select = themeControl(name); select.click(); await tick();
-  const popup = document.getElementById(select.getAttribute('aria-controls')!)!;
-  const option = [...popup.querySelectorAll<HTMLButtonElement>('[role="option"]')].find(item => item.dataset.value === value);
-  if (!option) throw new Error(`找不到选项：${name} / ${value}`);
-  option.click(); await tick();
+function createMemoryPort(initial?: Partial<AppConfig>, isBrowser = false): {
+  port: FilePort;
+  saved: AppConfig[];
+  exported: Array<{ text: string; filename: string }>;
+} {
+  const saved: AppConfig[] = [];
+  const exported: Array<{ text: string; filename: string }> = [];
+  let state: AppConfig = {
+    ...emptyAppConfig(),
+    ...initial,
+    preferences: {
+      ...emptyAppConfig().preferences,
+      ...(initial?.preferences ?? {}),
+    },
+  };
+  const port: FilePort = {
+    isBrowser,
+    async loadConfig() {
+      return structuredClone(state);
+    },
+    async saveConfig(config) {
+      state = structuredClone(config);
+      saved.push(structuredClone(config));
+    },
+    async exportText(text, filename) {
+      exported.push({ text, filename });
+      return true;
+    },
+    async openExternalLink() {},
+  };
+  return { port, saved, exported };
 }
 
-describe('项目图标', () => {
-  it('默认显示通用标识，右键其他项目可选择图标且不切换当前项目', async () => {
-    await start(['# 甲清单\n', '# 乙清单\n']);
-    const rows = () => [...document.querySelectorAll<HTMLButtonElement>('.project-list button')];
-    const firstRow = rows().find(row => row.title === firstProject.path)!;
-    const secondRow = rows().find(row => row.title === secondProject.path)!;
-    expect(firstRow.querySelector('.project-icon svg')).not.toBeNull();
-    expect(secondRow.querySelector('.project-icon svg')).not.toBeNull();
-    secondRow.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 100, clientY: 100 }));
-    await tick();
-    button('设置项目图标').click(); await tick();
-    const dialog = document.querySelector('[role="dialog"]')!;
-    expect(dialog.querySelector('h2')?.textContent).toBe('项目图标');
-    expect(dialog.textContent).toContain(secondProject.name);
-    await vi.waitFor(() => expect(document.querySelector('.icon-choice[title="公文包"]')).not.toBeNull());
-    document.querySelector<HTMLButtonElement>('.icon-choice[title="公文包"]')!.click(); await tick();
-    await vi.waitFor(async () => expect((await files.loadConfig())?.projects.find(project => project.id === secondProject.id)?.icon).toBe('emoji:💼'));
-    expect(crumbName()).toBe(firstProject.name);
-    expect(secondRow.querySelector('.project-icon-glyph')?.textContent).toBe('💼');
-    expect(document.querySelector('[role="dialog"]')).toBeNull();
-    await remount();
-    const restored = [...document.querySelectorAll<HTMLButtonElement>('.project-list button')].find(row => row.title === secondProject.path)!;
-    expect(restored.querySelector('.project-icon-glyph')?.textContent).toBe('💼');
-  });
-
-  it('可切换到 Lucide 图标、搜索并持久化，重启后恢复同一图标', async () => {
-    await start(['# 甲清单\n']);
-    button('更多操作').click(); await tick();
-    button('设置项目图标').click(); await tick();
-    button('图标').click(); await tick();
-    await vi.waitFor(() => expect(document.querySelector('.icon-choice[title="briefcase"]')).not.toBeNull());
-    document.querySelector<HTMLButtonElement>('.icon-choice[title="briefcase"]')!.click();
-    await tick();
-    await vi.waitFor(async () => expect((await files.loadConfig())?.projects[0].icon).toBe('lucide:briefcase'));
-    const row = () => [...document.querySelectorAll<HTMLButtonElement>('.project-list button')].find(item => item.title === firstProject.path)!;
-    await vi.waitFor(() => expect(row().querySelector('.project-icon-lucide svg')).not.toBeNull());
-    expect(document.querySelector('[role="dialog"]')).toBeNull();
-    await remount();
-    const restored = [...document.querySelectorAll<HTMLButtonElement>('.project-list button')].find(item => item.title === firstProject.path)!;
-    await vi.waitFor(() => expect(restored.querySelector('.project-icon-lucide svg')).not.toBeNull());
-    button('更多操作').click(); await tick();
-    button('设置项目图标').click(); await tick();
-    const iconTab = [...document.querySelectorAll<HTMLButtonElement>('.icon-picker-tab')].find(item => item.textContent?.trim() === '图标')!;
-    expect(iconTab.getAttribute('aria-pressed')).toBe('true');
-    await vi.waitFor(() => expect(document.querySelector('.icon-choice[title="briefcase"]')?.getAttribute('aria-pressed')).toBe('true'));
-  });
-
-  it('搜索可找到推荐之外的表情并写回配置', async () => {
-    await start(['# 甲清单\n']);
-    button('更多操作').click(); await tick();
-    button('设置项目图标').click(); await tick();
-    await vi.waitFor(() => expect(document.querySelector('.icon-picker-search')).not.toBeNull());
-    const search = document.querySelector<HTMLInputElement>('[aria-label="搜索表情"]')!;
-    search.value = '披萨'; search.dispatchEvent(new Event('input', { bubbles: true }));
-    const pizza = () => [...document.querySelectorAll<HTMLButtonElement>('.icon-choice')].find(item => item.textContent?.trim() === '🍕');
-    await vi.waitFor(() => expect(pizza()).toBeTruthy());
-    expect(document.querySelector('.icon-picker-categories')).toBeNull();
-    pizza()!.click();
-    await vi.waitFor(async () => expect((await files.loadConfig())?.projects[0].icon).toBe('emoji:🍕'));
-  });
-
-  it('可从更多菜单自定义图标、拒绝多字素输入并恢复默认', async () => {
-    await start(['# 甲清单\n']);
-    button('更多操作').click(); await tick();
-    button('设置项目图标').click(); await tick();
-    const input = document.querySelector<HTMLInputElement>('[aria-label="自定义图标"]')!;
-    input.value = 'ab'; input.dispatchEvent(new Event('input', { bubbles: true })); await tick();
-    button('使用此图标').click(); await tick();
-    expect(document.querySelector('[role="alert"]')?.textContent).toContain('请输入一个字符或表情');
-    expect((await files.loadConfig())?.projects[0].icon).toBeUndefined();
-    input.value = '🦄'; input.dispatchEvent(new Event('input', { bubbles: true })); await tick();
-    button('使用此图标').click(); await tick();
-    await vi.waitFor(async () => expect((await files.loadConfig())?.projects[0].icon).toBe('emoji:🦄'));
-    const row = () => [...document.querySelectorAll<HTMLButtonElement>('.project-list button')].find(item => item.title === firstProject.path)!;
-    expect(row().querySelector('.project-icon-glyph')?.textContent).toBe('🦄');
-    button('更多操作').click(); await tick();
-    button('设置项目图标').click(); await tick();
-    expect(document.querySelector('[role="dialog"]')?.textContent).toContain('🦄');
-    button('恢复默认图标').click(); await tick();
-    await vi.waitFor(async () => expect((await files.loadConfig())?.projects[0].icon).toBeUndefined());
-    expect(row().querySelector('.project-icon svg')).not.toBeNull();
-  });
-});
-
-describe('主题下拉菜单', () => {
-  it('设置说明按需显示，Escape 先关闭帮助，主题管理收起时 Tab 不进入隐藏操作', async () => {
-    await start(['# 设置交互\n']); button('设置').click(); await tick();
-    const help = document.querySelector<HTMLDetailsElement>('.settings-help');
-    const manager = document.querySelector<HTMLDetailsElement>('.settings-theme-manager');
-    expect(help).not.toBeNull(); expect(manager).not.toBeNull();
-    expect(help!.open).toBe(false); expect(manager!.open).toBe(false);
-    expect(document.querySelector('#settings-keep-transparent-on-blur')?.getAttribute('role')).toBe('switch');
-    const summary = help!.querySelector<HTMLElement>('summary')!;
-    summary.click(); await tick(); expect(help!.open).toBe(true);
-    summary.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); await tick();
-    expect(help!.open).toBe(false); expect(document.querySelector('[role="dialog"]')).not.toBeNull();
-    expect(document.activeElement).toBe(summary);
-    summary.click(); await tick();
-    document.querySelector('#settings-theme')!.dispatchEvent(new Event('pointerdown', { bubbles: true })); await tick();
-    expect(help!.open).toBe(false);
-
-    const managerSummary = manager!.querySelector<HTMLElement>('summary')!;
-    managerSummary.focus();
-    const tab = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true });
-    managerSummary.dispatchEvent(tab); await tick();
-    expect(tab.defaultPrevented).toBe(true); expect(document.activeElement).toBe(button('关闭对话框'));
-    managerSummary.click(); await tick(); expect(manager!.open).toBe(true);
-    const last = button('下载主题模板'); last.focus();
-    const expandedTab = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true });
-    last.dispatchEvent(expandedTab); await tick();
-    expect(expandedTab.defaultPrevented).toBe(true); expect(document.activeElement).toBe(button('关闭对话框'));
-  });
-  it('方向键只浏览，Escape 取消并保留设置弹窗，Enter 确认', async () => {
-    await start(['- [ ] 原始任务\n']);
-    button('设置').click(); await tick();
-    expect(document.activeElement).toBe(themeControl('语言'));
-    const control = themeControl('明暗模式');
-    const original = control.value;
-    control.focus();
-    const press = async (key: string) => {
-      control.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }));
-      await tick();
-    };
-    await press('ArrowDown'); await press('End');
-    expect(control.value).toBe(original);
-    expect(document.getElementById(control.getAttribute('aria-activedescendant')!)?.textContent).toContain('深色');
-    await press('Escape');
-    expect(control.getAttribute('aria-expanded')).toBe('false');
-    expect(document.querySelector('[role="dialog"]')).not.toBeNull();
-    expect(document.activeElement).toBe(control);
-    await press('End'); await press('Enter');
-    expect(control.value).toBe('dark');
-    expect(document.documentElement.dataset.theme).toBe('dark');
-    expect(control.getAttribute('aria-expanded')).toBe('false');
-  });
-
-  it('文字检索、Tab 和外点不会提前修改值，鼠标确认后恢复焦点', async () => {
-    await start(['- [ ] 原始任务\n']);
-    button('设置').click(); await tick();
-    const control = themeControl('语言'); control.focus();
-    control.dispatchEvent(new KeyboardEvent('keydown', { key: 'e', bubbles: true, cancelable: true })); await tick();
-    expect(document.getElementById(control.getAttribute('aria-activedescendant')!)?.textContent).toContain('English');
-    expect(control.value).toBe('zh-CN');
-    const tabKey = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true });
-    control.dispatchEvent(tabKey); await tick();
-    expect(tabKey.defaultPrevented).toBe(false);
-    expect(control.getAttribute('aria-expanded')).toBe('false');
-    control.click(); await tick();
-    document.querySelector('[role="dialog"]')!.dispatchEvent(new Event('pointerdown', { bubbles: true })); await tick();
-    expect(control.getAttribute('aria-expanded')).toBe('false');
-    await chooseThemeSetting('语言', 'en');
-    expect(document.activeElement).toBe(control);
-    expect(document.documentElement.lang).toBe('en');
-  });
-});
-
-describe('界面语言设置', () => {
-  it('切换英文即时更新界面和编辑器，重启恢复语言且正文不变', async () => {
-    const original = '# 我的计划\n\n- [ ] 保留中文正文\n';
-    await start([original]);
-    button('设置').click(); await tick();
-    await chooseThemeSetting('语言', 'en');
-    expect(document.documentElement.lang).toBe('en');
-    expect(button('Settings')).toBeDefined();
-    expect(document.querySelector('[aria-label="Markdown task document"]')).not.toBeNull();
-    expect(themeControl('Language').value).toBe('en');
-    await vi.waitFor(async () => expect((await files.loadConfig())?.preferences.locale).toBe('en'));
-    expect((await files.read(firstProject.path)).text).toBe(original);
-    await unmount(mounted!);
-    mounted = mount(App, { target: container }); await tick();
-    await vi.waitFor(() => expect(document.querySelector('[aria-label="Markdown task document"]')).not.toBeNull());
-    expect(button('Settings')).toBeDefined();
-    button('Settings').click(); await tick();
-    expect(themeControl('Language').value).toBe('en');
-    await chooseThemeSetting('Language', 'zh-CN');
-    expect(button('设置')).toBeDefined();
-    expect((await files.read(firstProject.path)).text).toBe(original);
-  });
-});
-
-describe('正文段首缩进', () => {
-  it('默认两字符，修改后立即写入阅读样式并持久化，重启恢复且不改写正文', async () => {
-    const original = '# 阅读\n\n段落正文\n\n- [ ] 任务\n\n  任务正文\n';
-    await start([original]);
-    expect(document.documentElement.style.getPropertyValue('--paragraph-indent')).toBe('2em');
-    expect([...document.querySelectorAll('.cm-line.fm-paragraph')].map(line => line.textContent)).toEqual(['段落正文']);
-    button('设置').click(); await tick();
-    const slider = document.querySelector<HTMLInputElement>('#settings-paragraph-indent')!;
-    expect(slider.value).toBe('2');
-    slider.value = '0'; slider.dispatchEvent(new Event('input', { bubbles: true })); await tick();
-    expect(document.documentElement.style.getPropertyValue('--paragraph-indent')).toBe('0em');
-    expect(document.querySelector('#settings-paragraph-indent')!.nextElementSibling?.textContent).toBe('关闭');
-    await vi.waitFor(async () => expect((await files.loadConfig())?.preferences.paragraphIndent).toBe(0));
-    expect((await files.read(firstProject.path)).text).toBe(original);
-    await remount();
-    expect(document.documentElement.style.getPropertyValue('--paragraph-indent')).toBe('0em');
-    expect((await files.read(firstProject.path)).text).toBe(original);
-  });
-});
-
-/** jsdom 的 File 缺少 text；只补文件读取边界，仍通过生产文件输入事件执行导入与校验。 */
-async function importThemeFile(content: string): Promise<void> {
-  await openThemeManager();
-  const input = document.querySelector<HTMLInputElement>('[aria-label="导入主题文件"]')!;
-  const file = new File([content], 'custom-theme.json', { type: 'application/json' });
-  Object.defineProperty(file, 'text', { value: async () => content });
-  Object.defineProperty(input, 'files', { configurable: true, value: [file] });
-  input.dispatchEvent(new Event('change', { bubbles: true })); await tick();
-  await vi.waitFor(() => expect(button('导入主题').disabled).toBe(false));
+async function selectComboboxOption(container: HTMLElement, triggerId: string, optionValue: string): Promise<void> {
+  const trigger = container.querySelector<HTMLButtonElement>(`#${triggerId}`);
+  expect(trigger).not.toBeNull();
+  trigger!.click();
+  await flush();
+  const listbox = container.querySelector<HTMLElement>(`#${triggerId}-listbox`);
+  const option = listbox?.querySelector<HTMLButtonElement>(`[data-value="${optionValue}"]`);
+  expect(option).not.toBeNull();
+  option!.click();
+  await flush();
 }
 
-/** 通过用户可见的折叠入口展开主题操作，避免在隐藏控件上触发导入或下载。 */
-async function openThemeManager(): Promise<void> {
-  const manager = document.querySelector<HTMLDetailsElement>('.settings-theme-manager')!;
-  if (!manager.open) { manager.querySelector<HTMLElement>('summary')!.click(); await tick(); }
-}
+describe('悬赏板工作台外壳集成测试', () => {
+  let target: HTMLDivElement;
+  let instance: ReturnType<typeof mount> | null = null;
+  const storageMap = new Map<string, string>();
 
-describe('App 更多操作菜单', () => {
-  it('画布预览三档即时应用并持久化，重启与源码切换不修改正文', async () => {
-    await start(['# 阅读\n\n- [ ] 保留正文\n']);
-    button('更多操作').click(); await tick(); button('插入画布').click(); await tick();
-    await vi.waitFor(() => expect(canvasBoundary.edit).not.toBeNull());
-    button('收起画布').click(); await vi.waitFor(() => expect(document.querySelector('.canvas-page')).toBeNull());
-    const original = (await files.read(firstProject.path)).text;
-    button('设置').click(); await tick();
-    expect(themeControl('画布预览').value).toBe('compact');
-    for (const value of ['medium', 'spacious', 'compact', 'spacious']) {
-      await chooseThemeSetting('画布预览', value);
-      expect(document.documentElement.dataset.canvasPreview).toBe(value);
+  beforeEach(() => {
+    storageMap.clear();
+    if (typeof globalThis.localStorage?.clear !== 'function') {
+      const mockStorage: Storage = {
+        get length() {
+          return storageMap.size;
+        },
+        clear: () => storageMap.clear(),
+        getItem: (key: string) => storageMap.get(key) ?? null,
+        key: (index: number) => [...storageMap.keys()][index] ?? null,
+        removeItem: (key: string) => {
+          storageMap.delete(key);
+        },
+        setItem: (key: string, value: string) => {
+          storageMap.set(key, String(value));
+        },
+      };
+      Object.defineProperty(globalThis, 'localStorage', { value: mockStorage, configurable: true });
+      Object.defineProperty(window, 'localStorage', { value: mockStorage, configurable: true });
+    } else {
+      globalThis.localStorage.clear();
     }
-    await vi.waitFor(async () => expect((await files.loadConfig())?.preferences.canvasPreview).toBe('spacious'));
-    expect((await files.read(firstProject.path)).text).toBe(original);
-    await remount();
-    expect(document.documentElement.dataset.canvasPreview).toBe('spacious');
-    expect(document.querySelector('.fm-canvas-thumbnail')).not.toBeNull();
-    button('查看源码').click(); await tick();
-    expect(document.querySelector('.fm-canvas-card')).toBeNull();
-    button('返回预览').click(); await tick();
-    expect(document.querySelector('.fm-canvas-thumbnail')).not.toBeNull();
-    expect((await files.read(firstProject.path)).text).toBe(original);
+    if (typeof Element.prototype.scrollIntoView !== 'function') {
+      Element.prototype.scrollIntoView = vi.fn();
+    }
+    setLocalePreference('zh-CN');
+    target = document.createElement('div');
+    document.body.appendChild(target);
   });
-  it('收起画布等待正文落盘时锁住引擎，保存失败恢复编辑且重试保留最新图形', async () => {
-    await start(['# 画布退出\n\n- [ ] 任务\n']);
-    button('更多操作').click(); await tick(); button('插入画布').click(); await tick();
-    await vi.waitFor(() => expect(canvasBoundary.tryEdit).not.toBeNull());
-    const first = { id: 'first-shape', type: 'rectangle', x: 0, y: 0, width: 80, height: 40 };
-    const second = { id: 'second-shape', type: 'ellipse', x: 100, y: 0, width: 80, height: 40 };
-    expect(canvasBoundary.tryEdit!([first])).toBe(true);
-    const writeOriginal = BrowserFilePort.prototype.write;
-    let release!: () => void;
-    const barrier = new Promise<void>(resolve => { release = resolve; });
-    const write = vi.spyOn(BrowserFilePort.prototype, 'write').mockImplementationOnce(async () => {
-      await barrier; throw new Error('暂时无法写入');
+
+  afterEach(() => {
+    if (instance) {
+      unmount(instance);
+      instance = null;
+    }
+    delete document.documentElement.dataset.windowTransparent;
+    delete document.documentElement.dataset.backdropVeil;
+    delete document.documentElement.dataset.theme;
+    delete document.documentElement.dataset.corners;
+    delete document.documentElement.dataset.monochrome;
+    document.documentElement.removeAttribute('style');
+    target?.remove();
+    setLocalePreference('zh-CN');
+  });
+
+  it('左侧导航仅包含 4 个顶层入口（悬赏板、待我处理、Agent 名录、设置），支持视图切换与侧栏收起展开', async () => {
+    const { port, saved } = createMemoryPort({
+      projects: [{ id: 'p1', name: '核心引擎项目', path: 'D:/engine.md', icon: 'emoji:🎯' }],
+      activeProjectId: 'p1',
     });
-    try {
-      button('收起画布').click();
-      await vi.waitFor(() => expect(write).toHaveBeenCalledOnce());
-      expect(document.querySelector<HTMLElement>('.canvas-page')?.inert).toBe(true);
-      expect(canvasBoundary.tryEdit!([first, second])).toBe(false);
-    } finally { release(); }
-    await vi.waitFor(() => expect(button('收起画布').disabled).toBe(false));
-    expect(document.querySelector('.canvas-page')).not.toBeNull();
-    expect(document.querySelector<HTMLElement>('.canvas-page')?.inert).toBe(false);
-    expect(canvasBoundary.tryEdit!([first, second])).toBe(true);
-    write.mockImplementation(writeOriginal);
-    button('收起画布').click();
-    await vi.waitFor(() => expect(document.querySelector('.canvas-page')).toBeNull());
-    expect(scanCanvasBlocks((await files.read(firstProject.path)).text)[0].document?.elements).toHaveLength(2);
+    const onready = vi.fn();
+    instance = mount(App, { target, props: { files: port, onready } });
+    await flush();
+
+    await vi.waitFor(() => expect(onready).toHaveBeenCalledTimes(1));
+
+    const navItems = [...target.querySelectorAll<HTMLButtonElement>('.workspace-nav .workspace-nav-item')];
+    expect(navItems.map(button => button.textContent?.trim())).toEqual([
+      '悬赏板',
+      '待我处理',
+      'Agent 名录',
+      '设置',
+    ]);
+    // 侧栏中部不展示项目列表
+    const sidebar = target.querySelector('.sidebar');
+    expect(sidebar?.textContent).not.toContain('核心引擎项目');
+
+    // 默认在悬赏板视图，包含内置 Markdown + KaTeX 验收条件示例渲染
+    expect(target.querySelector('[data-view="bounties"]')).not.toBeNull();
+    expect(target.querySelector('.markdown-preview-sample .katex')).not.toBeNull();
+
+    // 切换到 待我处理
+    navItems[1].click();
+    await flush();
+    expect(target.querySelector('[data-view="inbox"]')).not.toBeNull();
+    expect(saved.at(-1)?.preferences.workspaceSection).toBe('inbox');
+
+    // 切换到 Agent 名录
+    navItems[2].click();
+    await flush();
+    expect(target.querySelector('[data-view="agents"]')).not.toBeNull();
+    expect(saved.at(-1)?.preferences.workspaceSection).toBe('agents');
+
+    // 切换到 设置，直接承载 SettingsPanel 及扩展分组预留
+    navItems[3].click();
+    await flush();
+    expect(target.querySelector('[data-view="settings"]')).not.toBeNull();
+    expect(target.querySelector('.settings-panel')).not.toBeNull();
+    expect(target.querySelector('[data-extension-group="workspace"]')).not.toBeNull();
+    expect(saved.at(-1)?.preferences.workspaceSection).toBe('settings');
+
+    // 收起与展开导航栏
+    const collapseBtn = target.querySelector<HTMLButtonElement>('.sidebar-collapse-btn');
+    expect(collapseBtn).not.toBeNull();
+    collapseBtn!.click();
+    await flush();
+    expect(target.querySelector('.app-shell')?.classList.contains('sidebar-collapsed')).toBe(true);
+    expect(saved.at(-1)?.preferences.sidebarCollapsed).toBe(true);
+
+    const expandBtn = target.querySelector<HTMLButtonElement>('.sidebar-expand-btn');
+    expect(expandBtn).not.toBeNull();
+    expandBtn!.click();
+    await flush();
+    expect(target.querySelector('.app-shell')?.classList.contains('sidebar-collapsed')).toBe(false);
+    expect(saved.at(-1)?.preferences.sidebarCollapsed).toBe(false);
   });
 
-  it('桌面关闭等待画布正文落盘时锁住引擎，保存失败恢复编辑且成功后才销毁窗口', async () => {
-    desktopBoundary.enabled = true;
-    await start(['# 画布退出\n\n- [ ] 任务\n']);
-    await vi.waitFor(() => expect(desktopBoundary.close).not.toBeNull());
-    button('更多操作').click(); await tick(); button('插入画布').click(); await tick();
-    await vi.waitFor(() => expect(canvasBoundary.tryEdit).not.toBeNull());
-    const first = { id: 'window-first', type: 'rectangle', x: 0, y: 0, width: 80, height: 40 };
-    const second = { id: 'window-second', type: 'ellipse', x: 100, y: 0, width: 80, height: 40 };
-    expect(canvasBoundary.tryEdit!([first])).toBe(true);
-    const writeOriginal = BrowserFilePort.prototype.write;
-    let release!: () => void;
-    const barrier = new Promise<void>(resolve => { release = resolve; });
-    const write = vi.spyOn(BrowserFilePort.prototype, 'write').mockImplementationOnce(async () => {
-      await barrier; throw new Error('暂时无法写入');
+  it('保留 5 套内置主题、自定义主题导入/导出/移除、明暗模式、bootThemeKey 与桌面窗口材质控制', async () => {
+    const { port, saved, exported } = createMemoryPort({
+      preferences: { ...emptyAppConfig().preferences, workspaceSection: 'settings' },
     });
-    const closing = desktopBoundary.close!({ preventDefault: vi.fn() });
-    try {
-      await vi.waitFor(() => expect(write).toHaveBeenCalledOnce());
-      expect(document.querySelector<HTMLElement>('.canvas-page')?.inert).toBe(true);
-      expect(canvasBoundary.tryEdit!([first, second])).toBe(false);
-      expect(desktopBoundary.destroy).not.toHaveBeenCalled();
-    } finally { release(); await closing; }
-    expect(desktopBoundary.destroy).not.toHaveBeenCalled();
-    expect(document.querySelector<HTMLElement>('.canvas-page')?.inert).toBe(false);
-    expect(canvasBoundary.tryEdit!([first, second])).toBe(true);
-    write.mockImplementation(writeOriginal);
-    await desktopBoundary.close!({ preventDefault: vi.fn() });
-    expect(desktopBoundary.destroy).toHaveBeenCalledOnce();
-    expect(scanCanvasBlocks((await files.read(firstProject.path)).text)[0].document?.elements).toHaveLength(2);
-  });
-
-  it('待办 Ctrl+End 落到隐藏归档后插入画布，关闭和保存后卡片仍在待办可见区域', async () => {
-    const source = '# 清单\n\n- [ ] 待办\n\n# 归档\n\n- [x] 旧任务\n';
-    await start([source], { [firstProject.id]: { mode: 'todo', cursor: source.length, scrollTop: 0, folded: [] } });
-    documentInput().dispatchEvent(new KeyboardEvent('keydown', { key: 'End', code: 'End', ctrlKey: true, bubbles: true, cancelable: true }));
-    await tick();
-    button('更多操作').click(); await tick(); button('插入画布').click(); await tick();
-    await vi.waitFor(() => expect(canvasBoundary.edit).not.toBeNull());
-    canvasBoundary.edit!([{ id: 'visible-shape', type: 'rectangle', x: 0, y: 0, width: 80, height: 40 }]);
-    button('收起画布').click();
-    await vi.waitFor(() => expect(document.querySelector('.canvas-page')).toBeNull());
-    expect(document.querySelector('.fm-canvas-card')).not.toBeNull();
-    const saved = (await files.read(firstProject.path)).text;
-    expect(scanCanvasBlocks(saved)[0].to).toBeLessThan(saved.indexOf('# 归档'));
-    expect(saved.slice(saved.indexOf('# 归档'))).toBe('# 归档\n\n- [x] 旧任务\n');
-  });
-
-  it('首次无配置欢迎文档插入画布后，自动保存与关闭不能恢复初始欢迎正文', async () => {
-    await remount();
-    button('更多操作').click(); await tick(); button('插入画布').click(); await tick();
-    await vi.waitFor(() => expect(canvasBoundary.edit).not.toBeNull());
-    expect(document.querySelector('.fm-canvas-card')).not.toBeNull();
-    await new Promise(resolve => setTimeout(resolve, 800));
-    const config = await files.loadConfig();
-    const project = config!.projects.find(project => project.id === config!.activeProjectId)!;
-    expect(scanCanvasBlocks((await files.read(project.path)).text)).toHaveLength(1);
-    canvasBoundary.edit!([{ id: 'welcome-shape', type: 'ellipse', x: 0, y: 0, width: 80, height: 40 }]);
-    button('收起画布').click();
-    await vi.waitFor(() => expect(document.querySelector('.canvas-page')).toBeNull());
-    expect(document.querySelector('.fm-canvas-card')).not.toBeNull();
-    expect(scanCanvasBlocks((await files.read(project.path)).text)[0].document?.elements).toHaveLength(1);
-  });
-
-  it('插入画布后提交图形与标题，关闭、外部检查及重启都保留同一份正文', async () => {
-    const source = '# 欢迎\n\n- [ ] 开始使用\n';
-    await start([source]);
-    button('更多操作').click(); await tick(); button('插入画布').click(); await tick();
-    await vi.waitFor(() => expect(canvasBoundary.edit).not.toBeNull());
-    expect(document.querySelector('.fm-canvas-card')).not.toBeNull();
-    canvasBoundary.edit!([{ id: 'rectangle', type: 'rectangle', x: 0, y: 0, width: 80, height: 40 }]);
-    const title = document.querySelector<HTMLInputElement>('[aria-label="画布标题"]')!;
-    title.value = '保存的图'; title.dispatchEvent(new Event('input', { bubbles: true })); await tick();
-    button('收起画布').click();
-    await vi.waitFor(() => expect(document.querySelector('.canvas-page')).toBeNull());
-    await vi.waitFor(async () => {
-      const blocks = scanCanvasBlocks((await files.read(firstProject.path)).text);
-      expect(blocks).toHaveLength(1);
-      expect(blocks[0].document?.title).toBe('保存的图');
-      expect(blocks[0].document?.elements[0]).toMatchObject({ id: 'rectangle', width: 80 });
+    const setWindowMaterial = vi.fn().mockResolvedValue(true);
+    instance = mount(App, {
+      target,
+      props: { files: port, setWindowMaterial },
     });
-    expect(document.querySelector('.fm-canvas-title')?.textContent).toBe('保存的图');
-    const expected = (await files.read(firstProject.path)).text;
-    await new Promise(resolve => setTimeout(resolve, 850));
-    expect((await files.read(firstProject.path)).text).toBe(expected);
-    await remount();
-    expect(document.querySelector('.fm-canvas-title')?.textContent).toBe('保存的图');
-    button('查看源码').click(); await tick();
-    expect(documentInput().textContent).toContain('```canvas');
-  });
+    await flush();
 
-  it('内部点击保留菜单，外部点击关闭，触发按钮仍能切换且菜单操作正常', async () => {
-    await start(['# 菜单验收\n']);
-    const trigger = button('更多操作');
-    trigger.click(); await tick();
-    const menu = document.querySelector<HTMLElement>('[role="menu"]')!;
-    expect(menu).not.toBeNull();
-    menu.click(); await tick();
-    expect(trigger.getAttribute('aria-expanded')).toBe('true');
+    // 切换到液态玻璃主题
+    await selectComboboxOption(target, 'theme-id-select', 'liquid-glass');
+    expect(saved.at(-1)?.preferences.themeId).toBe('liquid-glass');
+    expect(setWindowMaterial).toHaveBeenLastCalledWith('acrylic', 'system', false);
+    expect(document.documentElement.dataset.windowTransparent).toBe('true');
 
-    documentInput().click(); await tick();
-    expect(document.querySelector('[role="menu"]')).toBeNull();
-    expect(trigger.getAttribute('aria-expanded')).toBe('false');
+    // 开启窗口失焦时保持透明
+    const blurSwitch = target.querySelector<HTMLInputElement>('#keep-transparent-switch');
+    expect(blurSwitch?.disabled).toBe(false);
+    blurSwitch!.click();
+    await flush();
+    expect(saved.at(-1)?.preferences.keepTransparentOnBlur).toBe(true);
+    expect(setWindowMaterial).toHaveBeenLastCalledWith('acrylic', 'system', true);
 
-    trigger.click(); await tick();
-    trigger.click(); await tick();
-    expect(document.querySelector('[role="menu"]')).toBeNull();
-    trigger.click(); await tick();
-    button('快捷键').click(); await tick();
-    expect(document.querySelector('[role="dialog"]')).not.toBeNull();
-    expect(document.querySelector('[role="menu"]')).toBeNull();
-  });
-});
+    // 切换深色模式并验证 bootThemeKey 写入
+    await selectComboboxOption(target, 'theme-mode-select', 'dark');
+    expect(saved.at(-1)?.preferences.theme).toBe('dark');
+    expect(document.documentElement.style.colorScheme).toBe('dark');
+    const cachedBoot = JSON.parse(localStorage.getItem(bootThemeKey) ?? '{}');
+    expect(cachedBoot.mode).toBe('dark');
+    expect(cachedBoot.definition?.id).toBe('liquid-glass');
 
-describe('App 主题导入与持久化', () => {
-  it('失焦透明开关立即传到原生边界，保存重启后恢复并可关闭', async () => {
-    desktopBoundary.enabled = true;
-    await start(['# 失焦透明\n']); button('设置').click(); await tick();
-    await chooseThemeSetting('主题', 'frosted-glass');
-    const checkbox = document.querySelector<HTMLInputElement>('#settings-keep-transparent-on-blur');
-    expect(checkbox).not.toBeNull();
-    expect(checkbox!.checked).toBe(false);
-    checkbox!.click(); await tick();
-    await vi.waitFor(() => expect(desktopBoundary.invoke).toHaveBeenLastCalledWith('set_window_material', { material: 'acrylic', theme: null, keepTransparentOnBlur: true }));
-    await vi.waitFor(async () => expect((await files.loadConfig())?.preferences.keepTransparentOnBlur).toBe(true));
-    await remount(); button('设置').click(); await tick();
-    const restored = document.querySelector<HTMLInputElement>('#settings-keep-transparent-on-blur')!;
-    expect(restored.checked).toBe(true);
-    await chooseThemeSetting('明暗模式', 'dark');
-    await vi.waitFor(() => expect(desktopBoundary.invoke).toHaveBeenLastCalledWith('set_window_material', { material: 'acrylic', theme: 'dark', keepTransparentOnBlur: true }));
-    await chooseThemeSetting('主题', 'paper');
-    await vi.waitFor(() => expect(desktopBoundary.invoke).toHaveBeenLastCalledWith('set_window_material', { material: 'opaque', theme: 'dark', keepTransparentOnBlur: true }));
-    expect(document.documentElement.dataset.windowTransparent).toBe('false');
-    expect(restored.disabled).toBe(true);
-    await chooseThemeSetting('主题', 'liquid-glass');
-    expect(restored.disabled).toBe(false);
-    restored.click(); await tick();
-    await vi.waitFor(() => expect(desktopBoundary.invoke).toHaveBeenLastCalledWith('set_window_material', { material: 'acrylic', theme: 'dark', keepTransparentOnBlur: false }));
-    await vi.waitFor(async () => expect((await files.loadConfig())?.preferences.keepTransparentOnBlur).toBe(false));
-  });
-  it('桌面端以透明主题启动时不先切到实色，原生材质完成后才触发窗口显示就绪回调', async () => {
-    desktopBoundary.enabled = true;
-    await files.create(firstProject.path, '# 启动透明\n');
-    await files.saveConfig({
-      projects: [firstProject],
-      activeProjectId: firstProject.id,
-      preferences: { ...defaultPreferences, themeId: 'frosted-glass', theme: 'dark' },
-      projectViews: {},
+    // 导出主题模板
+    const buttons = [...target.querySelectorAll<HTMLButtonElement>('.settings-inline-actions button')];
+    const exportBtn = buttons.find(btn => btn.textContent?.includes('下载主题模板'));
+    expect(exportBtn).not.toBeNull();
+    exportBtn!.click();
+    await flush();
+    expect(exported).toHaveLength(1);
+    expect(exported[0].filename).toBe('liquid-glass-copy.json');
+
+    // 导入自定义 JSON 主题并移除
+    const palette = (color: string) => Object.fromEntries(paletteKeys.map(key => [key, color]));
+    const customTheme = {
+      version: 1,
+      id: 'bounty-custom',
+      name: '悬赏青',
+      light: palette('#F5F7FA'),
+      dark: palette('#12161F'),
+    };
+    const fileInput = target.querySelector<HTMLInputElement>('input[type="file"]');
+    expect(fileInput).not.toBeNull();
+    const content = JSON.stringify(customTheme);
+    const themeFile = new File([content], 'bounty-custom.json', {
+      type: 'application/json',
     });
-    let resolveMaterial!: (value: boolean) => void;
-    desktopBoundary.invoke.mockImplementation((...args: unknown[]) => {
-      if (args[0] === 'set_window_material') {
-        return new Promise<boolean>(resolve => { resolveMaterial = resolve; });
+    Object.defineProperty(themeFile, 'text', { value: async () => content });
+    Object.defineProperty(fileInput!, 'files', { value: [themeFile], configurable: true });
+    fileInput!.dispatchEvent(new Event('change', { bubbles: true }));
+    await vi.waitFor(() => expect(saved.at(-1)?.preferences.themeId).toBe('bounty-custom'));
+
+    expect(saved.at(-1)?.customThemes?.map(t => t.id)).toEqual(['bounty-custom']);
+    expect(document.documentElement.style.getPropertyValue('--canvas')).toBe('#12161F');
+
+    const removeBtn = [...target.querySelectorAll<HTMLButtonElement>('.settings-inline-actions button')].find(
+      btn => btn.textContent?.includes('移除主题'),
+    );
+    expect(removeBtn).not.toBeNull();
+    removeBtn!.click();
+    await flush();
+    expect(saved.at(-1)?.customThemes).toEqual([]);
+    expect(saved.at(-1)?.preferences.themeId).toBe(builtInThemes[0].id);
+  });
+
+  it('支持中英文语言切换与项目图标选择器交互', async () => {
+    const { port, saved } = createMemoryPort({
+      projects: [{ id: 'p1', name: 'Taskrail Core', path: 'D:/core.md' }],
+      activeProjectId: 'p1',
+      preferences: { ...emptyAppConfig().preferences, workspaceSection: 'bounties' },
+    });
+    instance = mount(App, { target, props: { files: port } });
+    await flush();
+
+    // 打开项目图标选择器并选择推荐表情
+    const iconBadgeBtn = target.querySelector<HTMLButtonElement>('.project-badge-button');
+    expect(iconBadgeBtn).not.toBeNull();
+    iconBadgeBtn!.click();
+    await flush();
+
+    const dialog = target.querySelector('[role="dialog"]');
+    expect(dialog).not.toBeNull();
+    await vi.waitFor(() => {
+      expect(dialog!.querySelector<HTMLButtonElement>('.icon-choice')).not.toBeNull();
+    });
+    const emojiChoice = dialog!.querySelector<HTMLButtonElement>('.icon-choice');
+    emojiChoice!.click();
+    await flush();
+
+    expect(target.querySelector('[role="dialog"]')).toBeNull();
+    expect(saved.at(-1)?.projects[0].icon).toMatch(/^(emoji|lucide):/);
+
+    // 切换到设置页并切换语言为 English
+    const settingsNav = target.querySelector<HTMLButtonElement>('[data-nav-section="settings"]');
+    settingsNav!.click();
+    await flush();
+
+    await selectComboboxOption(target, 'language-select', 'en');
+    expect(saved.at(-1)?.preferences.language).toBe('en');
+    const labels = [...target.querySelectorAll('.workspace-nav .workspace-nav-item')].map(el =>
+      el.textContent?.trim(),
+    );
+    expect(labels).toEqual(['Bounty Board', 'Inbox', 'Agent Directory', 'Settings']);
+  });
+
+  it('透明主题启动时不先发 opaque 请求，等待原生材质与内容就绪后才触发 onready 并执行遮罩淡出', async () => {
+    let resolveMaterial!: (supported: boolean) => void;
+    let materialCalls = 0;
+    const setWindowMaterial = vi.fn().mockImplementation(() => {
+      materialCalls += 1;
+      if (materialCalls === 1) {
+        return new Promise<boolean>(resolve => {
+          resolveMaterial = resolve;
+        });
       }
       return Promise.resolve(true);
     });
-    const events: string[] = [];
-    mounted = mount(App, {
-      target: container,
-      props: {
-        onready: () => {
-          events.push(`ready:${document.documentElement.dataset.windowTransparent}:${document.querySelector('.app-shell')?.classList.contains('booted')}:${document.documentElement.dataset.backdropVeil}`);
-        },
+    const { port } = createMemoryPort({
+      preferences: {
+        ...emptyAppConfig().preferences,
+        themeId: 'frosted-glass',
+        theme: 'dark',
       },
     });
-    await vi.waitFor(() => expect(desktopBoundary.invoke).toHaveBeenCalledWith('set_window_material', { material: 'acrylic', theme: 'dark', keepTransparentOnBlur: false }));
-    expect(desktopBoundary.invoke.mock.calls.filter(call => (call as unknown[])[0] === 'set_window_material')).toEqual([
-      ['set_window_material', { material: 'acrylic', theme: 'dark', keepTransparentOnBlur: false }],
-    ]);
-    await new Promise(resolve => setTimeout(resolve, 60));
-    expect(events).toEqual([]);
+    let readySnapshot: {
+      transparent?: string;
+      booted: boolean;
+      veil?: string;
+    } | null = null;
+    const onready = vi.fn(() => {
+      readySnapshot = {
+        transparent: document.documentElement.dataset.windowTransparent,
+        booted: Boolean(target.querySelector('.app-shell.booted')),
+        veil: document.documentElement.dataset.backdropVeil,
+      };
+    });
+
+    instance = mount(App, {
+      target,
+      props: { files: port, setWindowMaterial, onready },
+    });
+    await flush();
+
+    expect(setWindowMaterial).toHaveBeenCalledTimes(1);
+    expect(setWindowMaterial).toHaveBeenCalledWith('acrylic', 'dark', false);
+    expect(setWindowMaterial.mock.calls.some(([material]) => material === 'opaque')).toBe(false);
+    expect(onready).not.toHaveBeenCalled();
+
     resolveMaterial(true);
-    await vi.waitFor(() => expect(events).toEqual(['ready:true:true:active']));
+    await vi.waitFor(() => expect(onready).toHaveBeenCalledTimes(1));
+
+    expect(readySnapshot).toEqual({
+      transparent: 'true',
+      booted: true,
+      veil: 'active',
+    });
     expect(document.documentElement.dataset.backdropVeil).toBe('fade-a');
-    await vi.waitFor(() => expect(desktopBoundary.restored).not.toBeNull());
-    desktopBoundary.restored!();
-    expect(document.documentElement.dataset.backdropVeil).toBe('fade-b');
-  });
-  const customTheme: ThemeDefinition = {
-    ...builtInThemes[0], id: 'custom-slate', name: '自制石板', corners: 'square',
-    light: { ...builtInThemes[0].light, canvas: '#ABCDEF' }, dark: { ...builtInThemes[0].dark, canvas: '#123456' },
-    appearance: {
-      light: { 'control-shadow': '3px 3px 6px #123456', 'control-radius': 9 },
-      dark: { 'control-shadow': '2px 2px 5px #102030', 'control-radius': 7 },
-    },
-  };
-
-  it('设置中选择双色深色并保存，重新挂载恢复同一主题与完整配色', async () => {
-    await start(['# 主题验收\n']); button('设置').click(); await tick();
-    await chooseThemeSetting('主题', 'mono'); await chooseThemeSetting('明暗模式', 'dark');
-    await vi.waitFor(async () => expect((await files.loadConfig())?.preferences).toMatchObject({ themeId: 'mono', theme: 'dark' }));
-    await remount(); button('设置').click(); await tick();
-    expect(themeControl('主题').value).toBe('mono'); expect(themeControl('明暗模式').value).toBe('dark');
-    expect(document.documentElement.dataset.monochrome).toBe('true');
-    expect(document.documentElement.dataset.corners).toBe('square');
-    for (const key of paletteKeys) expect(document.documentElement.style.getPropertyValue(`--${key}`)).toBe(builtInThemes[1].dark[key]);
+    expect(setWindowMaterial.mock.calls.some(([material]) => material === 'opaque')).toBe(false);
   });
 
-  it('文件输入导入双模式主题后自动选择，保存并重启恢复自制配色', async () => {
-    await start(['# 导入主题\n']); button('设置').click(); await tick();
-    await chooseThemeSetting('明暗模式', 'light'); await importThemeFile(JSON.stringify(customTheme));
-    expect(themeControl('主题').value).toBe(customTheme.id);
-    expect(document.documentElement.style.getPropertyValue('--canvas')).toBe('#ABCDEF');
-    expect(document.documentElement.dataset.corners).toBe('square');
-    expect(document.documentElement.style.getPropertyValue('--control-shadow')).toBe(customTheme.appearance!.light['control-shadow']);
-    expect(document.documentElement.style.getPropertyValue('--control-radius')).toBe('9px');
-    await vi.waitFor(async () => {
-      const config = await files.loadConfig();
-      expect(config?.preferences.themeId).toBe(customTheme.id); expect(config?.customThemes).toEqual([customTheme]);
+  it('配置加载失败时不覆盖原配置并显示错误横幅，重试加载成功后恢复正常保存', async () => {
+    const recoveredConfig: AppConfig = {
+      ...emptyAppConfig(),
+      projects: [{ id: 'p1', name: '恢复项目', path: 'D:/recovered.md' }],
+      activeProjectId: 'p1',
+    };
+    const loadConfig = vi
+      .fn<FilePort['loadConfig']>()
+      .mockRejectedValueOnce(new Error('STATE_CONFIG_INVALID: 配置损坏'))
+      .mockResolvedValueOnce(structuredClone(recoveredConfig));
+    const saveConfig = vi.fn<FilePort['saveConfig']>().mockResolvedValue(undefined);
+    const port: FilePort = {
+      isBrowser: false,
+      loadConfig,
+      saveConfig,
+    };
+
+    instance = mount(App, { target, props: { files: port } });
+    await flush();
+
+    const banner = target.querySelector<HTMLElement>('[data-status="config-load-failed"]');
+    expect(banner).not.toBeNull();
+    expect(banner?.textContent).toContain('STATE_CONFIG_INVALID');
+
+    // 尝试切换导航与收起侧栏，不得覆盖写回配置
+    target.querySelector<HTMLButtonElement>('[data-nav-section="inbox"]')?.click();
+    target.querySelector<HTMLButtonElement>('.sidebar-collapse-btn')?.click();
+    await flush();
+    expect(saveConfig).not.toHaveBeenCalled();
+
+    // 重试加载配置并恢复
+    const retryBtn = banner!.querySelector<HTMLButtonElement>('button');
+    expect(retryBtn).not.toBeNull();
+    retryBtn!.click();
+    await flush();
+
+    expect(target.querySelector('[data-status="config-load-failed"]')).toBeNull();
+    expect(target.querySelector('.project-badge-button')?.textContent).toContain('恢复项目');
+
+    target.querySelector<HTMLButtonElement>('[data-nav-section="settings"]')?.click();
+    await flush();
+    expect(saveConfig).toHaveBeenCalledTimes(1);
+    expect(saveConfig.mock.calls[0][0].projects[0].name).toBe('恢复项目');
+  });
+
+  it('多项目切换后修改项目图标仅更新当前选中的目标项目', async () => {
+    const { port, saved } = createMemoryPort({
+      projects: [
+        { id: 'p1', name: '项目一', path: 'D:/p1.md', icon: 'emoji:🎯' },
+        { id: 'p2', name: '项目二', path: 'D:/p2.md' },
+      ],
+      activeProjectId: 'p1',
+      preferences: { ...emptyAppConfig().preferences, workspaceSection: 'bounties' },
     });
-    await remount(); button('设置').click(); await tick();
-    expect(themeControl('主题').value).toBe(customTheme.id);
-    expect(document.documentElement.style.getPropertyValue('--control-shadow')).toBe(customTheme.appearance!.light['control-shadow']);
-    expect(document.documentElement.style.getPropertyValue('--control-radius')).toBe('9px');
-    await chooseThemeSetting('明暗模式', 'dark');
-    expect(document.documentElement.dataset.corners).toBe('square');
-    expect(document.documentElement.style.getPropertyValue('--canvas')).toBe('#123456');
-    expect(document.documentElement.style.getPropertyValue('--control-shadow')).toBe(customTheme.appearance!.dark['control-shadow']);
-    expect(document.documentElement.style.getPropertyValue('--control-radius')).toBe('7px');
-  });
+    instance = mount(App, { target, props: { files: port } });
+    await flush();
 
-  it('内置包重复导入不覆盖已有主题', async () => {
-    await start(['# 重复主题\n']); button('设置').click(); await tick();
-    await importThemeFile(JSON.stringify(builtInThemes[1]));
-    expect(document.querySelector('.dialog-error')?.textContent).toContain('THEME_DUPLICATE');
-    expect(themeControl('主题').value).toBe('paper');
-    expect((await files.loadConfig())?.customThemes ?? []).toEqual([]);
-  });
+    const p2Btn = target.querySelector<HTMLButtonElement>('[data-project-id="p2"]');
+    expect(p2Btn).not.toBeNull();
+    p2Btn!.click();
+    await flush();
+    expect(saved.at(-1)?.activeProjectId).toBe('p2');
 
-  it('非法文件显示错误，保留已选择的主题及持久化配置', async () => {
-    await start(['# 非法导入\n']); button('设置').click(); await tick();
-    await chooseThemeSetting('主题', 'mono'); await chooseThemeSetting('明暗模式', 'dark');
-    await vi.waitFor(async () => expect((await files.loadConfig())?.preferences.themeId).toBe('mono'));
-    await importThemeFile(JSON.stringify({ ...customTheme, dark: { canvas: 'url(https://example.com)' } }));
-    expect(document.querySelector('.dialog-error')?.textContent).toContain('THEME_INVALID');
-    expect(themeControl('主题').value).toBe('mono');
-    expect(document.documentElement.style.getPropertyValue('--canvas')).toBe('#0A0A0A');
-    const saved = await files.loadConfig();
-    expect(saved?.preferences.themeId).toBe('mono'); expect(saved?.customThemes ?? []).toEqual([]);
-  });
-
-  it('移除自制主题回退纸面，重启后主题列表不再包含已移除项', async () => {
-    await start(['# 移除主题\n']); button('设置').click(); await tick();
-    await importThemeFile(JSON.stringify(customTheme)); button('移除主题').click(); await tick();
-    expect(themeControl('主题').value).toBe('paper');
-    expect(document.documentElement.style.getPropertyValue('--control-shadow')).toBe('');
-    expect(document.documentElement.style.getPropertyValue('--control-radius')).toBe('');
-    await vi.waitFor(async () => {
-      const config = await files.loadConfig();
-      expect(config?.preferences.themeId).toBe('paper'); expect(config?.customThemes).toEqual([]);
+    target.querySelector<HTMLButtonElement>('.project-badge-button')!.click();
+    await flush();
+    const dialog = target.querySelector('[role="dialog"]');
+    await vi.waitFor(() => {
+      expect(dialog?.querySelector<HTMLButtonElement>('.icon-choice')).not.toBeNull();
     });
-    await remount(); button('设置').click(); await tick();
-    expect(themeControl('主题').value).toBe('paper');
-    themeControl('主题').click(); await tick();
-    expect([...document.querySelectorAll<HTMLElement>('[role="option"]')].some(option => option.dataset.value === customTheme.id)).toBe(false);
-    themeControl('主题').click(); await tick();
-    expect(document.documentElement.dataset.corners).toBe('rounded');
-    expect(document.documentElement.style.getPropertyValue('--control-shadow')).toBe('');
-    expect(document.documentElement.style.getPropertyValue('--control-radius')).toBe('');
+    dialog!.querySelector<HTMLButtonElement>('.icon-choice')!.click();
+    await flush();
+
+    const latest = saved.at(-1)!;
+    expect(latest.projects[0].icon).toBe('emoji:🎯');
+    expect(latest.projects[1].icon).toMatch(/^(emoji|lucide):/);
   });
 
-  it('跟随系统即时响应明暗事件，手动选择浅色后保持浅色', async () => {
-    let systemDark = false;
-    const events = new EventTarget();
-    const preference = { get matches() { return systemDark; }, media: '(prefers-color-scheme: dark)', onchange: null, addListener() {}, removeListener() {}, addEventListener: events.addEventListener.bind(events), removeEventListener: events.removeEventListener.bind(events), dispatchEvent: events.dispatchEvent.bind(events) } as MediaQueryList;
-    vi.spyOn(window, 'matchMedia').mockReturnValue(preference);
-    await start(['# 系统主题\n']); button('设置').click(); await tick();
-    await chooseThemeSetting('主题', 'mono'); await chooseThemeSetting('明暗模式', 'system');
-    expect(document.documentElement.style.getPropertyValue('--canvas')).toBe('#F8FAFC');
-    systemDark = true; events.dispatchEvent(new Event('change')); await tick();
-    expect(document.documentElement.style.getPropertyValue('--canvas')).toBe('#0A0A0A');
-    expect(themeControl('明暗模式').value).toBe('system');
-    await chooseThemeSetting('明暗模式', 'light');
-    systemDark = false; events.dispatchEvent(new Event('change')); await tick();
-    systemDark = true; events.dispatchEvent(new Event('change')); await tick();
-    expect(document.documentElement.style.getPropertyValue('--canvas')).toBe('#F8FAFC');
-  });
-});
-
-describe('App 卡片模式', () => {
-  /** 用可控完成点验证可见性事务，避免真实计时或 jsdom 缺少 WAAPI 掩盖调用顺序。 */
-  function controlledAnimation() {
-    let finish!: () => void;
-    let fail!: (error: Error) => void;
-    const finished = new Promise<void>((resolve, reject) => { finish = resolve; fail = reject; });
-    return { finished, finish, fail, cancel: vi.fn() };
-  }
-
-  it('淡出完成后才切换原生窗口，新布局在淡入完成前保持禁止交互', async () => {
-    desktopBoundary.enabled = true;
-    await start(['- [ ] 平滑切换\n']);
-    const shell = document.querySelector<HTMLElement>('.app-shell')!;
-    for (const entering of [true, false]) {
-      const fadeOut = controlledAnimation();
-      const fadeIn = controlledAnimation();
-      const animate = vi.fn().mockReturnValueOnce(fadeOut).mockReturnValueOnce(fadeIn);
-      Object.defineProperty(shell, 'animate', { value: animate, configurable: true });
-      const native = entering ? desktopBoundary.enterCard : desktopBoundary.exitCard;
-      const nativePending = controlledAnimation();
-      native.mockReturnValueOnce(nativePending.finished);
-      const control = button(entering ? '进入卡片模式' : '退出卡片模式');
-      try {
-        control.click(); control.click(); await tick();
-        expect(animate).toHaveBeenCalledOnce();
-        expect(native).not.toHaveBeenCalled();
-        expect(shell.inert).toBe(true);
-        expect(shell.classList.contains('card-mode')).toBe(!entering);
-
-        fadeOut.finish();
-        await vi.waitFor(() => expect(native).toHaveBeenCalledWith({ animate: true }));
-        expect(native).toHaveBeenCalledOnce();
-        expect(fadeOut.cancel).not.toHaveBeenCalled();
-        expect(animate).toHaveBeenCalledOnce();
-        expect(shell.classList.contains('card-mode')).toBe(!entering);
-
-        nativePending.finish();
-        await vi.waitFor(() => expect(animate).toHaveBeenCalledTimes(2));
-        expect(fadeOut.cancel).toHaveBeenCalledOnce();
-        expect(shell.classList.contains('card-mode')).toBe(entering);
-        expect(shell.inert).toBe(true);
-        expect(control.disabled).toBe(true);
-        expect(fadeIn.cancel).not.toHaveBeenCalled();
-      } finally { fadeOut.finish(); nativePending.finish(); fadeIn.finish(); }
-      await vi.waitFor(() => expect(shell.inert).toBe(false));
-      expect(control.disabled).toBe(false);
-      expect(fadeIn.cancel).toHaveBeenCalledOnce();
-    }
-  });
-
-  it.each(['淡出', '原生'] as const)('%s失败时清理透明动画并恢复交互，保留原模式', async stage => {
-    desktopBoundary.enabled = true;
-    await start(['- [ ] 可恢复的动画失败\n']);
-    const shell = document.querySelector<HTMLElement>('.app-shell')!;
-    const fadeOut = controlledAnimation();
-    const animate = vi.fn().mockReturnValue(fadeOut);
-    Object.defineProperty(shell, 'animate', { value: animate, configurable: true });
-    if (stage === '原生') desktopBoundary.enterCard.mockRejectedValueOnce(new Error('原生切换失败'));
-    button('进入卡片模式').click(); await tick();
-    expect(shell.inert).toBe(true);
-    if (stage === '淡出') fadeOut.fail(new Error('动画已取消'));
-    else fadeOut.finish();
-    await vi.waitFor(() => expect(shell.inert).toBe(false));
-    expect(fadeOut.cancel).toHaveBeenCalledOnce();
-    expect(animate).toHaveBeenCalledOnce();
-    expect(shell.classList.contains('card-mode')).toBe(false);
-    expect(button('进入卡片模式').disabled).toBe(false);
-    expect(desktopBoundary.enterCard).toHaveBeenCalledTimes(stage === '原生' ? 1 : 0);
-  });
-
-  it('减少动态效果时跳过布局动画，并让原生进入和退出跳过动画', async () => {
-    desktopBoundary.enabled = true;
-    const media = window.matchMedia.bind(window);
-    vi.spyOn(window, 'matchMedia').mockImplementation(query => ({ ...media(query), matches: query === '(prefers-reduced-motion: reduce)' }));
-    await start(['- [ ] 减少动态效果\n']);
-    const shell = document.querySelector<HTMLElement>('.app-shell')!;
-    const animate = vi.fn();
-    Object.defineProperty(shell, 'animate', { value: animate, configurable: true });
-    button('进入卡片模式').click();
-    await vi.waitFor(() => expect(button('退出卡片模式').disabled).toBe(false));
-    expect(desktopBoundary.enterCard).toHaveBeenCalledWith({ animate: false });
-    button('退出卡片模式').click();
-    await vi.waitFor(() => expect(button('进入卡片模式').disabled).toBe(false));
-    expect(desktopBoundary.exitCard).toHaveBeenCalledWith({ animate: false });
-    expect(animate).not.toHaveBeenCalled();
-    expect(shell.inert).toBe(false);
-  });
-
-  it('源码按钮右侧的同一按钮切换卡片布局，保留编辑器与编辑保存能力', async () => {
-    await start(['- [ ] 原任务\n']);
-    const editor = documentInput();
-    const control = button('进入卡片模式');
-    expect(control.closest('.statusbar-actions')).not.toBeNull();
-    expect(button('查看源码').compareDocumentPosition(control) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
-    expect(control.querySelector('svg')).not.toBeNull();
-    expect(control.getAttribute('aria-pressed')).toBe('false');
-
-    control.click(); await tick();
-    await vi.waitFor(() => expect(button('退出卡片模式').getAttribute('aria-pressed')).toBe('true'));
-    expect(document.querySelector('.app-shell.card-mode')).not.toBeNull();
-    expect(document.querySelector('header.topbar')).toBeNull();
-    await vi.waitFor(() => expect(document.querySelector('aside.sidebar')).toBeNull());
-    expect(document.querySelector('.viewbar')).toBeNull();
-    expect(button('退出卡片模式')).toBe(control);
-    expect(documentInput()).toBe(editor);
-    expect(editor.getAttribute('contenteditable')).toBe('true');
-    expect(control.closest('footer')).not.toBeNull();
-    await paste('卡片中新增正文');
-    await vi.waitFor(async () => expect((await files.read(firstProject.path)).text).toContain('卡片中新增正文'));
-
-    control.click(); await tick();
-    await vi.waitFor(() => expect(button('进入卡片模式').getAttribute('aria-pressed')).toBe('false'));
-    expect(document.querySelector('.app-shell.card-mode')).toBeNull();
-    expect(document.querySelector('header.topbar')).not.toBeNull();
-    expect(document.querySelector('aside.sidebar')).not.toBeNull();
-    expect(document.querySelector('.viewbar')).not.toBeNull();
-    expect(documentInput()).toBe(editor);
-    expect(editor.textContent).toContain('卡片中新增正文');
-    expect(desktopBoundary.enterCard).not.toHaveBeenCalled();
-    expect(desktopBoundary.exitCard).not.toHaveBeenCalled();
-  });
-
-  it('原生进入或退出失败保留原模式，并允许用户重试', async () => {
-    desktopBoundary.enabled = true;
-    await start(['- [ ] 桌面任务\n']);
-    desktopBoundary.enterCard.mockRejectedValueOnce(new Error('进入卡片失败'));
-    button('进入卡片模式').click();
-    await vi.waitFor(() => expect(desktopBoundary.enterCard).toHaveBeenCalledOnce());
-    await vi.waitFor(() => expect(button('进入卡片模式').disabled).toBe(false));
-    expect(document.querySelector('.app-shell.card-mode')).toBeNull();
-
-    button('进入卡片模式').click();
-    await vi.waitFor(() => expect(button('退出卡片模式').disabled).toBe(false));
-    expect(document.querySelector('.app-shell.card-mode')).not.toBeNull();
-    desktopBoundary.exitCard.mockRejectedValueOnce(new Error('退出卡片失败'));
-    button('退出卡片模式').click();
-    await vi.waitFor(() => expect(desktopBoundary.exitCard).toHaveBeenCalledOnce());
-    await vi.waitFor(() => expect(button('退出卡片模式').disabled).toBe(false));
-    expect(document.querySelector('.app-shell.card-mode')).not.toBeNull();
-
-    button('退出卡片模式').click();
-    await vi.waitFor(() => expect(button('进入卡片模式').disabled).toBe(false));
-    expect(document.querySelector('.app-shell.card-mode')).toBeNull();
-    expect(desktopBoundary.enterCard).toHaveBeenCalledTimes(2);
-    expect(desktopBoundary.exitCard).toHaveBeenCalledTimes(2);
-  });
-
-  it('窗口切换等待期间禁止重复点击，完成后才更新模式', async () => {
-    desktopBoundary.enabled = true;
-    await start(['- [ ] 异步窗口任务\n']);
-    for (const entering of [true, false]) {
-      let finish!: () => void;
-      const pending = new Promise<void>(resolve => { finish = resolve; });
-      const transition = entering ? desktopBoundary.enterCard : desktopBoundary.exitCard;
-      transition.mockReturnValueOnce(pending);
-      const control = button(entering ? '进入卡片模式' : '退出卡片模式');
-      try {
-        // 连续事件在 Svelte 刷新 disabled 前到达，也只能启动一次窗口事务。
-        control.click(); control.click(); await tick();
-        expect(transition).toHaveBeenCalledOnce();
-        expect(control.disabled).toBe(true);
-        expect(document.querySelector('.app-shell')?.classList.contains('card-mode')).toBe(!entering);
-        control.click();
-        expect(transition).toHaveBeenCalledOnce();
-      } finally { finish(); }
-      await vi.waitFor(() => expect(button(entering ? '退出卡片模式' : '进入卡片模式').disabled).toBe(false));
-      expect(document.querySelector('.app-shell')?.classList.contains('card-mode')).toBe(entering);
-    }
-  });
-});
-
-describe('App 顶部工具栏窗口控制', () => {
-  it('浏览器预览不展示桌面窗口控制', async () => {
-    await start(['# 浏览器预览\n']);
-    expect(document.querySelector('[aria-label="窗口控制"]')).toBeNull();
-    expect(document.querySelector('[aria-label="关闭窗口"]')).toBeNull();
-  });
-
-  it('最小化与最大化按钮调用窗口边界，窗口状态变化后可还原', async () => {
-    desktopBoundary.enabled = true;
-    await start(['# 桌面窗口\n']);
-    await vi.waitFor(() => expect(desktopBoundary.resized).not.toBeNull());
-    const controls = document.querySelector('[aria-label="窗口控制"]');
-    expect(controls).not.toBeNull();
-    expect(controls?.closest('.topbar')).not.toBeNull();
-    expect(document.querySelector('.window-titlebar')).toBeNull();
-    expect(document.body.textContent?.match(/Taskrail/g)).toHaveLength(1);
-    expect(document.querySelector('.sidebar .brand')?.textContent).toContain('Taskrail');
-    button('最小化').click();
-    await vi.waitFor(() => expect(desktopBoundary.minimize).toHaveBeenCalledOnce());
-    button('最大化').click();
-    await vi.waitFor(() => expect(document.querySelector('[aria-label="还原"]')).not.toBeNull());
-    button('还原').click();
-    await vi.waitFor(() => expect(document.querySelector('[aria-label="最大化"]')).not.toBeNull());
-    expect(desktopBoundary.toggleMaximize).toHaveBeenCalledTimes(2);
-  });
-
-  it('点击关闭先保存正文，保存失败保留草稿并允许重试退出', async () => {
-    desktopBoundary.enabled = true;
-    const original = '# 退出保存\n';
-    await start([original]);
-    await vi.waitFor(() => expect(desktopBoundary.close).not.toBeNull());
-    const saveRecovery = vi.spyOn(BrowserFilePort.prototype, 'saveRecovery').mockRejectedValue(new Error('FILE_PERMISSION: 恢复目录不可写'));
-    await insertTask(); await paste('关闭时不能丢失的草稿');
-    button('关闭窗口').click();
-    await vi.waitFor(() => expect(document.querySelector('[role="alert"]')?.textContent).toContain('FILE_PERMISSION'));
-    expect(desktopBoundary.requestClose).toHaveBeenCalledOnce();
-    expect(desktopBoundary.destroy).not.toHaveBeenCalled();
-    expect(documentInput().textContent).toContain('关闭时不能丢失的草稿');
-    expect((await files.read(firstProject.path)).text).toBe(original);
-    saveRecovery.mockRestore();
-    button('关闭窗口').click();
-    await vi.waitFor(() => expect(desktopBoundary.destroy).toHaveBeenCalledOnce());
-    expect((await files.read(firstProject.path)).text).toBe(`${original}- [ ] 关闭时不能丢失的草稿`);
-  });
-});
-
-describe('App 桌面主题模板下载', () => {
-  const exportPath = '浏览器/custom-mono.json';
-
-  beforeEach(() => {
-    desktopBoundary.enabled = true;
-    // 桌面下载必须经过保存对话框；拦截浏览器导航，避免旧实现的无关 jsdom 报错掩盖断言。
-    vi.stubGlobal('URL', class extends URL {
-      static createObjectURL(): string { return 'blob:theme-template'; }
-      static revokeObjectURL(): void {}
+  it('正文段首缩进默认两字符，调整后即时写入样式变量并持久化', async () => {
+    const { port, saved } = createMemoryPort({
+      preferences: { ...emptyAppConfig().preferences, workspaceSection: 'settings' },
     });
-    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
-  });
-
-  it.each(['mono', 'neumorphic'])('选择位置后落盘 %s 完整双模式模板，并反馈保存成功', async (themeId) => {
-    const selected = builtInThemes.find(theme => theme.id === themeId)!;
-    const templateId = `custom-${themeId}`;
-    const selectedExportPath = `浏览器/${templateId}.json`;
-    desktopBoundary.save.mockResolvedValue(selectedExportPath);
-    await start(['# 下载模板\n']); button('设置').click(); await tick();
-    await chooseThemeSetting('主题', themeId);
-    await openThemeManager(); button('下载主题模板').click(); await tick();
-    await vi.waitFor(() => expect(desktopBoundary.save).toHaveBeenCalledWith({
-      title: '保存主题模板', defaultPath: `${templateId}.json`, filters: [{ name: 'JSON 主题', extensions: ['json'] }],
-    }));
-    await vi.waitFor(async () => {
-      const template = parseTheme((await files.read(selectedExportPath)).text);
-      expect(template.id).toBe(templateId);
-      expect(template.light).toEqual(selected.light);
-      expect(template.dark).toEqual(selected.dark);
-      expect(template.appearance).toEqual(selected.appearance);
-    });
-    expect(document.body.textContent).toContain('主题模板已保存');
-  });
-
-  it('取消保存不创建文件、不报成功，并允许重新下载', async () => {
-    await start(['# 取消下载\n']); button('设置').click(); await tick();
-    const create = vi.spyOn(BrowserFilePort.prototype, 'create');
-    await openThemeManager(); button('下载主题模板').click(); await tick();
-    await vi.waitFor(() => expect(desktopBoundary.save).toHaveBeenCalledOnce());
-    await vi.waitFor(() => expect(button('下载主题模板').disabled).toBe(false));
-    expect(create).not.toHaveBeenCalled();
-    expect(document.querySelector('.dialog-error')).toBeNull();
-    expect(document.body.textContent).not.toContain('主题模板已保存');
-  });
-
-  it('保存失败在设置中显示错误并保留已有文件', async () => {
-    await files.create(exportPath, '原有内容');
-    desktopBoundary.save.mockResolvedValue(exportPath);
-    await start(['# 保存失败\n']); button('设置').click(); await tick();
-    await openThemeManager(); button('下载主题模板').click(); await tick();
-    await vi.waitFor(() => expect(document.querySelector('.dialog-error')?.textContent).toContain('FILE_EXISTS'));
-    expect((await files.read(exportPath)).text).toBe('原有内容');
-    expect(button('下载主题模板').disabled).toBe(false);
-    expect(document.body.textContent).not.toContain('主题模板已保存');
-  });
-
-  it('系统保存对话框失败显示错误，并恢复下载按钮', async () => {
-    desktopBoundary.save.mockRejectedValue(new Error('保存对话框不可用'));
-    await start(['# 对话框失败\n']); button('设置').click(); await tick();
-    await openThemeManager(); button('下载主题模板').click(); await tick();
-    await vi.waitFor(() => expect(document.querySelector('.dialog-error')?.textContent).toContain('保存对话框不可用'));
-    expect(button('下载主题模板').disabled).toBe(false);
-  });
-});
-
-describe('App 真实编辑与文件闭环', () => {
-  it.each(['menu', 'shortcut'])('%s 在当前任务后新增，失焦后仍保留插入位置', async entry => {
-    const source = '- [ ] 甲\n- [ ] 乙\n- [ ] 丙';
-    await start([source], { [firstProject.id]: { mode: 'todo', cursor: source.indexOf('甲'), scrollTop: 0, folded: [] } });
-    if (entry === 'menu') await insertTask();
-    else await shortcut('n');
-    await paste('新任务');
-    await shortcut('s');
-    await savedText(firstProject, '- [ ] 甲\n- [ ] 新任务\n\n- [ ] 乙\n- [ ] 丙');
-    expect(document.activeElement).toBe(documentInput());
-  });
-
-  it('状态栏当前页字数随编辑、撤销和项目切换更新，源码切换保留统计', async () => {
-    await start(['中文 😀\n', '第二份\n']);
-    const status = () => button('快捷键').textContent;
-    expect(status()).toBe('3 字');
-    button('查看源码').click(); await tick();
-    expect(status()).toBe('3 字');
-    await paste('新增');
-    expect(status()).toBe('5 字');
-    await shortcut('z');
-    expect(status()).toBe('3 字');
-    await switchProject(secondProject);
-    expect(status()).toBe('3 字');
-    button(/^全部待办/).click(); await tick();
-    expect(status()).toBe('快捷键');
-  });
-
-  it('待办和归档各自计数，源码仅统计来源分区', async () => {
-    await start(['# 清单\n\n- [ ] 待办\n\n# 归档\n\n- [x] 已完成\n']);
-    const status = () => button('快捷键').textContent;
-    expect(status()).toBe('4 字');
-    button('查看源码').click(); await tick();
-    expect(status()).toBe('4 字');
-    button('返回预览').click(); await tick();
-    button(/^归档/).click(); await tick();
-    expect(status()).toBe('6 字');
-    button('查看源码').click(); await tick();
-    expect(status()).toBe('6 字');
-    button('返回预览').click(); await tick();
-    button(/^待办/).click(); await tick();
-    expect(status()).toBe('4 字');
-  });
-
-  it('画布快照不计入当前页字数，预览与源码一致', async () => {
-    await start(['# 画布字数\n\n- [ ] 任务\n']);
-    const status = () => button('快捷键').textContent;
-    expect(status()).toBe('6 字');
-    button('更多操作').click(); await tick(); button('插入画布').click(); await tick();
-    await vi.waitFor(() => expect(canvasBoundary.edit).not.toBeNull());
-    canvasBoundary.edit!([{ id: 'rectangle', type: 'rectangle', x: 0, y: 0, width: 80, height: 40 }]);
-    button('收起画布').click();
-    await vi.waitFor(() => expect(document.querySelector('.fm-canvas-card')).not.toBeNull());
-    expect(status()).toBe('6 字');
-    button('查看源码').click(); await tick();
-    expect(documentInput().textContent).toContain('```canvas');
-    expect(status()).toBe('6 字');
-  });
-
-  it.each(['todo', 'source'] as const)('%s 视图通过 Ctrl N 新增任务并支持撤销', async mode => {
-    await start(['# 清单\n']);
-    if (mode === 'source') { button('查看源码').click(); await tick(); }
-    await shortcut('n');
-    await shortcut('s');
-    await savedText(firstProject, '# 清单\n- [ ] ');
-    expect(document.activeElement).toBe(documentInput());
-    await shortcut('z');
-    await shortcut('s');
-    await savedText(firstProject, '# 清单\n');
-  });
-
-  it('新增任务支持 Command N，并忽略组合输入、长按和额外修饰键', async () => {
-    await start(['# 清单\n']);
-    for (const modifiers of [{ isComposing: true }, { repeat: true }, { altKey: true }, { shiftKey: true }]) {
-      documentInput().dispatchEvent(new KeyboardEvent('keydown', { key: 'n', ctrlKey: true, bubbles: true, cancelable: true, ...modifiers }));
-    }
-    button('查找项目').click(); await tick();
-    document.getElementById('project-filter')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'n', ctrlKey: true, bubbles: true, cancelable: true }));
-    await shortcut('s');
-    await savedText(firstProject, '# 清单\n');
-    documentInput().click(); await tick();
-    const event = new KeyboardEvent('keydown', { key: 'n', metaKey: true, bubbles: true, cancelable: true });
-    documentInput().dispatchEvent(event); await tick();
-    expect(event.defaultPrevented).toBe(true);
-    await shortcut('s');
-    await savedText(firstProject, '# 清单\n- [ ] ');
-  });
-
-  it('快捷键弹窗仅显示按键说明，打开时和全部待办中不新增任务', async () => {
-    await start(['# 清单\n']);
-    const help = button('快捷键');
-    expect(help.closest('footer')).not.toBeNull();
-    expect(help.textContent).toBe('2 字');
-    help.click(); await tick();
-    const modal = document.querySelector('[role="dialog"]')!;
-    expect(modal.querySelector('h2')?.textContent).toBe('快捷键');
-    expect(modal.querySelectorAll('p')).toHaveLength(0);
-    expect(modal.querySelector('dl')?.textContent).toContain('Ctrl N新增任务');
-    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'n', ctrlKey: true, bubbles: true, cancelable: true }));
-    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })); await tick();
-    button(/^全部待办/).click(); await tick();
-    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'n', ctrlKey: true, bubbles: true, cancelable: true }));
-    await switchProject(firstProject);
-    await shortcut('s');
-    await savedText(firstProject, '# 清单\n');
-  });
-
-  it('项目搜索按需打开，搜索内部点击保留、外部点击关闭且清除隐藏筛选', async () => {
-    await start(['# 甲\n', '# 乙\n']);
-    expect(document.getElementById('project-filter')).toBeNull();
-    button('查找项目').click(); await tick();
-    const filter = document.getElementById('project-filter') as HTMLInputElement;
-    expect(document.activeElement).toBe(filter);
-    filter.value = '乙'; filter.dispatchEvent(new Event('input', { bubbles: true })); await tick();
-    expect(document.querySelectorAll('.project-list button')).toHaveLength(1);
-    filter.click(); await tick();
-    expect(document.getElementById('project-filter')).toBe(filter);
-    await switchProject(secondProject);
-    expect(document.getElementById('project-filter')).toBeNull();
-    expect(document.querySelectorAll('.project-list button')).toHaveLength(2);
-    await shortcut('p');
-    expect(document.getElementById('project-filter')).not.toBeNull();
-    button(/^搜索/).click(); await tick();
-    expect(document.getElementById('project-filter')).toBeNull();
-    const globalSearch = document.getElementById('global-search') as HTMLInputElement;
-    globalSearch.click(); await tick();
-    expect(document.getElementById('global-search')).toBe(globalSearch);
-    documentInput().click(); await tick();
-    expect(document.getElementById('global-search')).toBeNull();
-  });
-
-  it('顶部星号跟随正文保存，底部源码入口切换真实编辑视图', async () => {
-    await start(['# 清单\n']);
-    expect(document.querySelector('.unsaved-mark')).toBeNull();
-    const sourceButton = button('查看源码');
-    expect(sourceButton.closest('footer')).not.toBeNull();
-    sourceButton.click(); await tick();
-    expect(sourceButton.getAttribute('aria-pressed')).toBe('true');
-    await insertTask();
-    expect(document.querySelector('.breadcrumb [aria-label="未保存"]')).not.toBeNull();
-    await shortcut('s');
-    await savedText(firstProject, '# 清单\n- [ ] ');
-    await vi.waitFor(() => expect(document.querySelector('.unsaved-mark')).toBeNull());
-    sourceButton.click(); await tick();
-    expect(sourceButton.getAttribute('aria-pressed')).toBe('false');
-    expect(button(/^待办/).classList.contains('tab-active')).toBe(true);
-  });
-
-  it('围栏回车补全和语言输入通过真实保存路径持久化', async () => {
-    const source = '# 代码\n\n```';
-    await start([source], { [firstProject.id]: { mode: 'todo', cursor: source.length, scrollTop: 0, folded: [] } });
-    documentInput().focus();
-    documentInput().dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
-    await tick(); await paste('console.log(1)');
-    const input = document.querySelector<HTMLInputElement>('input[aria-label="代码块语言"]')!;
-    expect(input).not.toBeNull();
-    input.focus(); input.value = 'javascript';
-    input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText' }));
-    // 预览模式补全围栏时保留块后续写段落，保存和重启均应保留其分隔空行。
-    const expected = '# 代码\n\n```javascript\nconsole.log(1)\n```\n\n';
-    await savedText(firstProject, expected);
-    await remount();
-    expect((await files.read(firstProject.path)).text).toBe(expected);
-    expect(documentInput().textContent).toContain('console.log(1)');
-  });
-
-  it('新建清单的同名文档标题在全部待办只显示一次，定位和重启保留正文', async () => {
-    await start(['- [ ] 原项目任务\n']);
-    button('新增项目').click(); await tick();
-    const name = document.querySelector<HTMLInputElement>('[role="dialog"] input')!;
-    name.value = '新项目'; name.dispatchEvent(new Event('input', { bubbles: true })); await tick();
-    button('新建清单文件').click(); await tick();
-    await vi.waitFor(() => expect(document.querySelector('.file-path')).not.toBeNull());
-    const path = document.querySelector('.file-path')!.textContent!;
-    button('添加项目').click(); await tick();
-    await vi.waitFor(() => expect(crumbName()).toBe('新项目'));
-    expect((await files.read(path)).text).toBe('# 新项目\n\n- [ ] \n');
-    button('查看源码').click(); await tick();
-    documentInput().focus();
-    documentInput().dispatchEvent(new KeyboardEvent('keydown', { key: 'End', code: 'End', ctrlKey: true, bubbles: true, cancelable: true }));
-    documentInput().dispatchEvent(new KeyboardEvent('keydown', { key: 'Backspace', code: 'Backspace', bubbles: true, cancelable: true }));
-    await tick(); await paste('新清单任务');
-    await vi.waitFor(async () => expect((await files.read(path)).text).toContain('新清单任务'));
-    const source = (await files.read(path)).text;
-    expect(source).toBe('# 新项目\n\n- [ ] 新清单任务');
-    button('返回预览').click(); await tick();
-    button(/全部待办/).click(); await tick();
-    await vi.waitFor(() => expect(document.querySelectorAll('.aggregate-task')).toHaveLength(2));
-    const group = [...document.querySelectorAll('.aggregate-group')].find(node => node.querySelector('h2')?.textContent?.includes('新项目'))!;
-    expect(group.querySelectorAll('h2')).toHaveLength(1);
-    expect(group.querySelector('.aggregate-section-heading')).toBeNull();
-    expect(group.querySelector('.aggregate-section-task')).toBeNull();
-    group.querySelector<HTMLButtonElement>('.aggregate-task')!.click(); await tick();
-    await vi.waitFor(() => expect(documentInput().textContent).toContain('新清单任务'));
-    expect(documentInput().textContent).toContain('新项目');
-    await vi.waitFor(async () => {
-      const config = (await files.loadConfig())!;
-      const project = config.projects.find(project => project.path === path)!;
-      expect(config.projectViews[project.id].cursor).toBe(source.indexOf('- [ ]'));
-    });
-    await remount();
-    expect((await files.read(path)).text).toBe(source);
-    button(/全部待办/).click(); await tick();
-    await vi.waitFor(() => expect(document.querySelectorAll('.aggregate-task')).toHaveLength(2));
-    expect(document.querySelector('.aggregate-section-heading')).toBeNull();
-  });
-
-  it.each([`# ${secondProject.name}`, `\n\n${secondProject.name}\n===`])('全部待办隐藏一级标题，保留二级章节与未分组任务：%s', async title => {
-    const source = `${title}\n\n- [ ] 文档任务\n\n## ${secondProject.name}\n\n- [ ] 子章节任务\n\n# ${secondProject.name}\n\n- [ ] 后续章节任务\n`;
-    await start(['- [ ] 当前任务\n', source]);
-    button(/全部待办/).click(); await tick();
-    await vi.waitFor(() => expect(document.querySelectorAll('.aggregate-task')).toHaveLength(4));
-    const group = [...document.querySelectorAll('.aggregate-group')].find(node => node.querySelector('h2')?.textContent?.includes(secondProject.name))!;
-    expect([...group.querySelectorAll('.aggregate-section-heading, .aggregate-title')].map(node => node.textContent)).toEqual(['文档任务', secondProject.name, '子章节任务', '后续章节任务']);
-    expect(group.querySelector('.aggregate-task')?.classList.contains('aggregate-section-task')).toBe(false);
-    expect((await files.read(secondProject.path)).text).toBe(source);
-  });
-
-  it.each([
-    `# 不同文档标题\n\n- [ ] 保留章节任务\n`,
-    `开场说明\n\n# ${firstProject.name}\n\n- [ ] 保留章节任务\n`,
-    `> # ${firstProject.name}\n\n- [ ] 保留章节任务\n`,
-  ])('全部待办不显示一级标题，任务直属项目分组：%s', async source => {
-    await start([source]);
-    button(/全部待办/).click(); await tick();
-    await vi.waitFor(() => expect(document.querySelectorAll('.aggregate-task')).toHaveLength(1));
-    expect(document.querySelectorAll('.aggregate-section-heading')).toHaveLength(0);
-    expect(document.querySelector('.aggregate-task')?.classList.contains('aggregate-section-task')).toBe(false);
-  });
-
-  it.each([
-    `## ${firstProject.name}\n\n- [ ] 保留章节任务\n`,
-    `> ## ${firstProject.name}\n\n- [ ] 保留章节任务\n`,
-  ])('全部待办保留二级及以下标题章节：%s', async source => {
-    await start([source]);
-    button(/全部待办/).click(); await tick();
-    await vi.waitFor(() => expect(document.querySelectorAll('.aggregate-task')).toHaveLength(1));
-    expect(document.querySelectorAll('.aggregate-section-heading')).toHaveLength(1);
-    expect(document.querySelector('.aggregate-task')?.classList.contains('aggregate-section-task')).toBe(true);
-  });
-
-  it('全部待办按章节位置显示段首标题，同名章节不合并且任务保持原序', async () => {
-    await start(['- [ ] 无章节任务\n\n## 清单\n\n- [ ] 第一项\n- [ ] 第二项\n\n## 清单\n\n- [ ] 第三项\n\n## 已完成章节\n\n- [x] 已完成\n']);
-    button(/全部待办/).click(); await tick();
-    await vi.waitFor(() => expect(document.querySelectorAll('.aggregate-task')).toHaveLength(4));
-    const content = [...document.querySelectorAll('.aggregate-section-heading, .aggregate-title')].map(node => node.textContent);
-    expect(content).toEqual(['无章节任务', '清单', '第一项', '第二项', '清单', '第三项']);
-    expect(document.querySelector('.aggregate-task small')).toBeNull();
-  });
-
-  it('全部待办按任务层级缩进并绘制父子连线，末行干线在分支处收尾', async () => {
-    await start(['# 清单\n\n- [ ] 父任务\n  - [ ] 子任务一\n  - [ ] 子任务二\n    - [ ] 孙任务\n- [ ] 顶层任务\n\n## 章节\n\n- [ ] 章节任务\n']);
-    button(/全部待办/).click(); await tick();
-    await vi.waitFor(() => expect(document.querySelectorAll('.aggregate-task')).toHaveLength(6));
-    const rows = [...document.querySelectorAll<HTMLButtonElement>('.aggregate-task')];
-    const guides = (row: HTMLButtonElement): string[] => [...row.querySelectorAll<HTMLElement>('.task-guide')]
-      .map(guide => `${guide.style.getPropertyValue('--level')}${guide.classList.contains('task-guide-drop') ? '下延' : guide.classList.contains('task-guide-end') ? '收尾' : '延续'}`);
-    expect(rows.map(row => row.style.getPropertyValue('--depth'))).toEqual(['0', '1', '1', '2', '0', '0']);
-    expect(rows.slice(1, 4).map(row => row.classList.contains('aggregate-nested'))).toEqual([true, true, true]);
-    // 一级标题不入链：父任务行从复选框下延连线；孙任务行右侧两级任务干线没有后续子树；章节任务的章节干线在末行收尾。
-    expect(guides(rows[0])).toEqual(['1下延']);
-    expect(guides(rows[3])).toEqual(['1收尾', '2收尾']);
-    expect(guides(rows[4])).toEqual([]);
-    expect(guides(rows[5])).toEqual(['0收尾']);
-    // 点击子任务仍按原文定位到该子任务本身。
-    rows[1].click(); await tick();
-    await vi.waitFor(() => expect(documentInput().textContent).toContain('子任务一'));
-  });
-
-  it('全部待办按标题层级分级显示章节链并缩进直属任务', async () => {
-    await start(['## 章节甲\n\n- [ ] 任务一\n\n### 子章节乙\n\n- [ ] 任务二\n\n#### 深层丙\n\n- [ ] 任务三\n\n# 独立一级\n\n## 章节丁\n\n- [ ] 任务四\n']);
-    button(/全部待办/).click(); await tick();
-    await vi.waitFor(() => expect(document.querySelectorAll('.aggregate-task')).toHaveLength(4));
-    const headings = [...document.querySelectorAll<HTMLElement>('.aggregate-section-heading')];
-    expect(headings.map(heading => `${heading.style.getPropertyValue('--depth')}:${heading.textContent}`)).toEqual(['0:章节甲', '1:子章节乙', '2:深层丙', '0:章节丁']);
-    const rows = [...document.querySelectorAll<HTMLButtonElement>('.aggregate-task')];
-    expect(rows.map(row => row.style.getPropertyValue('--depth'))).toEqual(['0', '1', '2', '0']);
-    const guides = (row: HTMLButtonElement): string[] => [...row.querySelectorAll<HTMLElement>('.task-guide')]
-      .map(guide => `${guide.style.getPropertyValue('--level')}${guide.classList.contains('task-guide-drop') ? '下延' : guide.classList.contains('task-guide-end') ? '收尾' : '延续'}`);
-    // 每级章节干线随包含它的后续行延续；进入章节丁后甲乙丙三级干线在最后一行分支处收尾。
-    expect(guides(rows[0])).toEqual(['0延续']);
-    expect(guides(rows[1])).toEqual(['0延续', '1延续']);
-    expect(guides(rows[2])).toEqual(['0收尾', '1收尾', '2收尾']);
-    expect(guides(rows[3])).toEqual(['0收尾']);
-  });
-
-  it('全部待办中普通列表桥接的任务仍按任务父级缩进连线', async () => {
-    await start(['- [ ] 父任务\n  - 普通说明\n    - [ ] 桥接子任务\n']);
-    button(/全部待办/).click(); await tick();
-    await vi.waitFor(() => expect(document.querySelectorAll('.aggregate-task')).toHaveLength(2));
-    const rows = [...document.querySelectorAll<HTMLButtonElement>('.aggregate-task')];
-    expect(rows.map(row => row.style.getPropertyValue('--depth'))).toEqual(['0', '1']);
-    expect([...rows[1].querySelectorAll<HTMLElement>('.task-guide')].map(guide => guide.style.getPropertyValue('--level'))).toEqual(['1']);
-  });
-
-  it('归档源码仅显示归档分区，切换项目和重启后返回来源预览', async () => {
-    const source = '- [ ] 待办独有文字\n\n# 归档\n\n- [x] 归档独有文字\n';
-    await start([source, '- [ ] 第二项目\n']);
-    button(/^归档/).click(); await tick();
-    button('查看源码').click(); await tick();
-    expect(button('返回预览').getAttribute('aria-pressed')).toBe('true');
-    expect(button(/^归档/).classList.contains('tab-active')).toBe(true);
-    expect(documentInput().textContent).toContain('[x] 归档独有文字');
-    expect(documentInput().textContent).not.toContain('待办独有文字');
-    await switchProject(secondProject); await switchProject(firstProject);
-    expect(button('返回预览').getAttribute('aria-pressed')).toBe('true');
-    await vi.waitFor(async () => expect((await files.loadConfig())?.projectViews[firstProject.id].sourceView).toBe('archive'));
-    expect((await files.loadConfig())?.projectViews[firstProject.id].sourceReturn).toEqual(expect.objectContaining({ cursor: expect.any(Number), scrollTop: expect.any(Number), anchor: expect.any(Number), offset: expect.any(Number) }));
-    await remount();
-    expect(button('返回预览').getAttribute('aria-pressed')).toBe('true');
-    button('返回预览').click(); await tick();
-    expect(button(/^归档/).classList.contains('tab-active')).toBe(true);
-    expect(documentInput().textContent).toContain('归档独有文字');
-    expect(documentInput().textContent).not.toContain('[x]');
-    expect((await files.read(firstProject.path)).text).toBe(source);
-  });
-
-  it('旧源码配置默认显示待办源码，并可返回待办预览', async () => {
-    await start(['- [ ] 待办原文\n\n# 归档\n\n- [x] 归档原文\n'], { [firstProject.id]: { mode: 'source', cursor: 0, scrollTop: 0, folded: [] } });
-    expect(documentInput().textContent).toContain('[ ] 待办原文');
-    expect(documentInput().textContent).not.toContain('归档原文');
-    button('返回预览').click(); await tick();
-    expect(button(/^待办/).classList.contains('tab-active')).toBe(true);
-  });
-
-  it('全部待办隐藏未打开文件的系统归档标题，保留同名用户子章节', async () => {
-    await start(['- [ ] 当前任务\n', '# 归档\n\n- [ ] 待恢复任务\n\n## 归档\n\n- [ ] 用户章节任务\n']);
-    button(/全部待办/).click(); await tick();
-    await vi.waitFor(() => expect(document.querySelectorAll('.aggregate-task')).toHaveLength(3));
-    const group = [...document.querySelectorAll('.aggregate-group')].find(node => node.querySelector('h2')?.textContent?.includes(secondProject.name))!;
-    expect([...group.querySelectorAll('.aggregate-section-heading, .aggregate-title')].map(node => node.textContent)).toEqual(['待恢复任务', '归档', '用户章节任务']);
-    expect(group.querySelector('.aggregate-task')?.classList.contains('aggregate-section-task')).toBe(false);
-  });
-
-  it('全部待办渲染组合 Markdown 和文档引用，点击样式文字仍定位原文', async () => {
-    const source = '# 清单\n\n- [ ] **粗体与 *斜体*** ~~删除~~ `代码` [链接][ref] $x^2$ ![示意](./image.png)\n\n[ref]: https://example.com\n';
-    await start([source]);
-    button(/全部待办/).click(); await tick();
-    await vi.waitFor(() => expect(document.querySelector('.aggregate-task strong')?.textContent).toBe('粗体与 斜体'));
-    const row = document.querySelector<HTMLButtonElement>('.aggregate-task')!;
-    expect(row.querySelector('strong em')?.textContent).toBe('斜体');
-    expect(row.querySelector('del')?.textContent).toBe('删除');
-    expect(row.querySelector('code')?.textContent).toBe('代码');
-    expect(row.querySelector('.fm-link')?.textContent).toBe('链接');
-    expect(row.querySelector('.katex')).not.toBeNull();
-    expect(row.querySelector('img')?.getAttribute('src')).toBe('/浏览器/image.png');
-    expect(row.querySelector('a, button, input')).toBeNull();
-    row.querySelector('em')?.dispatchEvent(new MouseEvent('click', { bubbles: true })); await tick();
-    await vi.waitFor(() => expect(crumbName()).toBe(firstProject.name));
-    expect((await files.read(firstProject.path)).text).toBe(source);
-  });
-  it('聚合标题限制在首行，转义 HTML 且不激活危险链接和图片', async () => {
-    await start(['- [ ] [首行\n  后续正文](https://example.com)\n- [ ] <img src=x onerror=alert(1)> [危险](javascript:alert) ![危险图片](javascript:alert)\n']);
-    button(/全部待办/).click(); await tick();
-    await vi.waitFor(() => expect(document.querySelectorAll('.aggregate-task')).toHaveLength(2));
-    const titles = [...document.querySelectorAll('.aggregate-title')];
-    expect(titles[0].textContent).toBe('首行');
-    expect(titles[1].textContent).toContain('<img src=x onerror=alert(1)>');
-    expect(titles[1].querySelector('img, a, script')).toBeNull();
-  });
-
-  it('勾选和文本输入实际保存，重启后从原文件恢复任务与归档', async () => {
-    const original = '# 甲清单\n\n- [ ] 完成并重开\n- [ ] 持续编辑\n';
-    await start([original]);
-    button('完成任务').click(); await tick();
-    const completed = '# 甲清单\n\n- [ ] 持续编辑\n\n# 归档\n\n- [x] 完成并重开\n';
-    await savedText(firstProject, completed);
-
-    await insertTask(); await paste('输入实际落盘');
-    const finalText = '# 甲清单\n- [ ] 输入实际落盘\n\n- [ ] 持续编辑\n\n# 归档\n\n- [x] 完成并重开\n';
-    await savedText(firstProject, finalText);
-    await remount();
-    expect(documentInput().textContent).toContain('输入实际落盘');
-    button(/^归档/).click(); await tick();
-    expect(documentInput().textContent).toContain('完成并重开');
-    expect(document.querySelector('[role="checkbox"][aria-checked="true"]')).not.toBeNull();
-    expect((await files.read(firstProject.path)).text).toBe(finalText);
-  });
-
-  it('归档省略一级标题并持久化子标题路径，重启后恢复到原一级标题下唯一章节', async () => {
-    await start(['# 工作\n\n## 开发\n\n### 本周\n\n- [ ] 保留路径\n  正文\n\n# 笔记\n\n- [ ] 留在待办\n']);
-    button('完成任务').click(); await tick();
-    await vi.waitFor(async () => {
-      const text = (await files.read(firstProject.path)).text;
-      expect(text).toContain('# 归档\n<!-- taskrail:archive -->\n\n## 开发\n\n### 本周\n\n- [x] 保留路径\n  正文');
-      expect(text.slice(text.indexOf('# 归档'))).not.toContain('# 工作');
-    });
-    await remount();
-    button(/^归档/).click(); await tick();
-    expect(documentInput().textContent).not.toContain('工作');
-    expect(documentInput().textContent).toContain('开发');
-    expect(documentInput().textContent).toContain('本周');
-    expect(documentInput().textContent).toContain('保留路径');
-    expect(documentInput().textContent).not.toContain('笔记');
-    button('恢复任务').click(); await tick();
-    await vi.waitFor(async () => {
-      const text = (await files.read(firstProject.path)).text;
-      expect(text).toContain('### 本周\n\n- [ ] 保留路径\n  正文');
-      expect(text.indexOf('保留路径')).toBeLessThan(text.indexOf('# 笔记'));
-      const active = text.slice(0, text.indexOf('# 归档'));
-      expect(active).toContain('# 工作\n\n## 开发\n\n### 本周\n\n- [ ] 保留路径\n  正文');
-      expect(active.match(/^## 开发$/gm)).toHaveLength(1);
-    });
-    button(/^待办/).click(); await tick();
-    expect(documentInput().textContent).toContain('保留路径');
-    // 视图配置异步写入；重启验收必须等待待办模式落盘，避免仍以旧归档模式打开已恢复的任务。
-    await vi.waitFor(async () => expect((await files.loadConfig())?.projectViews[firstProject.id].mode).toBe('todo'));
-    await remount();
-    expect(documentInput().textContent).toContain('工作');
-    expect(documentInput().textContent).toContain('开发');
-    expect(documentInput().textContent).toContain('保留路径');
-  });
-
-  it('子任务保存后仍保留拓扑，整体摘要和展开状态重启恢复，整树完成才前插归档', async () => {
-    const original = '- [ ] 父\n  - [ ] 甲\n    甲正文\n  - [ ] 乙\n    乙正文\n\n# 归档\n\n- [x] 旧归档\n';
-    await start([original]);
-    const completeChild = () => (documentInput().querySelectorAll<HTMLButtonElement>('[role="checkbox"][aria-checked="false"]')[1]).click();
-    completeChild(); await tick();
-    const first = '- [ ] 父\n  - [ ] 乙\n    乙正文\n  - [x] 甲\n    甲正文\n\n# 归档\n\n- [x] 旧归档\n';
-    await savedText(firstProject, first);
-    expect(documentInput().textContent).toMatch(/已完成\s*1\s*项/);
-    expect(documentInput().textContent).not.toContain('甲');
-    completeChild(); await tick();
-    const completedChildren = '- [ ] 父\n  - [x] 乙\n    乙正文\n  - [x] 甲\n    甲正文\n\n# 归档\n\n- [x] 旧归档\n';
-    await savedText(firstProject, completedChildren);
-    // 正文已落盘后仍须等待配置写入，再核对文件，覆盖完成动作后的异步归档路径。
-    await vi.waitFor(async () => expect((await files.loadConfig())?.projectViews[firstProject.id].folded).toHaveLength(0));
-    expect((await files.read(firstProject.path)).text).toBe(completedChildren);
-    await remount();
-    expect((await files.read(firstProject.path)).text).toBe(completedChildren);
-    expect(documentInput().textContent).toMatch(/已完成\s*2\s*项/);
-    expect(documentInput().textContent).not.toContain('甲');
-    expect(documentInput().textContent).not.toContain('乙');
-    expect(documentInput().textContent).not.toContain('甲正文');
-    expect(documentInput().textContent).not.toContain('乙正文');
-    expect(button(/已完成\s*2\s*项/).getAttribute('aria-expanded')).toBe('false');
-    // 等待初次载入的配置定时器结束，再点击摘要，验证纯展开动作也会自行持久化。
-    await new Promise(resolve => setTimeout(resolve, 350));
-    button(/已完成\s*2\s*项/).click(); await tick();
-    expect(button(/已完成\s*2\s*项/).getAttribute('aria-expanded')).toBe('true');
-    expect(documentInput().textContent).toContain('甲正文');
-    expect(documentInput().textContent).toContain('乙正文');
-    expect(documentInput().textContent!.indexOf('乙')).toBeLessThan(documentInput().textContent!.indexOf('甲'));
-    expect(documentInput().querySelectorAll('[role="checkbox"][aria-checked="true"]')).toHaveLength(2);
-    await vi.waitFor(async () => expect((await files.loadConfig())?.projectViews[firstProject.id].expandedCompletedGroups).toHaveLength(1));
-    await remount();
-    expect(documentInput().textContent).toContain('甲正文');
-    expect(documentInput().textContent).toContain('乙正文');
-    button('完成任务').click(); await tick();
-    await vi.waitFor(async () => {
-      const text = (await files.read(firstProject.path)).text;
-      expect(text.indexOf('# 归档')).toBeLessThan(text.indexOf('- [x] 父'));
-      expect(text.indexOf('- [x] 父')).toBeLessThan(text.indexOf('旧归档'));
-      expect(text).toContain('- [x] 父\n  - [x] 乙\n    乙正文\n  - [x] 甲\n    甲正文\n');
-    });
-    button(/^归档/).click(); await tick();
-    expect(documentInput().textContent).toContain('父');
-    expect(documentInput().textContent).toContain('甲正文');
-  });
-
-  it('打开旧布局和载入外部修改后，经保存器写回文末归档分区', async () => {
-    await start(['- [x] 历史完成\n- [ ] 保留待办\n']);
-    const normalized = '- [ ] 保留待办\n\n# 归档\n\n- [x] 历史完成\n';
-    await savedText(firstProject, normalized);
-    const baseline = await files.read(firstProject.path);
-    await files.write(firstProject.path, '- [x] 外部完成\n- [ ] 新待办\n', baseline.revision);
-    window.dispatchEvent(new StorageEvent('storage', { key: `taskrail:file:${firstProject.path}` }));
-    await savedText(firstProject, '- [ ] 新待办\n\n# 归档\n\n- [x] 外部完成\n');
-    expect(documentInput().textContent).toContain('新待办');
-  });
-
-  it('从源码项目首次切入其他项目，归档整理仍经保存器落盘', async () => {
-    await start(['- [ ] 源码项目\n', '- [x] 已完成\n- [ ] 待处理\n']);
-    button('查看源码').click(); await tick();
-    await switchProject(secondProject);
-    await savedText(secondProject, '- [ ] 待处理\n\n# 归档\n\n- [x] 已完成\n');
-  });
-
-  it('从归档视图搜索待办，定位后输入仍落在待办原文', async () => {
-    const source = '- [ ] 定位待办\n\n# 归档\n\n- [x] 完成任务\n';
-    await start([source]);
-    button(/^归档/).click(); await tick();
-    button(/^搜索/).click(); await tick();
-    const search = document.querySelector<HTMLInputElement>('[aria-label="搜索所有项目"]')!;
-    search.value = '定位待办'; search.dispatchEvent(new Event('input', { bubbles: true }));
-    await vi.waitFor(() => expect(document.querySelector('.search-results')?.textContent).toContain('定位待办'));
-    button(/待办.*定位待办/).click(); await tick();
-    await vi.waitFor(() => expect(button(/^待办/).classList.contains('tab-active')).toBe(true));
-    await paste('定位证据\n'); await shortcut('s');
-    await savedText(firstProject, `定位证据\n${source}`);
-  });
-
-  it('保存前切换项目不丢草稿，撤销只影响当前项目', async () => {
-    const first = '# 甲清单\n\n- [ ] 甲原始任务\n';
-    const second = '# 乙清单\n\n- [ ] 乙原始任务\n';
-    await start([first, second]);
-    await insertTask(); await paste('甲的未保存草稿');
-    await switchProject(secondProject);
-    expect(documentInput().textContent).toContain('乙原始任务');
-    expect(documentInput().textContent).not.toContain('甲的未保存草稿');
-    await insertTask(); await paste('乙的未保存草稿');
-    await shortcut('z');
-    expect(documentInput().textContent).not.toContain('乙的未保存草稿');
-    await shortcut('s');
-    await savedText(secondProject, '# 乙清单\n- [ ] \n\n- [ ] 乙原始任务\n');
-
-    await switchProject(firstProject);
-    expect(documentInput().textContent).toContain('甲的未保存草稿');
-    await shortcut('z'); await shortcut('s');
-    await savedText(firstProject, '# 甲清单\n- [ ] \n\n- [ ] 甲原始任务\n');
-    expect((await files.read(secondProject.path)).text).toBe('# 乙清单\n- [ ] \n\n- [ ] 乙原始任务\n');
-    await switchProject(secondProject);
-    expect(documentInput().textContent).toContain('乙原始任务');
-    expect(documentInput().textContent).not.toContain('甲原始任务');
-  });
-
-  it('跨项目搜索定位可展开已持久化折叠，搜索默认排除归档', async () => {
-    const first = '# 甲清单\n\n- [ ] 甲任务\n';
-    const second = '# 乙章节\n\n- [ ] 父任务\n  - [ ] 独特检索目标\n- [x] 独特归档目标\n';
-    const folded = 'item:- [ ] 父任务\n  - [ ] 独特检索目标';
-    await start([first, second], { [secondProject.id]: { mode: 'todo', cursor: 0, scrollTop: 0, folded: [folded] } });
-    button(/^搜索/).click(); await tick();
-    const search = document.querySelector<HTMLInputElement>('[aria-label="搜索所有项目"]')!;
-    search.value = '独特'; search.dispatchEvent(new Event('input', { bubbles: true })); await tick();
-    await vi.waitFor(() => expect(document.querySelector('.search-results')?.textContent).toContain('独特检索目标'));
-    expect(document.querySelector('.search-results')?.textContent).not.toContain('独特归档目标');
-    button(/待办.*独特检索目标/).click(); await tick();
-    await vi.waitFor(() => expect(crumbName()).toBe(secondProject.name));
-    expect(documentInput().textContent).toContain('独特检索目标');
-    expect(document.querySelector('[aria-label="折叠条目"][aria-expanded="true"]')).not.toBeNull();
-    expect(document.activeElement).toBe(documentInput());
-
-    button(/^搜索/).click(); await tick();
-    const include = [...document.querySelectorAll('label')].find(label => label.textContent?.includes('包含归档'))?.querySelector<HTMLInputElement>('input');
-    expect(include).toBeDefined(); include!.click(); await tick();
-    await vi.waitFor(() => expect(document.querySelector('.search-results')?.textContent).toContain('独特归档目标'));
-    button(/已完成.*独特归档目标/).click(); await tick();
-    await vi.waitFor(() => expect(document.querySelector('[role="checkbox"][aria-checked="true"]')).not.toBeNull());
-    expect(documentInput().getAttribute('contenteditable')).toBe('false');
-    expect(documentInput().textContent).toContain('独特归档目标');
-  });
-});
-
-
-describe('项目操作失败与聚合视图边界', () => {
-  it.each([false, true])('Android 删除私有副本，失败时保留项目和正文（失败=%s）', async fail => {
-    desktopBoundary.enabled = true;
-    vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('Android');
-    const remove = vi.spyOn(AndroidFilePort.prototype, 'removeOwned').mockImplementation(async path => {
-      if (fail) throw new Error('私有文件删除失败');
-      localStorage.removeItem(`taskrail:file:${path}`);
-      await files.clearRecovery(path);
-    });
-    await start(['甲正文', '乙正文']);
-    button('更多操作').click(); await tick(); button('删除项目').click(); await tick();
-    expect(document.querySelector('.modal')?.textContent).toContain('将删除手机上的文档和恢复草稿');
-    button('删除项目').click();
-    await vi.waitFor(() => expect(remove).toHaveBeenCalledWith(firstProject.path));
-    if (fail) {
-      await vi.waitFor(() => expect(document.querySelector('.modal')?.textContent).toContain('私有文件删除失败'));
-      expect((await files.loadConfig())?.projects.some(project => project.id === firstProject.id)).toBe(true);
-      expect((await files.read(firstProject.path)).text).toBe('甲正文');
-    } else {
-      await vi.waitFor(async () => expect((await files.loadConfig())?.projects.some(project => project.id === firstProject.id)).toBe(false));
-      expect(localStorage.getItem(`taskrail:file:${firstProject.path}`)).toBeNull();
-      expect(await files.loadRecovery(firstProject.path)).toBeNull();
-    }
-    expect((await files.read(secondProject.path)).text).toBe('乙正文');
-  });
-
-  it('恢复数据与正文无法保存时，移除关联仍保留唯一内存草稿', async () => {
-    const original = '# 甲清单\n\n- [ ] 原始任务\n';
-    await start([original]);
-    vi.spyOn(BrowserFilePort.prototype, 'saveRecovery').mockRejectedValue(new Error('FILE_PERMISSION: 恢复目录不可写'));
-    await insertTask(); await paste('只能保存在内存中的草稿');
-    button('更多操作').click(); await tick(); button('移除项目关联').click(); await tick();
-    button('删除项目').click();
-    await new Promise(resolve => setTimeout(resolve, 0)); await tick();
-    expect(documentInput().textContent).toContain('只能保存在内存中的草稿');
-    expect([...document.querySelectorAll<HTMLButtonElement>('button')].some(candidate => candidate.title === firstProject.path)).toBe(true);
-    expect((await files.read(firstProject.path)).text).toBe(original);
-    expect(document.querySelector('[role="dialog"]')).not.toBeNull();
-  });
-
-  it('全部待办的菜单不提供针对隐藏项目的编辑操作', async () => {
-    const original = '# 甲清单\n\n- [ ] 原始任务\n';
-    await start([original]);
-    button(/全部待办/).click(); await tick();
-    await vi.waitFor(() => expect(document.querySelector('.aggregate h1')?.textContent).toContain('全部待办'));
-    button('更多操作').click(); await tick();
-    const actions = [...document.querySelectorAll('[role="menuitem"]')].map(item => item.textContent?.trim());
-    expect(actions).not.toContain('新增任务');
-    expect(actions).not.toContain('插入画布');
-    expect((await files.read(firstProject.path)).text).toBe(original);
-  });
-
-  it('更多菜单只提供文档与项目操作，不重复列表项自身的折叠和排序入口', async () => {
-    await start(['# 甲清单\n\n- [ ] 原始任务\n']);
-    button('更多操作').click(); await tick();
-    const actions = [...document.querySelectorAll('[role="menuitem"]')].map(item => item.textContent ?? '');
-    expect(actions.some(text => text.includes('新增任务'))).toBe(true);
-    for (const item of ['完成整组任务', '折叠 / 展开当前项', '同级上移', '同级下移']) expect(actions.some(text => text.includes(item))).toBe(false);
-  });
-
-  it('较早打开请求失败时，不覆盖后来已选中的项目', async () => {
-    await start(['# 甲清单\n\n- [ ] 当前保留任务\n', '# 乙清单\n\n- [ ] 延迟读取任务\n']);
-    const read = BrowserFilePort.prototype.read;
-    let rejectEarlier!: (reason: Error) => void;
-    vi.spyOn(BrowserFilePort.prototype, 'read').mockImplementation(function (this: BrowserFilePort, path: string) {
-      if (path === secondProject.path) return new Promise((_resolve, reject) => { rejectEarlier = reject; });
-      return read.call(this, path);
-    });
-    const pending = [...document.querySelectorAll<HTMLButtonElement>('button')].find(candidate => candidate.title === secondProject.path)!;
-    pending.click(); await tick();
-    await switchProject(firstProject);
-    rejectEarlier(new Error('FILE_NOT_FOUND: 过期的项目读取失败'));
-    await new Promise(resolve => setTimeout(resolve, 0)); await tick();
-    expect(crumbName()).toBe(firstProject.name);
-    expect(documentInput().textContent).toContain('当前保留任务');
-    expect(document.querySelector('[role="alert"]')).toBeNull();
-  });
-});
-
-describe('跨项目反馈和搜索范围', () => {
-  it('旧项目的完成反馈不能撤销当前项目自己的编辑', async () => {
-    const first = '# 甲清单\n\n- [ ] 完成甲任务\n';
-    const second = '# 乙清单\n\n- [ ] 保留乙任务\n';
-    await start([first, second]);
-    await switchProject(secondProject);
-    await insertTask(); await paste('乙项目必须保留的编辑');
-    await shortcut('s');
-    const savedSecond = '# 乙清单\n- [ ] 乙项目必须保留的编辑\n\n- [ ] 保留乙任务\n';
-    await savedText(secondProject, savedSecond);
-    await switchProject(firstProject);
-    button('完成任务').click(); await tick();
-    await switchProject(secondProject);
-    const undo = [...document.querySelectorAll<HTMLButtonElement>('.toast button')].find(candidate => candidate.textContent?.trim() === '撤销');
-    undo?.click(); await tick(); await shortcut('s');
-    await new Promise(resolve => setTimeout(resolve, 0));
-    expect((await files.read(secondProject.path)).text).toBe(savedSecond);
-  });
-
-  it('在全部待办中打开全局搜索时，包含归档仍可检索已完成任务', async () => {
-    await start(['# 甲清单\n\n- [ ] 普通待办\n- [x] 聚合页归档目标\n']);
-    button(/全部待办/).click(); await tick();
-    await vi.waitFor(() => expect(document.querySelector('.aggregate h1')?.textContent).toContain('全部待办'));
-    button(/^搜索/).click(); await tick();
-    const search = document.querySelector<HTMLInputElement>('[aria-label="搜索所有项目"]')!;
-    search.value = '聚合页归档目标'; search.dispatchEvent(new Event('input', { bubbles: true }));
-    const include = [...document.querySelectorAll('label')].find(label => label.textContent?.includes('包含归档'))!.querySelector<HTMLInputElement>('input')!;
-    include.click(); await tick();
-    await vi.waitFor(() => expect(document.querySelector('.search-results')?.textContent).toContain('聚合页归档目标'), { timeout: 3000 });
-  });
-});
-
-
-describe('完整搜索结果、失效路径和退出保存', () => {
-  it('损坏配置不会因初始化失败而被默认配置覆盖', async () => {
-    const raw = '{ this is invalid config'; localStorage.setItem('taskrail:config', raw);
-    const writes = vi.spyOn(BrowserFilePort.prototype, 'saveConfig');
-    mounted = mount(App, { target: container }); await tick();
-    await vi.waitFor(() => expect(document.querySelector('[role="alert"]')).not.toBeNull());
-    await new Promise(resolve => setTimeout(resolve, 350));
-    expect(writes).not.toHaveBeenCalled(); expect(localStorage.getItem('taskrail:config')).toBe(raw);
-  });
-
-  it('损坏恢复数据不会阻止完好的原文件打开，并保留独立提示', async () => {
-    vi.spyOn(BrowserFilePort.prototype, 'loadRecovery').mockRejectedValue(new Error('RECOVERY_INVALID: 原恢复文件已保留备份'));
-    await start(['# 完好原文件\n\n- [ ] 仍然可以查看\n']);
-    expect(documentInput().textContent).toContain('仍然可以查看');
-    expect(document.querySelector('[role="alert"]')?.textContent).toContain('RECOVERY_INVALID');
-    await shortcut('s');
-    expect(document.querySelector('[role="alert"]')?.textContent).toContain('RECOVERY_INVALID');
-  });
-
-  it.each(['暂不恢复', '点击外部'])('%s后正常保存和重新打开仍可找到草稿', async dismissal => {
-    await start(['# 原文件\n\n- [ ] 磁盘内容\n']);
-    const disk = await files.read(firstProject.path);
-    const draft = { path: firstProject.path, text: '# 未保存的恢复内容\n', baseRevision: disk.revision, savedAt: Date.now() };
-    await files.saveRecovery(draft); await remount();
-    expect(document.querySelector('[role="dialog"]')).not.toBeNull();
-    if (dismissal === '暂不恢复') button('暂不恢复').click();
-    else pointerDown(document.querySelector<HTMLElement>('.modal-backdrop')!);
-    await tick();
-    expect(document.querySelector('[role="dialog"]')).toBeNull();
-    await shortcut('s');
-    expect((await files.loadRecovery(firstProject.path))?.text).toBe(draft.text);
-    await remount();
-    expect(document.querySelector('[role="dialog"]')?.textContent).toContain('未写入文件的草稿');
-  });
-
-  it('旧布局存在待确认草稿时，不自动整理覆盖恢复文件', async () => {
-    const source = '- [x] 尚未分区的完成任务\n- [ ] 待办\n';
-    await files.create(firstProject.path, source);
-    const disk = await files.read(firstProject.path);
-    const draft = { path: firstProject.path, text: '- [ ] 唯一恢复内容\n', baseRevision: disk.revision, savedAt: Date.now() };
-    await files.saveRecovery(draft);
-    await files.saveConfig({ projects: [firstProject], activeProjectId: firstProject.id, preferences: { ...defaultPreferences }, projectViews: {} });
-    await remount();
-    button('暂不恢复').click(); await tick(); await shortcut('s');
-    expect((await files.read(firstProject.path)).text).toBe(source);
-    expect((await files.loadRecovery(firstProject.path))?.text).toBe(draft.text);
-  });
-
-  it('选用磁盘版本后切换项目及源码视图，仍保留被替换的恢复草稿', async () => {
-    await start(['- [ ] 原始任务\n', '- [ ] 第二项目\n']);
-    await paste('本地草稿\n');
-    const baseline = await files.read(firstProject.path);
-    const external = '- [x] 外部完成\n- [ ] 外部待办\n';
-    await files.write(firstProject.path, external, baseline.revision);
-    window.dispatchEvent(new StorageEvent('storage', { key: `taskrail:file:${firstProject.path}` }));
-    await vi.waitFor(() => expect(document.querySelector('.conflict-banner')).not.toBeNull());
-    button('比较并处理').click(); await tick();
-    pointerDown(document.querySelector<HTMLElement>('.modal-backdrop')!); await tick();
-    expect(document.querySelector('[role="dialog"]')).toBeNull();
-    expect(document.querySelector('.conflict-banner')).not.toBeNull();
-    expect(documentInput().textContent).toContain('本地草稿');
-    expect((await files.read(firstProject.path)).text).toBe(external);
-    button('比较并处理').click(); await tick();
-    button('选用磁盘版本').click(); await tick();
-    await vi.waitFor(() => expect(document.querySelector('[role="dialog"]')).toBeNull());
-    const recoveryText = (await files.loadRecovery(firstProject.path))?.text;
-    expect(recoveryText).toContain('本地草稿');
-    await switchProject(secondProject); await switchProject(firstProject);
-    button('查看源码').click(); await tick();
-    button(/^待办/).click(); await tick(); await shortcut('s');
-    expect((await files.read(firstProject.path)).text).toBe(external);
-    expect((await files.loadRecovery(firstProject.path))?.text).toBe(recoveryText);
-  });
-
-  it('超过一百条同类搜索结果可继续加载并定位到末项原文', async () => {
-    const original = '# 大清单\n\n' + Array.from({ length: 105 }, (_, index) => `- [ ] 同类检索任务 ${index+1}\n`).join('');
-    await start([original]);
-    button(/^搜索/).click(); await tick();
-    const search = document.querySelector<HTMLInputElement>('[aria-label="搜索所有项目"]')!;
-    search.value = '同类检索任务'; search.dispatchEvent(new Event('input', { bubbles: true })); await tick();
-    await vi.waitFor(() => expect(document.querySelectorAll('.search-result')).toHaveLength(100));
-    expect(document.querySelector('.search-results')?.textContent).not.toContain('同类检索任务 105');
-    button(/显示更多/).click(); await tick();
-    expect(document.querySelectorAll('.search-result')).toHaveLength(105);
-    button(/待办.*同类检索任务 105/).click(); await tick();
-    await vi.waitFor(() => expect(document.querySelector('[aria-label="跨项目搜索"]')).toBeNull());
-    await paste('定位证据\n'); await shortcut('s');
-    const target = original.indexOf('- [ ] 同类检索任务 105');
-    await savedText(firstProject, original.slice(0,target)+'定位证据\n'+original.slice(target));
-  });
-
-  it('原路径失效后重新定位保留本地草稿，并在比较确认后写入新文件', async () => {
-    const original = '# 原清单\n\n- [ ] 旧任务\n';
-    const destination = '# 新文件\n\n- [ ] 新文件自己的任务\n';
-    await start([original]);
-    await files.create(secondProject.path,destination);
-    vi.spyOn(BrowserFilePort.prototype,'chooseFile').mockResolvedValue(secondProject.path);
-    await insertTask(); await paste('迁移时不能丢的草稿');
-    const draft = '# 原清单\n- [ ] 迁移时不能丢的草稿\n\n- [ ] 旧任务\n';
-    localStorage.removeItem(`taskrail:file:${firstProject.path}`);
-    await shortcut('s');
-    await vi.waitFor(() => expect(document.querySelector('[role="alert"]')?.textContent).toContain('FILE_NOT_FOUND'));
-    button('重新定位文件').click(); await tick();
-    await vi.waitFor(() => expect(document.querySelector('[role="dialog"]')?.textContent).toContain('未写入文件的草稿'));
-    const versions = [...document.querySelectorAll<HTMLTextAreaElement>('[role="dialog"] textarea')].map(field=>field.value);
-    expect(versions).toEqual([draft,destination]);
-    expect((await files.read(secondProject.path)).text).toBe(destination);
-    expect((await files.loadRecovery(secondProject.path))?.text).toBe(draft);
-    button('恢复草稿继续编辑').click(); await tick(); await shortcut('s');
-    await savedText({ ...firstProject,path:secondProject.path },draft);
-    await expect(files.read(firstProject.path)).rejects.toThrow('FILE_NOT_FOUND');
-    await vi.waitFor(async () => expect((await files.loadConfig())?.projects[0].path).toBe(secondProject.path));
-  });
-
-  it('正文保存成功但配置保存失败时阻止桌面窗口退出，重试成功才销毁', async () => {
-    desktopBoundary.enabled = true;
-    await start(['# 甲清单\n\n- [ ] 保留项目关联\n']);
-    await vi.waitFor(() => expect(desktopBoundary.close).not.toBeNull());
-    const saveConfig = vi.spyOn(BrowserFilePort.prototype,'saveConfig').mockRejectedValue(new Error('FILE_PERMISSION: 配置目录不可写'));
-    const preventDefault = vi.fn();
-    await desktopBoundary.close!({ preventDefault }); await tick();
-    expect(preventDefault).toHaveBeenCalled();
-    expect(desktopBoundary.destroy).not.toHaveBeenCalled();
-    expect(documentInput().textContent).toContain('保留项目关联');
-    saveConfig.mockRestore();
-    await desktopBoundary.close!({ preventDefault });
-    expect(desktopBoundary.destroy).toHaveBeenCalledTimes(1);
-  });
-});
-
-
-describe('灵感簿', () => {
-  it('首次打开自动创建托管文件，编辑保存后重启直接回到灵感簿', async () => {
-    await start(['- [ ] 甲一\n']);
-    shortcut('I');
-    await vi.waitFor(() => expect(crumbName()).toBe('灵感'));
-    await vi.waitFor(() => expect(localStorage.getItem('taskrail:file:浏览器/灵感.md')).not.toBeNull());
-    await insertTask(); await paste('随手记下的灵感');
-    await vi.waitFor(async () => expect((await files.read('浏览器/灵感.md')).text).toContain('随手记下的灵感'));
-    // 等待配置防抖落盘，重启后验证“上次停留界面”恢复到灵感簿。
-    await new Promise(resolve => setTimeout(resolve, 1000));
-    await remount();
-    await vi.waitFor(() => expect(crumbName()).toBe('灵感'));
-    expect(documentInput().textContent).toContain('随手记下的灵感');
-  });
-
-  it('全局搜索包含灵感簿任务并定位回原文，全部待办不聚合灵感簿', async () => {
-    await start(['- [ ] 甲一\n']);
-    button('灵感').click();
-    await vi.waitFor(() => expect(crumbName()).toBe('灵感'));
-    await insertTask(); await paste('速记想法');
-    await vi.waitFor(async () => expect((await files.read('浏览器/灵感.md')).text).toContain('速记想法'));
-    button(/^搜索/).click(); await tick();
-    const search = document.querySelector<HTMLInputElement>('[aria-label="搜索所有项目"]')!;
-    search.value = '速记想法'; search.dispatchEvent(new Event('input', { bubbles: true }));
-    await vi.waitFor(() => expect(document.querySelector('.search-results')?.textContent).toContain('灵感'), { timeout: 3000 });
-    document.querySelector<HTMLButtonElement>('.search-result')!.click();
-    await vi.waitFor(() => expect(crumbName()).toBe('灵感'));
-    expect(documentInput().textContent).toContain('速记想法');
-    button(/全部待办/).click();
-    await vi.waitFor(() => expect(document.querySelector('.aggregate')?.textContent).toContain('甲一'), { timeout: 3000 });
-    expect(document.querySelector('.aggregate')?.textContent).not.toContain('速记想法');
-  });
-
-  it('更多菜单隐藏项目专属操作，任务操作与另存副本保留', async () => {
-    await start(['- [ ] 甲一\n']);
-    button('灵感').click();
-    await vi.waitFor(() => expect(crumbName()).toBe('灵感'));
-    button('更多操作').click(); await tick();
-    const items = () => [...document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].map(item => item.textContent ?? '');
-    expect(items().some(text => text.includes('重命名项目'))).toBe(false);
-    expect(items().some(text => text.includes('移除项目关联'))).toBe(false);
-    expect(items().some(text => text.includes('另存 Markdown 副本'))).toBe(true);
-    expect(items().some(text => text.includes('新增任务'))).toBe(true);
-    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })); await tick();
-    await switchProject(firstProject);
-    button('更多操作').click(); await tick();
-    expect(items().some(text => text.includes('重命名项目'))).toBe(true);
-  });
-
-  it('灵感簿文件被删除后进入缺失横幅，一键重建空文件并作废旧阅读状态', async () => {
-    await start(['- [ ] 甲一\n']);
-    button('灵感').click();
-    await vi.waitFor(() => expect(crumbName()).toBe('灵感'));
-    await insertTask(); await paste('将被删除的灵感');
-    await vi.waitFor(async () => expect((await files.read('浏览器/灵感.md')).text).toContain('将被删除的灵感'));
-    await new Promise(resolve => setTimeout(resolve, 1000));
-    localStorage.removeItem('taskrail:file:浏览器/灵感.md');
-    if (mounted) await unmount(mounted);
-    mounted = mount(App, { target: container }); await tick();
-    await vi.waitFor(() => expect(document.querySelector('.error-banner')).not.toBeNull());
-    button('新建空灵感簿').click();
-    await vi.waitFor(() => expect(crumbName()).toBe('灵感'));
-    await vi.waitFor(async () => expect((await files.read('浏览器/灵感.md')).text).toBe('# 灵感\n\n'));
-    expect(documentInput().textContent).not.toContain('将被删除的灵感');
-  });
-});
-
-describe('侧栏大纲目录', () => {
-  const outlineTexts = (): string[] => [...document.querySelectorAll('.outline-item')].map(item => item.textContent ?? '');
-
-  it('底栏按钮在导航和大纲之间切换，大纲只列当前分区的标题', async () => {
-    await start(['# 工作\n\n- [ ] 甲\n\n# 归档\n\n## 旧事\n\n- [x] 旧任务\n\n## 杂项\n']);
-    expect(document.querySelector('.outline-list')).toBeNull();
-    button('大纲目录').click(); await tick();
-    expect(outlineTexts()).toEqual(['工作']);
-    // 几何全为零时按滚动到底规则取最后一个可见条目，验证高亮管线已接线。
-    await vi.waitFor(() => expect(document.querySelector('.outline-item.outline-active')?.textContent).toBe('工作'));
-    button(/^归档/).click(); await tick();
-    const disabled = outlineTexts();
-    expect(disabled).toEqual(['归档', '旧事', '杂项']);
-    const items = [...document.querySelectorAll<HTMLButtonElement>('.outline-item')];
-    expect(items.at(-1)!.disabled).toBe(true);
-    expect(items[0]!.disabled).toBe(false);
-    await vi.waitFor(() => expect(document.querySelector('.outline-item.outline-active')?.textContent).toBe('旧事'));
-    button('返回导航').click(); await tick();
-    expect(document.querySelector('.outline-list')).toBeNull();
-    expect(document.querySelector('.project-list')).not.toBeNull();
-  });
-
-  it('从收起状态进入大纲是临时展开，切回导航恢复收起且不写入展开偏好', async () => {
-    await start(['# 工作\n\n- [ ] 甲\n']);
-    button('收起项目导航').click();
-    await vi.waitFor(() => expect(document.querySelector('.sidebar')).toBeNull());
-    button('大纲目录').click(); await tick();
-    expect(document.querySelector('.outline-list')).not.toBeNull();
-    button('返回导航').click();
-    await vi.waitFor(() => expect(document.querySelector('.sidebar')).toBeNull());
-    await vi.waitFor(async () => expect((await files.loadConfig())?.preferences.sidebarOpen).toBe(false));
-    button('展开项目导航').click(); await tick();
-    expect(document.querySelector('.project-list')).not.toBeNull();
-  });
-
-  it('大纲视图与展开状态持久化，重启按偏好恢复', async () => {
-    await start(['# 工作\n\n## 细分\n\n- [ ] 甲\n']);
-    button('大纲目录').click();
-    await vi.waitFor(async () => expect((await files.loadConfig())?.preferences.sidebarView).toBe('outline'));
-    await remount();
-    expect(outlineTexts()).toEqual(['工作', '细分']);
-    button('返回导航').click(); await tick();
-    expect(document.querySelector('.project-list')).not.toBeNull();
-  });
-
-  it('面包屑项目名打开切换列表，可跳转灵感与其他项目', async () => {
-    await start(['# 甲\n\n- [ ] 任务\n', '# 乙\n']);
-    button('切换项目').click(); await tick();
-    const menu = document.querySelector('.crumb-menu');
-    expect(menu).not.toBeNull();
-    const items = [...menu!.querySelectorAll<HTMLButtonElement>('button')];
-    expect(items.map(item => item.textContent?.trim())).toEqual(['灵感', '甲项目', '乙项目']);
-    items.find(item => item.textContent?.trim() === '乙项目')!.click();
-    await vi.waitFor(() => expect(crumbName()).toBe('乙项目'));
-    button('切换项目').click(); await tick();
-    [...document.querySelectorAll<HTMLButtonElement>('.crumb-menu button')]
-      .find(item => item.textContent?.trim() === '灵感')!.click();
-    await vi.waitFor(() => expect(crumbName()).toBe('灵感'));
+    instance = mount(App, { target, props: { files: port } });
+    await flush();
+
+    const indentInput = target.querySelector<HTMLInputElement>('#settings-paragraph-indent');
+    expect(indentInput).not.toBeNull();
+    expect(indentInput!.value).toBe('2');
+    expect(document.documentElement.style.getPropertyValue('--paragraph-indent')).toBe('2em');
+
+    indentInput!.value = '4';
+    indentInput!.dispatchEvent(new Event('input', { bubbles: true }));
+    await flush();
+    expect(document.documentElement.style.getPropertyValue('--paragraph-indent')).toBe('4em');
+    expect(saved.at(-1)?.preferences.paragraphIndent).toBe(4);
+
+    indentInput!.value = '0';
+    indentInput!.dispatchEvent(new Event('input', { bubbles: true }));
+    await flush();
+    expect(document.documentElement.style.getPropertyValue('--paragraph-indent')).toBe('0em');
+    expect(saved.at(-1)?.preferences.paragraphIndent).toBe(0);
   });
 });

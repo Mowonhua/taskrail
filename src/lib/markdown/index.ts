@@ -1,11 +1,13 @@
 /**
- * 文件职责：公开 Markdown 任务内核的纯函数边界。
- * 定义范围：共享语法、模型、文本事务与只读投影。
+ * 文件职责：公开 Markdown 与 KaTeX 数学公式解析及安全渲染模块边界。
+ * 定义范围：GFM + CJK 删除线 + 数学公式语法扩展，以及供悬赏详情、验收条件与评论区复用的只读安全渲染器。
  */
-export type * from './types';
-export { parseDocument } from './parse';
-export { taskToggleChanges, moveItemChanges, moveItemPosition, indentItemChanges } from './transactions';
-export { getHiddenRanges, searchTasks, foldKey, taskIsArchived, taskIsComplete, completedChildGroups } from './projection';
+export { cjkStrikethrough } from './cjk';
 export { markdownExtensions, mathExtension } from './syntax';
-export { archiveSections, normalizeArchiveChanges } from './archive';
-export type { ArchiveSection } from './archive';
+export {
+  renderMarkdown,
+  renderMarkdownToHtml,
+  renderMathToHtml,
+  safeImageUrl,
+  safeLinkUrl,
+} from './render';

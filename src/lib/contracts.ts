@@ -1,96 +1,79 @@
 /**
- * 文件职责：定义应用与文件层之间的稳定数据契约。
- * 定义范围：项目关联、界面偏好、文件快照和异步文件端口。
+ * 文件职责：定义前端工作台外壳的数据契约与平台端口接口。
+ * 定义范围：工作台顶层导航分区、项目元数据、界面与排版偏好、窗口位置、应用配置及平台持久化端口。
  */
+import type { LocalePreference } from './i18n';
+import type { ThemeDefinition, ThemeMode } from './themes';
 
-/** 结构职责：承载本机项目关联；桌面路径指向用户原文件，Android 路径指向可由应用删除的私有副本。 */
+/** 结构职责：定义悬赏板工作台左侧紧凑导航的四个顶层入口。 */
+export type WorkspaceSection = 'bounties' | 'inbox' | 'agents' | 'settings';
+
+/** 结构职责：表示工作台关联的项目元数据与可选图标配置。 */
 export interface Project {
-  id: string; name: string; path: string;
-  /** 可选图标引用：`emoji:表情` 或 `lucide:名称`；缺省显示通用文档标识，不写入 Markdown。 */
+  id: string;
+  name: string;
+  path: string;
+  /** 缺省使用文件夹图标；格式为 emoji:<字素> 或 lucide:<kebab-case 名称>。 */
   icon?: string;
-  /** 缺省为未归档；归档保留关联及阅读状态，但不参与导航、聚合和搜索。 */
   archived?: boolean;
 }
-/** 结构职责：表示文档投影视图；源码仅显示来源视图范围，底层始终保留完整文本。 */
-export type ViewMode = 'todo' | 'archive' | 'source';
-/** 结构职责：控制画布预览占用的阅读空间；缺省紧凑，对应两行、六行和十二行正文高度。 */
-export type CanvasPreviewDensity = 'compact' | 'medium' | 'spacious';
-import type { ThemeDefinition, ThemeMode } from './themes';
-import type { LocalePreference } from './i18n';
-/** 结构职责：保存阅读参数；theme 保留旧版明暗模式语义，themeId 缺省时使用纸面主题。 */
+
+/** 结构职责：保存用户界面、主题、窗口材质与阅读排版偏好。 */
 export interface Preferences {
-  /** 界面语言；旧配置缺省为简体中文，system 跟随操作系统语言。 */
+  /** 缺省保持简体中文；system 在启动与系统语言变化时解析为受支持语言。 */
   locale?: LocalePreference;
-  theme: ThemeMode; themeId?: string; fontFamily: string; fontSize: number; contentWidth: number;
-  /** 正文段落首行的缩进字符数，以正文字号为单位；缺省为 2，0 关闭。不影响任务、列表、标题、引用、公式、代码和表格。 */
-  paragraphIndent: number;
-  /** 缺省为 true；仅桌面版启动后检查，关闭后仍允许手动检查。 */
-  autoCheckUpdates?: boolean;
-  /** 缺省为 true；下载完成后仍需用户启动安装，以便先保存全部文档。 */
-  autoDownloadUpdates?: boolean;
-  /** 缺省为 false，沿用系统材质行为；true 时请求 Acrylic 在窗口失焦后继续透明。仅原生材质支持时生效。 */
+  /** 兼容旧版或别名持久化字段。 */
+  language?: LocalePreference;
+  theme: ThemeMode;
+  themeId?: string;
+  /** 仅桌面玻璃材质主题使用；缺省为 false，保留 Windows 失焦回落实色的默认行为。 */
   keepTransparentOnBlur?: boolean;
-  /** 缺省为 'nav'；侧栏显示项目导航还是当前文档的大纲目录。 */
-  sidebarView?: 'nav' | 'outline';
-  /** 缺省为 true；导航模式下侧栏的展开意愿。大纲模式从收起状态临时展开时不改写此值。 */
+  fontFamily: string;
+  fontSize: number;
+  contentWidth: number;
+  /** 兼容读取/写回行宽别名字段。 */
+  lineWidth?: number;
+  /** 段首缩进字符数（0–4，0 表示关闭；兼容旧版布尔值）。 */
+  paragraphIndent: number;
   sidebarOpen?: boolean;
-  /** 缺省为 false；待办视图悬停各级标题时显示“新增任务”入口。 */
-  headingAdd?: boolean;
-  /** 仅改变本机预览布局，不修改 Markdown、附件或全页画布。 */
-  canvasPreview?: CanvasPreviewDensity;
+  /** 兼容读取/写回侧栏折叠别名字段。 */
+  sidebarCollapsed?: boolean;
+  /** 启动或切换时激活的顶层工作台分区，缺省为悬赏板（bounties）。 */
+  workspaceSection?: WorkspaceSection;
+  /** 无关联项目时使用的默认项目图标（格式同 Project.icon）。 */
+  defaultProjectIcon?: string;
+  autoCheckUpdates?: boolean;
+  autoDownloadUpdates?: boolean;
 }
-/** 结构职责：托管灵感簿的文件关联与阅读状态；文件由应用创建，可重新定位，不进入项目列表。 */
-export interface InspirationDoc {
-  path: string;
-  /** 缺省视为未打开过；形状与项目阅读状态一致，独立保存避免与项目键空间混用。 */
-  view?: ProjectView;
-  /** 缺省为 false；true 表示上次停留在灵感簿，启动时直接恢复。 */
-  active?: boolean;
-}
-/** 结构职责：记录上次关闭时普通模式的窗口几何；坐标与尺寸为物理像素，坐标允许多显示器的负值。 */
+
+/** 结构职责：保存桌面窗口尺寸与坐标状态。 */
 export interface WindowPlacement {
-  x?: number; y?: number; width?: number; height?: number;
-  /** 单独出现表示上次最大化关闭，只恢复最大化，普通几何沿用既有记录。 */
+  width?: number;
+  height?: number;
+  x?: number;
+  y?: number;
   maximized?: boolean;
 }
-/** 结构职责：保存独立于 Markdown 的配置；正文及编辑历史不属于配置。 */
-export interface AppConfig { projects: Project[]; activeProjectId: string | null; preferences: Preferences; projectViews: Record<string, ProjectView>; /** 完整保存已导入主题，不依赖原 JSON 文件路径。 */ customThemes?: ThemeDefinition[]; /** 灵感簿；缺省表示从未打开，首次进入时在托管位置创建。 */ inspiration?: InspirationDoc; /** 启动恢复的窗口几何；缺省使用配置默认居中。 */ window?: WindowPlacement }
-/** 结构职责：保存可可靠恢复的界面定位；折叠键失配时默认展开。 */
-export interface ProjectView {
-  mode: ViewMode; cursor: number; scrollTop: number; folded: string[];
-  /** 已展开的完成子任务组，以父项可靠内容键保存；缺省及身份失配均收起。 */
-  expandedCompletedGroups?: string[];
-  /** 源码的来源分区；旧配置缺省时视为待办，不能由当前可见任务反推。 */
-  sourceView?: 'todo' | 'archive';
-  /** 进入源码前的定位快照；文档坐标随源码编辑映射，返回预览后恢复该阅读位置。 */
-  sourceReturn?: SourceReturn;
+
+/** 结构职责：应用持久化配置根结构。 */
+export interface AppConfig {
+  projects: Project[];
+  activeProjectId: string | null;
+  customThemes?: ThemeDefinition[];
+  preferences: Preferences;
+  window?: WindowPlacement;
 }
+
 /**
- * 结构职责：保留切入源码前的光标与视口定位。
- * 字段说明：cursor 与 anchor 使用完整文档坐标；offset 是锚点相对视口的有符号像素偏移。
- * 约束条件：所有数字必须有限，cursor、anchor、scrollTop 不得为负；缺省快照沿用当前定位。
- */
-export interface SourceReturn { cursor: number; scrollTop: number; anchor: number; offset: number }
-/** 结构职责：承载读取时的文本与磁盘基线；revision 是不透明的内容指纹。 */
-export interface FileSnapshot { path: string; text: string; revision: string }
-/** 结构职责：记录未落盘修改和原始基线，用于异常退出恢复与冲突判断。 */
-export interface RecoveryDraft { path: string; text: string; baseRevision: string; savedAt: number }
-/**
- * 接口职责：隔离平台文件访问与应用编辑策略。
- * 调用方：项目会话与保存协调器。
- * 实现要求：保存前验证基线，原子替换；冲突以 FILE_CONFLICT 错误码报告并保留双方内容。
+ * 接口职责：隔离桌面、移动端与浏览器预览的配置持久化、文本导出与外链打开能力。
+ * 约束条件：不绑定已废弃的单文件读写、文件监听、草稿恢复或局域网同步命令。
  */
 export interface FilePort {
-  read(path: string): Promise<FileSnapshot>;
-  write(path: string, text: string, expectedRevision: string): Promise<FileSnapshot>;
-  create(path: string, text: string): Promise<FileSnapshot>;
+  isBrowser: boolean;
+  isMobile?: boolean;
   loadConfig(): Promise<AppConfig | null>;
   saveConfig(config: AppConfig): Promise<void>;
-  loadRecovery(path: string): Promise<RecoveryDraft | null>;
-  saveRecovery(draft: RecoveryDraft): Promise<void>;
-  clearRecovery(path: string): Promise<void>;
-  chooseFile(create: boolean): Promise<string | null>;
-  watch(path: string, onChange: () => void): Promise<() => void>;
-  /** 仅应用私有文件端口提供。调用前须停止同步并结束保存；删除正文及恢复草稿，缺失文件视为已删除。 */
-  removeOwned?(path: string): Promise<void>;
+  exportText?(text: string, filename: string): Promise<boolean>;
+  openExternalLink?(url: string): Promise<void>;
+  openLocalDocument?(path: string): Promise<void>;
 }

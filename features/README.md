@@ -13,7 +13,7 @@
 
 ## 定位符约定
 
-- 整个文件即一个测试入口或组件模块时，定位符写 `<module>`，例如 `scripts/test-sync-ui.mjs::<module>`、`src/lib/SyncPanel.svelte::<module>`。
+- 整个文件即一个测试入口或组件模块时，定位符写 `<module>`，例如 `scripts/release.test.mjs::<module>`、`src/lib/ProjectIcon.svelte::<module>`。
 - 类成员写 `类名.成员名`，模块内联测试写 `tests::函数名`，描述式用例写 `describe > it` 的完整名称。
 - 参数化用例（`it.each`、`%s` 模板）写参数展开后的用例名，便于直接定位所验证的样例。
 - 场景引用多个测试时用半角逗号加空格分隔；定位符自身的半角或全角逗号、单元格内的竖线分别写作 `\,`、`\，`、`\|`。
@@ -24,10 +24,7 @@
 |---|---|---|
 | 桌面窗口 | [window.md](window.md) | Windows 窗口材质与显示过渡 |
 | 桌面更新 | [update.md](update.md) | 桌面版本检查、续传下载、签名校验与安装交接 |
-| 移动编辑 | [mobile.md](mobile.md) | Android 平台隔离、托管文件、触屏导航和应用更新 |
-| 局域网同步 | [sync.md](sync.md) | 配对、版本合并、持久化与文档接收 |
-| Markdown 画布 | [canvas.md](canvas.md) | 内嵌自由白板、共享图片附件和完整文档搬运 |
-| 项目导航 | [navigation.md](navigation.md) | 项目列表的标识、切换与排序 |
-| 任务编辑 | [task-editing.md](task-editing.md) | 子任务完成、排序与显示 |
-| 行内 Markdown | [markdown-inline.md](markdown-inline.md) | 行内语法排版与删除线定界符判定 |
+| 移动编辑 | [mobile.md](mobile.md) | Android 平台隔离、导出、触屏导航与应用更新 |
+| 项目导航 | [navigation.md](navigation.md) | 项目标识与图标选择器 |
+| 行内 Markdown | [markdown-inline.md](markdown-inline.md) | 行内语法、KaTeX 公式与删除线定界符判定 |
 | 阅读排版 | [reading.md](reading.md) | 正文字体、字号、宽度与段首缩进等本机阅读参数 |

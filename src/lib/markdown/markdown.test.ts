@@ -1,183 +1,167 @@
 /**
- * 文件职责：验证任务语义、完整源文事务及视图边界。
- * 定义范围：语法节点识别、完成恢复、排序缩进和可靠身份的行为测试。
+ * 文件职责：验证独立 Markdown 与 KaTeX 数学公式渲染器的语法、公式排版与 XSS 安全防护边界。
+ * 定义范围：GFM 结构、CJK 友好删除线、行内 $...$ 与块级 $$...$$ 公式、未闭合/非法公式降级、协议白名单与原始 HTML 拦截。
  */
 import { describe, expect, it } from 'vitest';
-import { parseDocument, taskToggleChanges, moveItemChanges, moveItemPosition, indentItemChanges, getHiddenRanges, searchTasks, foldKey, normalizeArchiveChanges, type TextChange } from './index';
-const apply = (text: string, changes: TextChange[]): string => [...changes].sort((a,b)=>b.from-a.from).reduce((s,c)=>s.slice(0,c.from)+c.insert+s.slice(c.to),text);
+import { parser } from '@lezer/markdown';
+import {
+  markdownExtensions,
+  renderMarkdown,
+  renderMarkdownToHtml,
+  renderMathToHtml,
+  safeImageUrl,
+  safeLinkUrl,
+} from './index';
 
-describe('shared syntax model', () => {
-  it('recognizes actual tasks, with full paragraphs and nested item boundaries', () => {
-    const text = '# Plan\n\n- [ ] parent\n\n  paragraph\n\n  - [x] child\n- ordinary\n\nindependent\n';
-    const m = parseDocument(text);
-    expect(m.items).toHaveLength(3); expect(m.tasks).toHaveLength(2);
-    expect(m.tasks[0].children).toEqual([m.tasks[1].from]);
-    expect(text.slice(m.tasks[0].from,m.tasks[0].to)).toContain('paragraph');
-    expect(text.slice(m.tasks[0].from,m.tasks[0].to)).not.toContain('ordinary');
-    expect(m.headings[0].text).toBe('Plan');
+function render(source: string): HTMLDivElement {
+  const container = document.createElement('div');
+  container.append(renderMarkdown(source));
+  return container;
+}
+
+describe('Markdown 与 KaTeX 语法扩展', () => {
+  const mdParser = parser.configure(markdownExtensions);
+
+  it('识别块级公式 MathBlock 与行内公式 InlineMath / InlineMathUnclosed，且不误伤代码块与转义美元符', () => {
+    const source = '```md\n$not_math$\n```\n\n`$inline_code$` 与 \\$100\n\n行内 $x^2 + y^2 = z^2$ 公式\n\n未闭合 $a + b\n\n$$\n\\int_0^1 x^2 dx\n$$\n';
+    const tree = mdParser.parse(source);
+    const nodes: { name: string; text: string }[] = [];
+    tree.iterate({
+      enter: node => {
+        if (['InlineMath', 'InlineMathUnclosed', 'MathBlock'].includes(node.name)) {
+          nodes.push({ name: node.name, text: source.slice(node.from, node.to) });
+        }
+      },
+    });
+    expect(nodes).toEqual([
+      { name: 'InlineMath', text: '$x^2 + y^2 = z^2$' },
+      { name: 'InlineMathUnclosed', text: '$a + b' },
+      { name: 'MathBlock', text: '$$\n\\int_0^1 x^2 dx\n$$' },
+    ]);
   });
-  it('ignores fake tasks in code, inline code, and closed or unclosed math blocks', () => {
-    const m = parseDocument('```md\n- [ ] code\n```\n\n`- [ ] inline`\n\n$$\n- [ ] math\n$$\n\n- [ ] real\n\n$$\n- [ ] unfinished');
-    expect(m.tasks).toHaveLength(1); expect(m.text.slice(m.tasks[0].contentFrom,m.tasks[0].firstLineTo)).toBe('real');
-    const names: string[]=[];m.tree.iterate({enter:n=>{names.push(n.name)}});expect(names.filter(n=>n==='MathBlock')).toHaveLength(2);
-  });
-  it('keeps CRLF outside first line and raw source untouched', () => {
-    const text='- [ ] ~~still open~~\r\n  body\r\n- [X] done\r\n';const m=parseDocument(text);
-    expect(text.slice(0,m.items[0].firstLineTo)).toBe('- [ ] ~~still open~~');
-    expect(m.items[0].task?.checked).toBe(false);expect(m.items[1].task?.checked).toBe(true);
-  });
-  it('marks unclosed inline math locally without consuming later lines or code', () => {
-    const text = '公式 $x + y\n下一行\n\n`$code` 与 \\$escaped\n\n- [ ] 任务';
-    const model = parseDocument(text);
-    const incomplete: string[] = [];
-    model.tree.iterate({ enter: node => { if (node.name === 'InlineMathUnclosed') incomplete.push(text.slice(node.from, node.to)); } });
-    expect(incomplete).toEqual(['$x + y']);
-    expect(model.tasks).toHaveLength(1);
-    expect(model.text).toBe(text);
-  });
-  it('parses strikethrough next to Chinese punctuation as inline syntax', () => {
-    const strikethroughs = (text: string): string[] => {
-      const names: string[] = [];
-      parseDocument(text).tree.iterate({ enter: node => { if (node.name === 'Strikethrough') names.push(text.slice(node.from, node.to)); } });
-      return names;
-    };
-    // 闭合标记内侧是中文括号时，CommonMark 只按 ASCII 标点判断，会把整段当作普通文本。
-    expect(strikethroughs('~~（带括号）~~有文字')).toEqual(['~~（带括号）~~']);
-    expect(strikethroughs('有~~（带括号）~~文字')).toEqual(['~~（带括号）~~']);
-    expect(strikethroughs('~~（带括号）~~有文字。')).toEqual(['~~（带括号）~~']);
-    expect(strikethroughs('字~~正文~~字')).toEqual(['~~正文~~']);
-    // 标记内侧为空白或外侧未闭合时仍保持 CommonMark 结果，不把标记当成删除线。
-    expect(strikethroughs('~~ 带括号~~')).toEqual([]);
-    expect(strikethroughs('~~带括号 ~~')).toEqual([]);
-    expect(strikethroughs('~~a~~~b')).toEqual([]);
-  });
-});
-describe('task transactions', () => {
-  it('requires explicit group completion and only edits checkbox characters', () => {
-    const text='- [ ] parent\n  - [ ] child\n  - [x] done\n\n# untouched';const m=parseDocument(text);
-    expect(()=>taskToggleChanges(m,0)).toThrow('TASK_GROUP_REQUIRED');
-    const changes=taskToggleChanges(m,0,true);expect(changes).toHaveLength(2);expect(changes.every(c=>c.to-c.from===1)).toBe(true);
-    expect(apply(text,changes)).toBe(text.replaceAll('[ ]','[x]'));
-  });
-  it('restores ancestors in the same transaction but does not auto-complete parents', () => {
-    const m=parseDocument('- [x] parent\n  - [x] child');const changes=taskToggleChanges(m,m.tasks[1].from);
-    expect(apply(m.text,changes)).toBe('- [ ] parent\n  - [ ] child');
-    const open=parseDocument('- [ ] parent\n  - [ ] child');expect(taskToggleChanges(open,open.tasks[1].from)).toHaveLength(1);
-  });
-});
-describe('structure edits', () => {
-  it('松散子任务完成和移到末尾保留 CRLF 分隔与定位', () => {
-    const text = '- [ ] 父\r\n  - [ ] 甲\r\n\r\n  - [ ] 乙\r\n\r\n# 归档\r\n\r\n- [x] 旧任务\r\n';
-    const model = parseDocument(text);
-    const moved = apply(text, moveItemChanges(model, model.tasks[1].from, null));
-    expect(moved).toBe(text.replace('甲', '临时').replace('乙', '甲').replace('临时', '乙'));
-    const position = moveItemPosition(model, model.tasks[1].from, null, model.tasks[1].contentFrom);
-    expect(moved[position]).toBe('甲');
-    const checked = apply(text, taskToggleChanges(model, model.tasks[1].from));
-    expect(apply(checked, normalizeArchiveChanges(parseDocument(checked)))).toBe(moved.replace('[ ] 甲', '[x] 甲'));
-  });
-  it('moves full content including hidden descendants and retains outside source and CRLF', () => {
-    const text='# A\r\n\r\n- [ ] first\r\n\r\n  prose\r\n\r\n  ```\r\n  code\r\n  ```\r\n\r\n  - [x] nested\r\n- [ ] second\r\n\r\n# B\r\n';const m=parseDocument(text);const first=m.tasks[0], second=m.tasks[2];
-    const moved=apply(text,moveItemChanges(m,first.from,null));expect(moved).toBe('# A\r\n\r\n- [ ] second\r\n- [ ] first\r\n\r\n  prose\r\n\r\n  ```\r\n  code\r\n  ```\r\n\r\n  - [x] nested\r\n\r\n# B\r\n');
-    const mapped=moveItemPosition(m,first.from,null,first.contentFrom);expect(moved.slice(mapped,mapped+5)).toBe('first');expect(parseDocument(moved).tasks).toHaveLength(3);
-    expect(()=>moveItemChanges(m,first.from,m.tasks[1].from)).toThrow('INVALID_MOVE');expect(second.parentFrom).toBe(null);
-  });
-  it('handles moving EOF without newline and crossing headings between top-level lists', () => {
-    const m=parseDocument('- one\n- two');expect(apply(m.text,moveItemChanges(m,m.items[1].from,0))).toBe('- two\n- one');
-    const crlf=parseDocument('- one\r\n- two');expect(apply(crlf.text,moveItemChanges(crlf,crlf.items[1].from,0))).toBe('- two\r\n- one');
-    const separate=parseDocument('- one\n\n# section\n\n- other');
-    expect(apply(separate.text,moveItemChanges(separate,0,separate.items[1].from))).toBe('\n# section\n\n- one\n- other');
-  });
-  it('appends to another list across a heading via the last item move position', () => {
-    const m=parseDocument('- one\n\n# S\n\n- two\n');const two=m.items[1];
-    expect(apply(m.text,moveItemChanges(m,m.items[0].from,two.moveTo))).toBe('\n# S\n\n- two\n- one\n');
-    const mapped=moveItemPosition(m,m.items[0].from,two.moveTo,m.items[0].contentFrom);
-    expect(apply(m.text,moveItemChanges(m,m.items[0].from,two.moveTo)).slice(mapped,mapped+3)).toBe('one');
-  });
-  it('rejects cross-list moves that would break quote containers or nested ownership', () => {
-    const quoted=parseDocument('> - one\n\n- two\n');
-    expect(()=>moveItemChanges(quoted,quoted.items[0].from,quoted.items[1].from)).toThrow('INVALID_MOVE');
-    expect(()=>moveItemChanges(quoted,quoted.items[1].from,quoted.items[0].from)).toThrow('INVALID_MOVE');
-    const nested=parseDocument('- [ ] first\n  - [ ] inner\n- [ ] second\n');
-    expect(()=>moveItemChanges(nested,nested.tasks[0].from,nested.tasks[1].from)).toThrow('INVALID_MOVE');
-  });
-  it('moves nested siblings without losing indentation', () => {
-    const m=parseDocument('- root\n  - one\n    continuation\n  - two\n- next\n');expect(apply(m.text,moveItemChanges(m,m.items[2].from,m.items[1].from))).toBe('- root\n  - two\n  - one\n    continuation\n- next\n');
-  });
-  it('indents the whole item according to ordered marker width and safely outdents', () => {
-    const m=parseDocument('10. first\n11. second\n    body\n');const indented=apply(m.text,indentItemChanges(m,m.items[1].from,1));expect(indented).toBe('10. first\n    11. second\n        body\n');
-    const next=parseDocument(indented);expect(apply(indented,indentItemChanges(next,next.items[1].from,-1))).toBe(m.text);expect(indentItemChanges(m,m.items[0].from,1)).toEqual([]);
-  });
-});
-describe('projection and discovery', () => {
-  it('keeps completed children visible under unfinished tasks, retaining independent text', () => {
-    const m=parseDocument('# work\n\n- [ ] parent\n  - [x] done\n  - [ ] open\n\nindependent\n');expect(getHiddenRanges(m,'todo')).toEqual([]);
-    expect(getHiddenRanges(m,'source')).toEqual([]);
-  });
-  it('excludes completed children of unfinished groups from the archive projection', () => {
-    const m=parseDocument('# work\n\n- [ ] parent\n  unrelated\n  - [x] done\n    archived body\n  - [ ] open\n\nindependent\n');const visible=apply(m.text,getHiddenRanges(m,'archive').map(r=>({...r,insert:''})));
-    expect(visible).toBe('');
-  });
-  it('search shares ancestor completion and section semantics and ignores folded state', () => {
-    const m=parseDocument('# work\n\n- [x] parent\n  - [x] hidden child\n- [ ] active child');expect(searchTasks(m,'child',false)).toHaveLength(1);expect(searchTasks(m,'hidden',true).at(-1)?.heading).toBe('work');expect(searchTasks(m,'active child',false)[0].title).toBe('active child');
-  });
-  it('fold keys follow unique unchanged text and decline ambiguous duplicates', () => {
-    const m=parseDocument('- one\n  body\n- two\n');const key=foldKey(m,m.items[0]);const moved=parseDocument(apply(m.text,moveItemChanges(m,0,null)));expect(foldKey(moved,moved.items[1])).toBe(key);
-    const duplicate=parseDocument('- same\n- same\n');expect(foldKey(duplicate,duplicate.items[0])).toBe('');
+
+  it('支持中文标点紧邻的 CJK 友好删除线，同时保持空白边界不误判', () => {
+    const html = renderMarkdownToHtml('前缀~~（已废弃方案）~~后缀 与 ~~ 不生效~~');
+    expect(html).toContain('<del>（已废弃方案）</del>');
+    expect(html).toContain('~~ 不生效~~');
   });
 });
 
-// 独立边界场景覆盖外部编辑也可能产生的合法 CommonMark 结构。
-describe('structural edge cases', () => {
-  it('does not swallow a following sibling after an unclosed nested math block', () => {
-    const m=parseDocument('- [ ] parent\n\n  $$\n  - [ ] formula\n- [ ] sibling\n');
-    expect(m.tasks.map(item=>m.text.slice(item.contentFrom,item.firstLineTo))).toEqual(['parent','sibling']);
+describe('Markdown 与 KaTeX 渲染器', () => {
+  it('渲染 GFM 标题、任务列表、代码块、引用和对齐表格', () => {
+    const container = render(
+      '# 悬赏验收条件\n\n- [x] 通过 `cargo test`\n- [ ] 补充边界测试\n\n> 保持原子写入\n\n```rust\nfn main() {}\n```\n\n| 阶段 | 状态 |\n| :--- | ---: |\n| 冒烟 | 通过 |\n',
+    );
+    expect(container.querySelector('h1')?.textContent).toBe('悬赏验收条件');
+    const checkboxes = container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]');
+    expect(checkboxes).toHaveLength(2);
+    expect(checkboxes[0].checked).toBe(true);
+    expect(checkboxes[0].disabled).toBe(true);
+    expect(checkboxes[1].checked).toBe(false);
+    expect(container.querySelector('blockquote p')?.textContent).toBe('保持原子写入');
+    const code = container.querySelector('pre code') as HTMLElement | null;
+    expect(code?.textContent).toBe('fn main() {}');
+    expect(code?.dataset.language).toBe('rust');
+    expect(container.querySelectorAll('table th')).toHaveLength(2);
+    expect(container.querySelectorAll('table td')).toHaveLength(2);
   });
-  it('matches a completed child as an active result without matching its parent body', () => {
-    const m=parseDocument('- [ ] parent\n  - [x] hidden token\n  - [ ] active token\n');
-    const completed = searchTasks(m,'hidden',false);
-    expect(completed.map(result => result.title)).toEqual(['hidden token']);expect(completed[0].archived).toBe(false);
-    expect(searchTasks(m,'active',false).map(result=>result.title)).toEqual(['active token']);
-  });
-  it('rejects moving a nested item sharing its physical line with its parent', () => {
-    const m=parseDocument('- - one\n  - two\n');expect(()=>moveItemChanges(m,m.items[1].from,null)).toThrow('INVALID_MOVE');
-  });
-  it('preserves a loose list when its last item moves before a preceding item', () => {
-    const m=parseDocument('- one\n\n- two\n');const next=parseDocument(apply(m.text,moveItemChanges(m,m.items[1].from,0)));
-    expect(next.text).toBe('- two\n\n- one\n');
-  });
-  it.each(['', '\r\n', '\r\n\r\n# 后续\r\n'])('松散列表末项上移保留 CRLF 尾部分隔 %j', suffix => {
-    const text = '- one\r\n\r\n- two' + suffix;
-    const model = parseDocument(text);
-    const source = model.items[1];
-    const moved = apply(text, moveItemChanges(model, source.from, model.items[0].from));
-    expect(moved).toBe('- two\r\n\r\n- one' + suffix);
-    const position = moveItemPosition(model, source.from, model.items[0].from, source.contentFrom);
-    expect(moved.slice(position, position + 3)).toBe('two');
-  });
-});
 
-describe('quoted and ordered list boundaries', () => {
-  it('moves quoted sibling items with all quote markers intact', () => {
-    const m=parseDocument('> - [ ] first\n>   body\n> - [ ] second\n');
-    const moved=apply(m.text,moveItemChanges(m,m.tasks[1].from,m.tasks[0].from));
-    expect(moved).toBe('> - [ ] second\n> - [ ] first\n>   body\n');expect(parseDocument(moved).tasks).toHaveLength(2);
+  it('正确渲染行内 $...$、多行/单行块级 $$...$$ 与引用/列表容器内的 KaTeX 数学公式', () => {
+    const container = render(
+      [
+        '复杂度为 $O(n \\log n)$，满足：',
+        '',
+        '$$',
+        '\\sum_{i=1}^{n} i = \\frac{n(n+1)}{2}',
+        '$$',
+        '',
+        '$$x^2 + 1$$',
+        '',
+        '> $$',
+        '> a^2 + b^2 = c^2',
+        '> $$',
+        '',
+        '- 列表项：',
+        '  $$',
+        '  e^{i\\pi} + 1 = 0',
+        '  $$',
+      ].join('\n'),
+    );
+    const inlineMath = container.querySelector<HTMLElement>('.fm-math-inline');
+    const blockMaths = container.querySelectorAll<HTMLElement>('.fm-math-block');
+    expect(inlineMath).not.toBeNull();
+    expect(inlineMath?.dataset.mathDisplay).toBe('inline');
+    expect(inlineMath?.querySelector('.katex')).not.toBeNull();
+    expect(blockMaths).toHaveLength(4);
+    for (const blockMath of blockMaths) {
+      expect(blockMath.dataset.mathDisplay).toBe('block');
+      expect(blockMath.classList.contains('fm-math-error')).toBe(false);
+      expect(blockMath.querySelector('.katex-display')).not.toBeNull();
+    }
+    expect(container.querySelector('blockquote .fm-math-block .katex-display')).not.toBeNull();
   });
-  it('does not rewrite ordered source markers during sorting', () => {
-    const m=parseDocument('4. [ ] alpha\n5. [ ] beta\n6. [x] gamma\n');
-    expect(apply(m.text,moveItemChanges(m,m.tasks[1].from,m.tasks[0].from))).toBe('5. [ ] beta\n4. [ ] alpha\n6. [x] gamma\n');
-  });
-});
 
-describe('inconsistent completion imported from source', () => {
-  it('keeps unchecked descendants reachable when an imported parent is already checked', () => {
-    const m=parseDocument('- [x] parent\n  - [ ] unfinished\n  - [x] finished\n');
-    const visible=apply(m.text,getHiddenRanges(m,'todo').map(range=>({...range,insert:''})));
-    expect(visible).toContain('parent');expect(visible).toContain('unfinished');expect(visible).toContain('- [x] finished');
-    expect(searchTasks(m,'unfinished',false)).toHaveLength(1);
+  it('支持尖括号包裹的链接目标 [x](<https://example.com>) 正常解析为安全外链', () => {
+    const container = render('[尖括号链接](<https://example.com/path(1)>) 与 [引用链接][ref]\n\n[ref]: <https://example.com/ref>');
+    const links = [...container.querySelectorAll('a')].map(a => a.getAttribute('href'));
+    expect(links).toEqual(['https://example.com/path(1)', 'https://example.com/ref']);
   });
-  it('explicit group completion completes remaining descendants even if parent was already checked', () => {
-    const m=parseDocument('- [x] parent\n  - [ ] unfinished\n');const changes=taskToggleChanges(m,0,true);
-    expect(apply(m.text,changes)).toBe('- [x] parent\n  - [x] unfinished\n');expect(changes).toHaveLength(1);
+
+  it('未闭合公式或非法 KaTeX 语法安全回退为纯文本错误提示，不抛异常也不注入 HTML', () => {
+    const container = render(
+      '未闭合 $x + 1\n\n非法行内 $\\invalidCommandXYZ{1}$ 结束\n\n$$\n\\unclosedBlock\n',
+    );
+    const errors = container.querySelectorAll<HTMLElement>('.fm-math-error');
+    expect(errors.length).toBeGreaterThanOrEqual(3);
+    expect(errors[0].textContent).toBe('$x + 1');
+    expect(errors[1].textContent).toBe('$\\invalidCommandXYZ{1}$');
+    expect(errors[2].textContent).toContain('\\unclosedBlock');
+  });
+
+  it('拦截原始 HTML、脚本注入与危险协议链接/图片（XSS 防护）', () => {
+    const malicious = [
+      '<script>window.__xss = true;</script>',
+      '<img src="x" onerror="alert(1)">',
+      '正文内嵌 <svg onload="alert(1)"></svg> 标签',
+      '[危险脚本](javascript:alert(1))',
+      '[危险数据](data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg==)',
+      '[本地文件](file:///C:/Windows/System32/cmd.exe)',
+      '![恶意图片](javascript:alert(1))',
+      '![SVG数据](data:image/svg+xml;utf8,<svg onload="alert(1)"/>)',
+      '[安全外链](https://example.com/bounty/1)',
+      '[安全邮件](mailto:agent@example.com)',
+      '![安全PNG](data:image/png;base64,AAAA)',
+    ].join('\n\n');
+
+    const container = render(malicious);
+    expect(container.querySelector('script')).toBeNull();
+    expect(container.querySelector('svg')).toBeNull();
+    expect(container.innerHTML).not.toContain('onerror');
+    expect(container.innerHTML).not.toContain('onload');
+    expect(container.innerHTML).not.toContain('javascript:');
+    expect(container.innerHTML).not.toContain('data:text/html');
+    expect(container.innerHTML).not.toContain('file:///');
+
+    const links = [...container.querySelectorAll('a')].map(a => a.getAttribute('href'));
+    expect(links).toEqual(['https://example.com/bounty/1', 'mailto:agent@example.com']);
+
+    const images = [...container.querySelectorAll('img')].map(img => img.getAttribute('src'));
+    expect(images).toEqual(['data:image/png;base64,AAAA']);
+
+    expect(safeLinkUrl('https://example.com')).toBe('https://example.com');
+    expect(safeLinkUrl('javascript:alert(1)')).toBeNull();
+    expect(safeImageUrl('https://example.com/pic.webp')).toBe('https://example.com/pic.webp');
+    expect(safeImageUrl('data:image/svg+xml;base64,AAAA')).toBeNull();
+  });
+
+  it('KaTeX 禁用 trust 宏与危险命令（如 \\href{javascript:...} 不生成可执行链接）', () => {
+    const hrefResult = renderMathToHtml('\\href{javascript:alert(1)}{click}', false);
+    if (hrefResult.ok) {
+      const box = document.createElement('div');
+      box.innerHTML = hrefResult.html;
+      expect(box.querySelector('a')).toBeNull();
+    } else {
+      expect(hrefResult.error).toBeTruthy();
+    }
   });
 });

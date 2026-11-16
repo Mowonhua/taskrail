@@ -18,8 +18,8 @@
 | 关键实现 | src-tauri/src/window_material.rs::apply_material |
 | 关键实现 | src-tauri/src/window_material.rs::set_window_material |
 | 关键实现 | src/lib/window-material.ts::WindowMaterialController |
-| 关键实现 | src/App.svelte |
-| 关键实现 | src/main.ts |
+| 关键实现 | src/App.svelte::<module> |
+| 关键实现 | src/main.ts::<module> |
 
 ### 行为场景
 
@@ -29,5 +29,5 @@
 | S-02 | 正常 | 最小化期间保留原有系统背景不提前拆除，从最小化恢复可见时同步重建系统 Acrylic 背景样本 | src-tauri/src/window_material.rs::tests::backdrop_refresh_rebuilds_acrylic_after_minimize |
 | S-03 | 正常 | 透明、Blur 与 Acrylic 材质激活期间抑制 `WM_ERASEBKGND` 背景擦除，并在窗口销毁前移除所有辅助子类 | src-tauri/src/window_material.rs::tests::no_erase_background_installs_removes_and_suppresses_erase |
 | S-04 | 兼容 | 系统早于 Windows 11 22H2 时，Acrylic 请求使用同等透明的系统 Blur，窗口仍透明且失焦策略保留；支持系统背景属性的版本继续使用 Acrylic | src-tauri/src/window_material.rs::tests::acrylic_effect_degrades_to_blur_before_system_backdrop |
-| S-05 | 正常 | 桌面端以透明主题启动时不先触发 `opaque` 材质调用，待首帧材质与内容就绪后触发 `onready` 显示窗口，且不叠加 CSS 启动透明度淡入 | src/lib/session/app-integration.test.ts |
-| S-06 | 边界 | 已处于透明状态时切换明暗模式或失焦偏好，在等待原生调用期间保持网页透明不闪回实色；后续失败或不支持时回落为实色 | src/lib/window-material.test.ts |
+| S-05 | 正常 | 桌面端以透明主题启动时不先触发 `opaque` 材质调用，待首帧材质与内容就绪后触发 `onready` 显示窗口，且不叠加 CSS 启动透明度淡入 | src/lib/session/app-integration.test.ts::悬赏板工作台外壳集成测试 > 透明主题启动时不先发 opaque 请求\，等待原生材质与内容就绪后才触发 onready 并执行遮罩淡出 |
+| S-06 | 边界 | 已处于透明状态时切换明暗模式或失焦偏好，在等待原生调用期间保持网页透明不闪回实色；后续失败或不支持时回落为实色 | src/lib/window-material.test.ts::窗口材质协调 > 已透明时调整明暗或失焦偏好\，在等待原生完成期间不闪回实色, src/lib/window-material.test.ts::窗口材质协调 > 已透明后后续切换失败或不支持时回落为实色 |
