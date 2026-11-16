@@ -99,4 +99,42 @@ describe('窗口材质协调', () => {
     await controller.update('blur');
     expect(root.dataset.windowTransparent).toBe('false');
   });
+  it('透明状态下触发过渡遮罩会交替启动淡出动画并在结束后清理，切回实色或减少动态效果时不保留遮罩', async () => {
+    const root = document.createElement('div');
+    const controller = new WindowMaterialController(root, vi.fn().mockResolvedValue(true));
+
+    controller.showBackdropVeil('fade');
+    expect(root.dataset.backdropVeil).toBeUndefined();
+
+    await controller.update('acrylic', 'dark');
+    controller.showBackdropVeil('hold');
+    expect(root.dataset.backdropVeil).toBe('active');
+
+    controller.showBackdropVeil('fade');
+    expect(root.dataset.backdropVeil).toBe('fade-a');
+
+    controller.showBackdropVeil('fade');
+    expect(root.dataset.backdropVeil).toBe('fade-b');
+
+    const endEvent = new Event('animationend') as Event & { animationName: string };
+    Object.defineProperty(endEvent, 'animationName', { value: 'backdrop-veil-fade-b' });
+    root.dispatchEvent(endEvent);
+    expect(root.dataset.backdropVeil).toBeUndefined();
+
+    controller.showBackdropVeil('fade');
+    expect(root.dataset.backdropVeil).toBe('fade-a');
+    await controller.update('opaque', 'light');
+    expect(root.dataset.backdropVeil).toBeUndefined();
+
+    await controller.update('acrylic', 'light');
+    const originalMatchMedia = window.matchMedia;
+    vi.stubGlobal('matchMedia', vi.fn().mockReturnValue({ matches: true }));
+    try {
+      controller.showBackdropVeil('fade');
+      expect(root.dataset.backdropVeil).toBeUndefined();
+    } finally {
+      vi.stubGlobal('matchMedia', originalMatchMedia);
+      controller.dispose();
+    }
+  });
 });

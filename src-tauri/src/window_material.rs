@@ -212,7 +212,14 @@ unsafe fn reset_acrylic_backdrop(hwnd: HWND) {
     }
 }
 
-/// 维护 Acrylic 背景刷新子类：最小化期间保留已有材质不被提前拆除，从最小化恢复可见时再同步重建样本。
+#[cfg(target_os = "windows")]
+struct RefreshBackdropState {
+    was_minimized: std::sync::atomic::AtomicBool,
+    restore_notified: std::sync::atomic::AtomicBool,
+    window: Option<WebviewWindow>,
+}
+
+/// 维护 Acrylic 背景刷新子类：最小化期间保留已有材质不被提前拆除，从最小化恢复可见时同步重建样本并通知前端平滑过渡。
 /// 销毁前移除回调并释放状态。
 #[cfg(target_os = "windows")]
 unsafe extern "system" fn refresh_backdrop_subclass(
@@ -223,11 +230,13 @@ unsafe extern "system" fn refresh_backdrop_subclass(
     subclass_id: usize,
     ref_data: usize,
 ) -> LRESULT {
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::Ordering;
+    use tauri::Emitter;
     use windows_sys::Win32::UI::{
         Shell::{DefSubclassProc, RemoveWindowSubclass},
         WindowsAndMessaging::{
-            SIZE_MAXIMIZED, SIZE_MINIMIZED, SIZE_RESTORED, WM_NCDESTROY, WM_SIZE,
+            IsIconic, SC_MAXIMIZE, SC_RESTORE, SIZE_MAXIMIZED, SIZE_MINIMIZED, SIZE_RESTORED,
+            WM_NCDESTROY, WM_SIZE, WM_SYSCOMMAND,
         },
     };
 
@@ -235,19 +244,36 @@ unsafe extern "system" fn refresh_backdrop_subclass(
         let removed =
             unsafe { RemoveWindowSubclass(hwnd, Some(refresh_backdrop_subclass), subclass_id) };
         if removed != 0 && ref_data != 0 {
-            drop(unsafe { Box::from_raw(ref_data as *mut AtomicBool) });
+            drop(unsafe { Box::from_raw(ref_data as *mut RefreshBackdropState) });
         }
         return unsafe { DefSubclassProc(hwnd, message, wparam, lparam) };
     }
+    if message == WM_SYSCOMMAND && ref_data != 0 {
+        let command = (wparam & 0xfff0) as u32;
+        if (command == SC_RESTORE || command == SC_MAXIMIZE) && unsafe { IsIconic(hwnd) } != 0 {
+            let state = unsafe { &*(ref_data as *const RefreshBackdropState) };
+            if !state.restore_notified.swap(true, Ordering::Relaxed) {
+                if let Some(window) = state.window.as_ref() {
+                    let _ = window.emit("taskrail:window-restored", ());
+                }
+            }
+        }
+    }
     let result = unsafe { DefSubclassProc(hwnd, message, wparam, lparam) };
     if message == WM_SIZE && ref_data != 0 {
-        let was_minimized = unsafe { &*(ref_data as *const AtomicBool) };
+        let state = unsafe { &*(ref_data as *const RefreshBackdropState) };
         if wparam == SIZE_MINIMIZED as WPARAM {
             // 最小化时不撤销系统背景，避免后续系统恢复动画期缺少已合成材质。
-            was_minimized.store(true, Ordering::Relaxed);
+            state.was_minimized.store(true, Ordering::Relaxed);
+            state.restore_notified.store(false, Ordering::Relaxed);
         } else if (wparam == SIZE_RESTORED as WPARAM || wparam == SIZE_MAXIMIZED as WPARAM)
-            && was_minimized.swap(false, Ordering::Relaxed)
+            && state.was_minimized.swap(false, Ordering::Relaxed)
         {
+            if !state.restore_notified.swap(true, Ordering::Relaxed) {
+                if let Some(window) = state.window.as_ref() {
+                    let _ = window.emit("taskrail:window-restored", ());
+                }
+            }
             unsafe { reset_acrylic_backdrop(hwnd) };
         }
     }
@@ -257,7 +283,11 @@ unsafe extern "system" fn refresh_backdrop_subclass(
 /// 为当前 HWND 安装或移除 Acrylic 背景刷新策略；必须在窗口所属主线程调用。
 /// 同一回调与 ID 重复安装不会叠加子类，移除时不存在策略视为成功。
 #[cfg(target_os = "windows")]
-fn set_refresh_backdrop(hwnd: HWND, enabled: bool) -> Result<(), String> {
+fn set_refresh_backdrop(
+    hwnd: HWND,
+    enabled: bool,
+    window: Option<WebviewWindow>,
+) -> Result<(), String> {
     use std::sync::atomic::AtomicBool;
     use windows_sys::Win32::UI::{
         Shell::{GetWindowSubclass, RemoveWindowSubclass, SetWindowSubclass},
@@ -280,7 +310,11 @@ fn set_refresh_backdrop(hwnd: HWND, enabled: bool) -> Result<(), String> {
         if installed {
             return Ok(());
         }
-        let state = Box::into_raw(Box::new(AtomicBool::new(false)));
+        let state = Box::into_raw(Box::new(RefreshBackdropState {
+            was_minimized: AtomicBool::new(false),
+            restore_notified: AtomicBool::new(false),
+            window,
+        }));
         if unsafe {
             SetWindowSubclass(
                 hwnd,
@@ -309,7 +343,7 @@ fn set_refresh_backdrop(hwnd: HWND, enabled: bool) -> Result<(), String> {
         return Err("无法移除窗口背景刷新策略。".to_owned());
     }
     if reference != 0 {
-        drop(unsafe { Box::from_raw(reference as *mut AtomicBool) });
+        drop(unsafe { Box::from_raw(reference as *mut RefreshBackdropState) });
     }
     Ok(())
 }
@@ -480,7 +514,9 @@ fn apply_material(
                     match window_vibrancy::apply_acrylic(window, None) {
                         Ok(()) => {
                             let result = set_no_erase_background(hwnd.0, true)
-                                .and_then(|()| set_refresh_backdrop(hwnd.0, true))
+                                .and_then(|()| {
+                                    set_refresh_backdrop(hwnd.0, true, Some(window.clone()))
+                                })
                                 .and_then(|()| {
                                     set_keep_transparency_on_blur(
                                         hwnd.0,
@@ -535,7 +571,7 @@ fn clear_acrylic_layer(window: &WebviewWindow) -> Result<(), String> {
     let hwnd = window
         .hwnd()
         .map_err(|error| format!("无法获取窗口材质句柄：{error}"))?;
-    let refresh_result = set_refresh_backdrop(hwnd.0, false);
+    let refresh_result = set_refresh_backdrop(hwnd.0, false, None);
     let transparency_result = set_keep_transparency_on_blur(hwnd.0, false);
     let acrylic_result = window_vibrancy::clear_acrylic(window);
     refresh_result?;
@@ -558,7 +594,7 @@ fn clear_material(window: &WebviewWindow) -> Result<(), String> {
         .hwnd()
         .map_err(|error| format!("无法获取窗口材质句柄：{error}"))?;
     let erase_result = set_no_erase_background(hwnd.0, false);
-    let refresh_result = set_refresh_backdrop(hwnd.0, false);
+    let refresh_result = set_refresh_backdrop(hwnd.0, false, None);
     let transparency_result = set_keep_transparency_on_blur(hwnd.0, false);
     let results = [
         window_vibrancy::clear_blur(window),
@@ -808,7 +844,7 @@ mod tests {
         install_observer(&window, &mut observer);
         assert!(set_keep_transparency_on_blur(window.0, true).is_ok());
         assert!(set_no_erase_background(window.0, true).is_ok());
-        assert!(set_refresh_backdrop(window.0, true).is_ok());
+        assert!(set_refresh_backdrop(window.0, true, None).is_ok());
         assert_ne!(unsafe { DestroyWindow(window.0) }, 0);
         window.0 = std::ptr::null_mut();
         assert!(observer.transparency_removed_before_destroy);
@@ -836,12 +872,12 @@ mod tests {
     fn backdrop_refresh_installs_and_removes_idempotently() {
         let window = TestWindow::new();
         assert!(!refresh_backdrop_installed(&window));
-        assert!(set_refresh_backdrop(window.0, false).is_ok());
-        assert!(set_refresh_backdrop(window.0, true).is_ok());
-        assert!(set_refresh_backdrop(window.0, true).is_ok());
+        assert!(set_refresh_backdrop(window.0, false, None).is_ok());
+        assert!(set_refresh_backdrop(window.0, true, None).is_ok());
+        assert!(set_refresh_backdrop(window.0, true, None).is_ok());
         assert!(refresh_backdrop_installed(&window));
-        assert!(set_refresh_backdrop(window.0, false).is_ok());
-        assert!(set_refresh_backdrop(window.0, false).is_ok());
+        assert!(set_refresh_backdrop(window.0, false, None).is_ok());
+        assert!(set_refresh_backdrop(window.0, false, None).is_ok());
         assert!(!refresh_backdrop_installed(&window));
     }
 
@@ -861,7 +897,7 @@ mod tests {
             // Windows 10 使用旧的 Acrylic 路径，没有需要验证的系统背景属性。
             return;
         }
-        assert!(set_refresh_backdrop(window.0, true).is_ok());
+        assert!(set_refresh_backdrop(window.0, true, None).is_ok());
         // 未经历最小化的普通恢复不应多余重建。
         unsafe { SendMessageW(window.0, WM_SIZE, SIZE_RESTORED as WPARAM, 0) };
         if let Some(value) = read_system_backdrop(&window) {

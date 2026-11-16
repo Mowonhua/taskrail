@@ -6,7 +6,18 @@
 
 /* 仅原生窗口材质应用成功后清空根背景；浏览器和失败状态使用基础实色。 */
 :root[data-window-transparent=true]{background:transparent}
-:root[data-window-transparent=true] body{background:var(--window-background,var(--canvas))}
+:root[data-window-transparent=true] body{background:var(--window-background,var(--canvas));isolation:isolate}
+/* 系统缩放动画期 DWM 不实时渲染 Acrylic 模糊，借由贴近系统 Acrylic 实际亮度的雾面底色先遮挡清晰背景再平滑淡出交接；减少动态效果与高对比度模式保持终态。 */
+:root[data-window-transparent=true][data-backdrop-veil] body::before{content:"";position:fixed;inset:0;z-index:-1;pointer-events:none;background:color-mix(in oklab,color-mix(in oklab,var(--canvas) 93.5%,black) 88%,transparent);opacity:0}
+:root[data-window-transparent=true][data-theme=dark][data-backdrop-veil] body::before{background:color-mix(in oklab,color-mix(in oklab,var(--canvas) 15%,#a4a5a6) 88%,transparent)}
+@media(prefers-reduced-motion:no-preference){
+  :root[data-window-transparent=true][data-backdrop-veil=active] body::before{opacity:1}
+  :root[data-window-transparent=true][data-backdrop-veil=fade-a] body::before{animation:backdrop-veil-fade-a .3s cubic-bezier(.22,1,.36,1) forwards}
+  :root[data-window-transparent=true][data-backdrop-veil=fade-b] body::before{animation:backdrop-veil-fade-b .3s cubic-bezier(.22,1,.36,1) forwards}
+}
+@media(forced-colors:active){:root[data-window-transparent=true][data-backdrop-veil] body::before{display:none}}
+@keyframes backdrop-veil-fade-a{0%,58%{opacity:1}100%{opacity:0}}
+@keyframes backdrop-veil-fade-b{0%,58%{opacity:1}100%{opacity:0}}
 *{box-sizing:border-box}
 body{margin:0;color:var(--ink);background:var(--canvas)}
 button,input,select,textarea{font:inherit;color:inherit}

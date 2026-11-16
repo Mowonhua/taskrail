@@ -1314,17 +1314,22 @@
     updateSystemTheme(); colorPreference.addEventListener('change', updateSystemTheme);
     let unlistenClose = () => {};
     let unlistenBack = () => {};
+    let unlistenRestore = () => {};
     let disposed = false;
     const revealDesktopWindow = async () => {
       if (disposed || !onready) return;
       await tick();
       if (initialMaterialReady) await initialMaterialReady;
       await tick();
+      windowMaterial.showBackdropVeil('hold');
       await Promise.race([
-        new Promise<void>(resolve => requestAnimationFrame(() => resolve())),
-        new Promise<void>(resolve => setTimeout(resolve, 32)),
+        new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))),
+        new Promise<void>(resolve => setTimeout(resolve, 48)),
       ]);
-      if (!disposed) onready();
+      if (!disposed) {
+        onready();
+        windowMaterial.showBackdropVeil('fade');
+      }
     };
     const initialize = async () => {
       try {
@@ -1373,7 +1378,16 @@
           unlistenBack = () => { void back.unregister(); };
         }
         if (desktop) {
-          const { getCurrentWindow } = await import('@tauri-apps/api/window');
+          const [{ getCurrentWindow }, { listen }] = await Promise.all([
+            import('@tauri-apps/api/window'),
+            import('@tauri-apps/api/event'),
+          ]);
+          if (disposed) return;
+          const restored = await listen('taskrail:window-restored', () => {
+            if (!disposed) windowMaterial.showBackdropVeil('fade');
+          });
+          if (disposed) restored();
+          else unlistenRestore = restored;
           unlistenClose = await getCurrentWindow().onCloseRequested(async event => {
             event.preventDefault();
             if (updateInstalling || canvasClosing) return;
@@ -1428,7 +1442,7 @@
       motionPreference.removeEventListener('change', updateMotionPreference);
       colorPreference.removeEventListener('change', updateSystemTheme);
       document.removeEventListener('visibilitychange', visibility); window.visualViewport?.removeEventListener('resize', viewport);
-      disposed = true; unlistenClose(); unlistenBack(); window.removeEventListener('beforeunload', beforeUnload); window.removeEventListener('focus', focus);
+      disposed = true; unlistenClose(); unlistenBack(); unlistenRestore(); windowMaterial.dispose(); window.removeEventListener('beforeunload', beforeUnload); window.removeEventListener('focus', focus);
       clearTimeout(searchTimer); clearTimeout(configTimer); clearTimeout(toastTimer);
       updater?.dispose(); syncController?.stop();
       for (const session of sessions.values()) { session.stopWatch(); session.saver.dispose(); } editor?.destroy();

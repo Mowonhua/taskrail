@@ -47,6 +47,7 @@ const desktopBoundary = vi.hoisted(() => ({
   close: null as null | ((event: { preventDefault: () => void }) => Promise<void>),
   resized: null as null | (() => void),
   focused: null as null | ((event: { payload: boolean }) => void),
+  restored: null as null | (() => void),
   maximized: false,
   invoke: vi.fn(async () => true),
   minimize: vi.fn(async () => {}),
@@ -62,7 +63,13 @@ const desktopBoundary = vi.hoisted(() => ({
   exitCard: vi.fn<() => Promise<void>>(async () => {}),
 }));
 vi.mock('../sync/native', () => ({ nativeSyncStore: { load: async () => null, save: async () => {} }, nativeSyncTransport: { status: async () => ({ paired: false, listening: false }), disconnect: async () => {} } }));
-vi.mock('@tauri-apps/api/event', () => ({ listen: async () => () => {} }));
+vi.mock('@tauri-apps/api/event', () => ({ listen: async (event: string, callback: () => void) => {
+  if (event === 'taskrail:window-restored') {
+    desktopBoundary.restored = callback;
+    return () => { desktopBoundary.restored = null; };
+  }
+  return () => {};
+} }));
 vi.mock('../card-window', () => ({ createCardWindowController: () => ({ enter: desktopBoundary.enterCard, exit: desktopBoundary.exitCard }) }));
 vi.mock('../updater/tauri', () => ({ TauriUpdatePort: class { check = desktopBoundary.updateCheck; } }));
 vi.mock('../updater/android', () => ({ AndroidUpdatePort: class { check = desktopBoundary.updateCheck; } }));
@@ -256,7 +263,8 @@ beforeEach(() => {
   // 首次启动按 navigator.languages 决定界面语言；测试环境固定中文，与断言文案保持一致。
   Object.defineProperty(window.navigator, 'languages', { configurable: true, value: ['zh-CN'] });
   desktopBoundary.enabled = false; desktopBoundary.close = null; desktopBoundary.destroy.mockClear();
-  desktopBoundary.resized = null; desktopBoundary.focused = null; desktopBoundary.maximized = false;
+  desktopBoundary.resized = null; desktopBoundary.focused = null; desktopBoundary.restored = null; desktopBoundary.maximized = false;
+  delete document.documentElement.dataset.backdropVeil;
   desktopBoundary.invoke.mockReset().mockResolvedValue(true);
   desktopBoundary.minimize.mockClear();
   desktopBoundary.toggleMaximize.mockReset().mockImplementation(async () => {
@@ -1068,7 +1076,7 @@ describe('App 主题导入与持久化', () => {
       target: container,
       props: {
         onready: () => {
-          events.push(`ready:${document.documentElement.dataset.windowTransparent}:${document.querySelector('.app-shell')?.classList.contains('booted')}`);
+          events.push(`ready:${document.documentElement.dataset.windowTransparent}:${document.querySelector('.app-shell')?.classList.contains('booted')}:${document.documentElement.dataset.backdropVeil}`);
         },
       },
     });
@@ -1079,7 +1087,11 @@ describe('App 主题导入与持久化', () => {
     await new Promise(resolve => setTimeout(resolve, 60));
     expect(events).toEqual([]);
     resolveMaterial(true);
-    await vi.waitFor(() => expect(events).toEqual(['ready:true:true']));
+    await vi.waitFor(() => expect(events).toEqual(['ready:true:true:active']));
+    expect(document.documentElement.dataset.backdropVeil).toBe('fade-a');
+    await vi.waitFor(() => expect(desktopBoundary.restored).not.toBeNull());
+    desktopBoundary.restored!();
+    expect(document.documentElement.dataset.backdropVeil).toBe('fade-b');
   });
   const customTheme: ThemeDefinition = {
     ...builtInThemes[0], id: 'custom-slate', name: '自制石板', corners: 'square',
