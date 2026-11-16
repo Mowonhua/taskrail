@@ -29,6 +29,8 @@ button svg{flex-shrink:0}
 .app-shell{--topbar-height:67px;display:grid;grid-template-columns:232px minmax(0,1fr);height:100dvh;overflow:hidden;opacity:0;transition:grid-template-columns .18s cubic-bezier(.215,.61,.355,1)}
 /* 启动解析完成前整体透明，booted 置位后一次性淡入，掩盖加载期间各处内容跳变；结束后常驻不影响后续布局动画。 */
 .app-shell.booted{opacity:1;transition:opacity .18s ease-out,grid-template-columns .18s cubic-bezier(.215,.61,.355,1)}
+/* 桌面端由窗口显隐与系统入场动画接管展示时机，跳过网页首帧透明度淡入，避免打开瞬间从全透明渐变为半透明。 */
+.app-shell.desktop-window.booted:not(.card-transitioning){transition:grid-template-columns .18s cubic-bezier(.215,.61,.355,1)}
 .app-shell.sidebar-hidden{grid-template-columns:0px minmax(0,1fr)}
 .app-shell.card-transitioning{transition:none}
 .sidebar-slot{grid-area:1 / 1;min-width:0;overflow:hidden}

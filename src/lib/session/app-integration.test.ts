@@ -1047,6 +1047,40 @@ describe('App 主题导入与持久化', () => {
     await vi.waitFor(() => expect(desktopBoundary.invoke).toHaveBeenLastCalledWith('set_window_material', { material: 'acrylic', theme: 'dark', keepTransparentOnBlur: false }));
     await vi.waitFor(async () => expect((await files.loadConfig())?.preferences.keepTransparentOnBlur).toBe(false));
   });
+  it('桌面端以透明主题启动时不先切到实色，原生材质完成后才触发窗口显示就绪回调', async () => {
+    desktopBoundary.enabled = true;
+    await files.create(firstProject.path, '# 启动透明\n');
+    await files.saveConfig({
+      projects: [firstProject],
+      activeProjectId: firstProject.id,
+      preferences: { ...defaultPreferences, themeId: 'frosted-glass', theme: 'dark' },
+      projectViews: {},
+    });
+    let resolveMaterial!: (value: boolean) => void;
+    desktopBoundary.invoke.mockImplementation((...args: unknown[]) => {
+      if (args[0] === 'set_window_material') {
+        return new Promise<boolean>(resolve => { resolveMaterial = resolve; });
+      }
+      return Promise.resolve(true);
+    });
+    const events: string[] = [];
+    mounted = mount(App, {
+      target: container,
+      props: {
+        onready: () => {
+          events.push(`ready:${document.documentElement.dataset.windowTransparent}:${document.querySelector('.app-shell')?.classList.contains('booted')}`);
+        },
+      },
+    });
+    await vi.waitFor(() => expect(desktopBoundary.invoke).toHaveBeenCalledWith('set_window_material', { material: 'acrylic', theme: 'dark', keepTransparentOnBlur: false }));
+    expect(desktopBoundary.invoke.mock.calls.filter(call => (call as unknown[])[0] === 'set_window_material')).toEqual([
+      ['set_window_material', { material: 'acrylic', theme: 'dark', keepTransparentOnBlur: false }],
+    ]);
+    await new Promise(resolve => setTimeout(resolve, 60));
+    expect(events).toEqual([]);
+    resolveMaterial(true);
+    await vi.waitFor(() => expect(events).toEqual(['ready:true:true']));
+  });
   const customTheme: ThemeDefinition = {
     ...builtInThemes[0], id: 'custom-slate', name: '自制石板', corners: 'square',
     light: { ...builtInThemes[0].light, canvas: '#ABCDEF' }, dark: { ...builtInThemes[0].dark, canvas: '#123456' },

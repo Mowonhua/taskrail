@@ -24,8 +24,17 @@ function bootTheme(): { theme: ThemeDefinition; mode: ThemeMode } {
 
 const boot = bootTheme();
 applyTheme(document.documentElement, boot.theme, boot.mode, window.matchMedia('(prefers-color-scheme: dark)').matches);
-mount(App, { target: document.getElementById('app')! });
+let windowShown = false;
+const showDesktopWindow = () => {
+  if (windowShown || !platformCapabilities().desktop) return;
+  windowShown = true;
+  void getCurrentWindow().show().then(() => getCurrentWindow().setFocus());
+};
 
-// 桌面窗口以 visible:false 创建，避免 webview 首帧前露出透明空窗。
-// 隐藏窗口可能暂停 rAF，不能用它等待绘制完成；短延时后直接显示，由系统合成首帧。
-if (platformCapabilities().desktop) setTimeout(() => { void getCurrentWindow().show().then(() => getCurrentWindow().setFocus()); }, 50);
+mount(App, {
+  target: document.getElementById('app')!,
+  props: platformCapabilities().desktop ? { onready: showDesktopWindow } : {},
+});
+
+// 桌面窗口以 visible:false 创建，等待首帧主题、原生材质和界面内容就绪后再显示，避免从透明底闪到半透明；同时保留兜底超时避免初始化异常导致窗口长期不可见。
+if (platformCapabilities().desktop) setTimeout(showDesktopWindow, 1500);

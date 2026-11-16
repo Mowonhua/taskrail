@@ -60,4 +60,43 @@ describe('窗口材质协调', () => {
     expect(root.dataset.windowTransparent).toBe('false');
     await reset;
   });
+  it('已透明时调整明暗或失焦偏好，在等待原生完成期间不闪回实色', async () => {
+    const root = document.createElement('div');
+    let finishPending!: (value: boolean) => void;
+    const native = vi.fn()
+      .mockResolvedValueOnce(true)
+      .mockImplementationOnce(() => new Promise<boolean>(resolve => { finishPending = resolve; }));
+    const controller = new WindowMaterialController(root, native);
+    await controller.update('acrylic', 'dark', false);
+    expect(root.dataset.windowTransparent).toBe('true');
+
+    const pending = controller.update('acrylic', 'light', true);
+    expect(root.dataset.windowTransparent).toBe('true');
+    await Promise.resolve();
+    expect(root.dataset.windowTransparent).toBe('true');
+
+    finishPending(true);
+    await pending;
+    expect(root.dataset.windowTransparent).toBe('true');
+  });
+  it('已透明后后续切换失败或不支持时回落为实色', async () => {
+    const root = document.createElement('div');
+    const native = vi.fn()
+      .mockResolvedValueOnce(true)
+      .mockRejectedValueOnce(new Error('OS failure'))
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(false);
+    const controller = new WindowMaterialController(root, native);
+    await controller.update('acrylic', 'dark');
+    expect(root.dataset.windowTransparent).toBe('true');
+
+    await expect(controller.update('blur')).rejects.toThrow('OS failure');
+    expect(root.dataset.windowTransparent).toBe('false');
+
+    await controller.update('acrylic', 'light');
+    expect(root.dataset.windowTransparent).toBe('true');
+
+    await controller.update('blur');
+    expect(root.dataset.windowTransparent).toBe('false');
+  });
 });

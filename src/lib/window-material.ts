@@ -21,14 +21,19 @@ export class WindowMaterialController {
    * 函数职责：按请求顺序切换原生材质，只发布最后一次请求的网页透明状态。
    * 输入说明：material 已由主题校验限制；旧主题传 opaque；theme 保留 system 以解除原生显式主题；否则传当前浅深模式。keepTransparentOnBlur 缺省 false，独立于主题包，仅由支持的原生材质消费。
    * 输出说明：完成后原生状态已应用，错误传给调用方且不阻断后续切换。
-   * 实现思路：先恢复实色，再将原生操作入队；用请求序号忽略过期结果。
+   * 实现思路：切到实色或尚未透明时先同步关闭网页透明；已透明状态下调整明暗或失焦偏好期间保持透明避免闪回实色，若最终不支持或失败再回落实色。
    */
   update(material: WindowMaterial, theme: 'light' | 'dark' | 'system' = 'light', keepTransparentOnBlur = false): Promise<void> {
     const revision = ++this.revision;
-    this.root.dataset.windowTransparent = 'false';
+    if (material === 'opaque' || this.root.dataset.windowTransparent !== 'true') {
+      this.root.dataset.windowTransparent = 'false';
+    }
     const operation = this.queue.then(async () => {
       const supported = await this.applyNative(material, theme, keepTransparentOnBlur);
       if (revision === this.revision) this.root.dataset.windowTransparent = String(supported && material !== 'opaque');
+    }).catch(error => {
+      if (revision === this.revision) this.root.dataset.windowTransparent = 'false';
+      throw error;
     });
     // 吞掉的仅是内部队列错误，当前调用方仍收到原始异常；后续主题或偏好切换可继续恢复。
     this.queue = operation.catch(() => {});

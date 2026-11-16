@@ -7,41 +7,14 @@ use tauri::{Theme, WebviewWindow};
 #[cfg(target_os = "windows")]
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 
-/// 在主窗口首次显示前关闭 DWM 过渡，并保持到窗口销毁。
-/// 恢复消息到达时系统可能已开始动画，因此不能等到恢复时再设置。
-/// 此设置只控制当前窗口的过渡，不改变透明背景或 Acrylic 材质。
-#[cfg(target_os = "windows")]
-pub fn disable_transitions(app: &tauri::App) -> Result<(), String> {
-    use tauri::Manager;
-    use windows_sys::Win32::Graphics::Dwm::{
-        DwmSetWindowAttribute, DWMWA_TRANSITIONS_FORCEDISABLED,
-    };
-
-    let window = app
-        .get_webview_window("main")
-        .ok_or_else(|| "无法关闭窗口过渡：主窗口不存在。".to_owned())?;
-    let hwnd = window.hwnd().map_err(|error| error.to_string())?;
-    // Win32 BOOL 为四字节；Rust bool 的大小不符合此接口契约。
-    let disabled: i32 = 1;
-    let result = unsafe {
-        DwmSetWindowAttribute(
-            hwnd.0 as HWND,
-            DWMWA_TRANSITIONS_FORCEDISABLED as u32,
-            (&disabled as *const i32).cast(),
-            std::mem::size_of_val(&disabled) as u32,
-        )
-    };
-    if result < 0 {
-        return Err(format!("无法关闭窗口过渡：HRESULT 0x{:08X}。", result as u32));
-    }
-    Ok(())
-}
-
 #[cfg(target_os = "windows")]
 const KEEP_TRANSPARENCY_SUBCLASS_ID: usize = 1;
 
 #[cfg(target_os = "windows")]
 const REFRESH_BACKDROP_SUBCLASS_ID: usize = 2;
+
+#[cfg(target_os = "windows")]
+const NO_ERASE_SUBCLASS_ID: usize = 3;
 
 /// 只维持非客户区的激活绘制状态，不改变输入焦点或原生材质。
 /// 必须先将原消息交给其余子类：Tao 会从 WM_NCACTIVATE 更新真实焦点，不能把 TRUE 传进该链。
@@ -146,14 +119,80 @@ fn set_keep_transparency_on_blur(hwnd: HWND, enabled: bool) -> Result<(), String
     Ok(())
 }
 
+/// 在透明或原生材质激活期间拦截 GDI 擦除，避免显示、恢复和缩放时父窗口背景刷出不透明闪烁。
+#[cfg(target_os = "windows")]
+unsafe extern "system" fn no_erase_subclass(
+    hwnd: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    subclass_id: usize,
+    _: usize,
+) -> LRESULT {
+    use windows_sys::Win32::UI::{
+        Shell::{DefSubclassProc, RemoveWindowSubclass},
+        WindowsAndMessaging::{WM_ERASEBKGND, WM_NCDESTROY},
+    };
+
+    if message == WM_NCDESTROY {
+        unsafe { RemoveWindowSubclass(hwnd, Some(no_erase_subclass), subclass_id) };
+        return unsafe { DefSubclassProc(hwnd, message, wparam, lparam) };
+    }
+    if message == WM_ERASEBKGND {
+        return 1;
+    }
+    unsafe { DefSubclassProc(hwnd, message, wparam, lparam) }
+}
+
+/// 为当前 HWND 安装或移除禁用 GDI 背景擦除的子类；必须在窗口所属主线程调用。
+#[cfg(target_os = "windows")]
+fn set_no_erase_background(hwnd: HWND, enabled: bool) -> Result<(), String> {
+    use windows_sys::Win32::UI::{
+        Shell::{GetWindowSubclass, RemoveWindowSubclass, SetWindowSubclass},
+        WindowsAndMessaging::IsWindow,
+    };
+
+    if unsafe { IsWindow(hwnd) } == 0 {
+        return Err("无法更新窗口擦除抑制策略：窗口句柄无效。".to_owned());
+    }
+    let mut reference = 0;
+    let installed = unsafe {
+        GetWindowSubclass(
+            hwnd,
+            Some(no_erase_subclass),
+            NO_ERASE_SUBCLASS_ID,
+            &mut reference,
+        )
+    } != 0;
+    if enabled {
+        if installed {
+            return Ok(());
+        }
+        if unsafe { SetWindowSubclass(hwnd, Some(no_erase_subclass), NO_ERASE_SUBCLASS_ID, 0) }
+            == 0
+        {
+            return Err("无法安装窗口擦除抑制策略。".to_owned());
+        }
+        return Ok(());
+    }
+    if !installed {
+        return Ok(());
+    }
+    if unsafe { RemoveWindowSubclass(hwnd, Some(no_erase_subclass), NO_ERASE_SUBCLASS_ID) } == 0 {
+        return Err("无法移除窗口擦除抑制策略。".to_owned());
+    }
+    Ok(())
+}
+
 /// 函数职责：重建系统 Acrylic 背景样本。
-/// 输入说明：hwnd 必须是已应用系统背景材质的窗口，且调用时窗口不可见。
+/// 输入说明：hwnd 必须是已应用系统背景材质且已脱离最小化状态的窗口。
 /// 输出说明：不支持系统背景的版本会静默失败，保留原有材质。
-/// 实现思路：同步撤销再恢复瞬态窗口背景，让 DWM 丢弃最小化前的背景样本。
+/// 实现思路：同步切换背景属性以重新采样桌面背景并等待合成帧对齐，避免恢复时透出旧背景或留下透明空档，且不改动客户区玻璃边距以免无边框窗口顶部出现系统标题边框线。
 #[cfg(target_os = "windows")]
 unsafe fn reset_acrylic_backdrop(hwnd: HWND) {
     use windows_sys::Win32::Graphics::Dwm::{
-        DwmSetWindowAttribute, DWMWA_SYSTEMBACKDROP_TYPE, DWMSBT_NONE, DWMSBT_TRANSIENTWINDOW,
+        DwmFlush, DwmSetWindowAttribute, DWMWA_SYSTEMBACKDROP_TYPE, DWMSBT_NONE,
+        DWMSBT_TRANSIENTWINDOW,
     };
 
     unsafe {
@@ -169,11 +208,12 @@ unsafe fn reset_acrylic_backdrop(hwnd: HWND) {
             &DWMSBT_TRANSIENTWINDOW as *const _ as _,
             4,
         );
+        let _ = DwmFlush();
     }
 }
 
-/// 维护 Acrylic 背景刷新子类：最小化完成、窗口已不可见时重建材质。
-/// 恢复时不再改动材质；销毁前移除回调。
+/// 维护 Acrylic 背景刷新子类：最小化期间保留已有材质不被提前拆除，从最小化恢复可见时再同步重建样本。
+/// 销毁前移除回调并释放状态。
 #[cfg(target_os = "windows")]
 unsafe extern "system" fn refresh_backdrop_subclass(
     hwnd: HWND,
@@ -181,21 +221,35 @@ unsafe extern "system" fn refresh_backdrop_subclass(
     wparam: WPARAM,
     lparam: LPARAM,
     subclass_id: usize,
-    _: usize,
+    ref_data: usize,
 ) -> LRESULT {
+    use std::sync::atomic::{AtomicBool, Ordering};
     use windows_sys::Win32::UI::{
         Shell::{DefSubclassProc, RemoveWindowSubclass},
-        WindowsAndMessaging::{SIZE_MINIMIZED, WM_NCDESTROY, WM_SIZE},
+        WindowsAndMessaging::{
+            SIZE_MAXIMIZED, SIZE_MINIMIZED, SIZE_RESTORED, WM_NCDESTROY, WM_SIZE,
+        },
     };
 
     if message == WM_NCDESTROY {
-        unsafe { RemoveWindowSubclass(hwnd, Some(refresh_backdrop_subclass), subclass_id) };
+        let removed =
+            unsafe { RemoveWindowSubclass(hwnd, Some(refresh_backdrop_subclass), subclass_id) };
+        if removed != 0 && ref_data != 0 {
+            drop(unsafe { Box::from_raw(ref_data as *mut AtomicBool) });
+        }
         return unsafe { DefSubclassProc(hwnd, message, wparam, lparam) };
     }
-    // 先让系统完成最小化，再在窗口不可见时替换材质；恢复过程不再触发任何材质变更。
     let result = unsafe { DefSubclassProc(hwnd, message, wparam, lparam) };
-    if message == WM_SIZE && wparam == SIZE_MINIMIZED as WPARAM {
-        unsafe { reset_acrylic_backdrop(hwnd) };
+    if message == WM_SIZE && ref_data != 0 {
+        let was_minimized = unsafe { &*(ref_data as *const AtomicBool) };
+        if wparam == SIZE_MINIMIZED as WPARAM {
+            // 最小化时不撤销系统背景，避免后续系统恢复动画期缺少已合成材质。
+            was_minimized.store(true, Ordering::Relaxed);
+        } else if (wparam == SIZE_RESTORED as WPARAM || wparam == SIZE_MAXIMIZED as WPARAM)
+            && was_minimized.swap(false, Ordering::Relaxed)
+        {
+            unsafe { reset_acrylic_backdrop(hwnd) };
+        }
     }
     result
 }
@@ -204,6 +258,7 @@ unsafe extern "system" fn refresh_backdrop_subclass(
 /// 同一回调与 ID 重复安装不会叠加子类，移除时不存在策略视为成功。
 #[cfg(target_os = "windows")]
 fn set_refresh_backdrop(hwnd: HWND, enabled: bool) -> Result<(), String> {
+    use std::sync::atomic::AtomicBool;
     use windows_sys::Win32::UI::{
         Shell::{GetWindowSubclass, RemoveWindowSubclass, SetWindowSubclass},
         WindowsAndMessaging::IsWindow,
@@ -225,15 +280,17 @@ fn set_refresh_backdrop(hwnd: HWND, enabled: bool) -> Result<(), String> {
         if installed {
             return Ok(());
         }
+        let state = Box::into_raw(Box::new(AtomicBool::new(false)));
         if unsafe {
             SetWindowSubclass(
                 hwnd,
                 Some(refresh_backdrop_subclass),
                 REFRESH_BACKDROP_SUBCLASS_ID,
-                0,
+                state as usize,
             )
         } == 0
         {
+            drop(unsafe { Box::from_raw(state) });
             return Err("无法安装窗口背景刷新策略。".to_owned());
         }
         return Ok(());
@@ -250,6 +307,9 @@ fn set_refresh_backdrop(hwnd: HWND, enabled: bool) -> Result<(), String> {
     } == 0
     {
         return Err("无法移除窗口背景刷新策略。".to_owned());
+    }
+    if reference != 0 {
+        drop(unsafe { Box::from_raw(reference as *mut AtomicBool) });
     }
     Ok(())
 }
@@ -324,10 +384,10 @@ fn acrylic_effect(build: u32) -> AcrylicEffect {
     }
 }
 
-/// 函数职责：在主线程同步窗口明暗，清除前一材质并应用目标材质。
+/// 函数职责：在主线程同步窗口明暗，按目标材质切换原生效果与辅助策略。
 /// 输入说明：window 必须是调用命令所属窗口，theme 保留用户的明暗偏好，None 表示跟随系统；keep_transparent_on_blur 为 Acrylic 的失焦策略；调用方必须保证主线程执行。
 /// 输出说明：不支持目标材质返回 false；原生调用失败时清除效果并返回错误。
-/// 实现思路：Windows 使用同一路原生材质，并按偏好维护 Acrylic 的激活绘制；其他平台仅支持无原生效果模式。
+/// 实现思路：保留同类原生材质以避免明暗或失焦偏好切换时闪断；其他平台仅支持无原生效果模式。
 fn apply_material(
     window: &WebviewWindow,
     material: WindowMaterial,
@@ -341,49 +401,111 @@ fn apply_material(
         .map_err(|error| format!("无法同步窗口明暗：{error}"))?;
     #[cfg(target_os = "windows")]
     {
-        clear_material(window)?;
         let effect = acrylic_effect(windows_version::OsVersion::current().build);
-        let result = match material {
-            WindowMaterial::Opaque | WindowMaterial::Transparent => return Ok(true),
-            WindowMaterial::Blur => window_vibrancy::apply_blur(window, None),
-            // Windows 10 的旧版 Acrylic 在移动或缩放时逐帧重采样桌面，改用系统 Blur 保留透明模糊并消除拖动迟滞。
-            WindowMaterial::Acrylic => match effect {
-                AcrylicEffect::Blur => window_vibrancy::apply_blur(window, None),
-                AcrylicEffect::SystemBackdrop => window_vibrancy::apply_acrylic(window, None),
-            },
-        };
-        match result {
-            Ok(()) => {
-                if matches!(material, WindowMaterial::Acrylic) {
-                    // 背景刷新只服务于系统背景属性；旧版 Blur 没有需要重建的背景样本。
-                    // 失焦透明是独立策略，只在偏好开启时安装。
-                    let result = window
-                        .hwnd()
-                        .map_err(|error| format!("无法获取窗口材质句柄：{error}"))
-                        .and_then(|hwnd| {
-                            let system_backdrop = effect == AcrylicEffect::SystemBackdrop;
-                            set_refresh_backdrop(hwnd.0, system_backdrop)?;
-                            if keep_transparent_on_blur {
-                                set_keep_transparency_on_blur(hwnd.0, true)?;
-                            }
-                            Ok(())
-                        });
-                    if let Err(error) = result {
-                        clear_material(window)?;
-                        return Err(error);
-                    }
-                }
+        match material {
+            WindowMaterial::Opaque => {
+                clear_material(window)?;
                 Ok(true)
             }
-            Err(error) => {
-                // 前端仅在 true 时启用透明画布；失败后清理原生效果，使实色回退不遗留材质。
+            WindowMaterial::Transparent => {
                 clear_material(window)?;
-                match error {
-                    window_vibrancy::Error::UnsupportedPlatform(_)
-                    | window_vibrancy::Error::UnsupportedPlatformVersion(_) => Ok(false),
-                    _ => Err(format!("无法应用窗口材质：{error}")),
+                let hwnd = window
+                    .hwnd()
+                    .map_err(|error| format!("无法获取窗口材质句柄：{error}"))?;
+                set_no_erase_background(hwnd.0, true)?;
+                Ok(true)
+            }
+            WindowMaterial::Blur => {
+                clear_acrylic_layer(window)?;
+                match window_vibrancy::apply_blur(window, None) {
+                    Ok(()) => {
+                        let result = window
+                            .hwnd()
+                            .map_err(|error| format!("无法获取窗口材质句柄：{error}"))
+                            .and_then(|hwnd| set_no_erase_background(hwnd.0, true));
+                        if let Err(error) = result {
+                            clear_material(window)?;
+                            return Err(error);
+                        }
+                        Ok(true)
+                    }
+                    Err(error) => {
+                        clear_material(window)?;
+                        match error {
+                            window_vibrancy::Error::UnsupportedPlatform(_)
+                            | window_vibrancy::Error::UnsupportedPlatformVersion(_) => Ok(false),
+                            _ => Err(format!("无法应用窗口材质：{error}")),
+                        }
+                    }
                 }
             }
+            WindowMaterial::Acrylic => match effect {
+                AcrylicEffect::Blur => {
+                    clear_acrylic_layer(window)?;
+                    match window_vibrancy::apply_blur(window, None) {
+                        Ok(()) => {
+                            let result = window
+                                .hwnd()
+                                .map_err(|error| format!("无法获取窗口材质句柄：{error}"))
+                                .and_then(|hwnd| {
+                                    set_no_erase_background(hwnd.0, true)?;
+                                    set_keep_transparency_on_blur(
+                                        hwnd.0,
+                                        keep_transparent_on_blur,
+                                    )
+                                });
+                            if let Err(error) = result {
+                                clear_material(window)?;
+                                return Err(error);
+                            }
+                            Ok(true)
+                        }
+                        Err(error) => {
+                            clear_material(window)?;
+                            match error {
+                                window_vibrancy::Error::UnsupportedPlatform(_)
+                                | window_vibrancy::Error::UnsupportedPlatformVersion(_) => {
+                                    Ok(false)
+                                }
+                                _ => Err(format!("无法应用窗口材质：{error}")),
+                            }
+                        }
+                    }
+                }
+                AcrylicEffect::SystemBackdrop => {
+                    clear_blur_layer(window)?;
+                    let hwnd = window
+                        .hwnd()
+                        .map_err(|error| format!("无法获取窗口材质句柄：{error}"))?;
+                    match window_vibrancy::apply_acrylic(window, None) {
+                        Ok(()) => {
+                            let result = set_no_erase_background(hwnd.0, true)
+                                .and_then(|()| set_refresh_backdrop(hwnd.0, true))
+                                .and_then(|()| {
+                                    set_keep_transparency_on_blur(
+                                        hwnd.0,
+                                        keep_transparent_on_blur,
+                                    )
+                                });
+                            if let Err(error) = result {
+                                clear_material(window)?;
+                                return Err(error);
+                            }
+                            Ok(true)
+                        }
+                        Err(error) => {
+                            clear_material(window)?;
+                            match error {
+                                window_vibrancy::Error::UnsupportedPlatform(_)
+                                | window_vibrancy::Error::UnsupportedPlatformVersion(_) => {
+                                    Ok(false)
+                                }
+                                _ => Err(format!("无法应用窗口材质：{error}")),
+                            }
+                        }
+                    }
+                }
+            },
         }
     }
     #[cfg(not(target_os = "windows"))]
@@ -396,24 +518,53 @@ fn apply_material(
     }
 }
 
-/// 函数职责：移除当前窗口可能残留的 Blur 和 Acrylic 材质。
+/// 仅清除旧版 Blur，保留 SystemBackdrop 以避免同类切换时闪烁。
+#[cfg(target_os = "windows")]
+fn clear_blur_layer(window: &WebviewWindow) -> Result<(), String> {
+    match window_vibrancy::clear_blur(window) {
+        Ok(())
+        | Err(window_vibrancy::Error::UnsupportedPlatform(_))
+        | Err(window_vibrancy::Error::UnsupportedPlatformVersion(_)) => Ok(()),
+        Err(error) => Err(format!("无法清除窗口材质：{error}")),
+    }
+}
+
+/// 清除系统 Acrylic 与辅助刷新策略，用于切到 Blur。
+#[cfg(target_os = "windows")]
+fn clear_acrylic_layer(window: &WebviewWindow) -> Result<(), String> {
+    let hwnd = window
+        .hwnd()
+        .map_err(|error| format!("无法获取窗口材质句柄：{error}"))?;
+    let refresh_result = set_refresh_backdrop(hwnd.0, false);
+    let transparency_result = set_keep_transparency_on_blur(hwnd.0, false);
+    let acrylic_result = window_vibrancy::clear_acrylic(window);
+    refresh_result?;
+    transparency_result?;
+    match acrylic_result {
+        Ok(())
+        | Err(window_vibrancy::Error::UnsupportedPlatform(_))
+        | Err(window_vibrancy::Error::UnsupportedPlatformVersion(_)) => Ok(()),
+        Err(error) => Err(format!("无法清除窗口材质：{error}")),
+    }
+}
+
+/// 函数职责：移除当前窗口可能残留的 Blur、Acrylic 与全部辅助子类策略。
 /// 输入说明：调用方必须位于主线程。
 /// 输出说明：无法支持的效果视为无需清除；其他原生错误保留为字符串。
-/// 实现思路：先移除背景刷新与激活绘制策略，再清除 Blur 和 Acrylic；全部先发出清理请求，避免一种失败阻止另一种清理。
+/// 实现思路：先移除所有辅助子类，再清除 Blur 和 Acrylic；全部先发出清理请求，避免一种失败阻止另一种清理。
 #[cfg(target_os = "windows")]
 fn clear_material(window: &WebviewWindow) -> Result<(), String> {
-    let refresh_result = window
+    let hwnd = window
         .hwnd()
-        .map_err(|error| format!("无法获取窗口材质句柄：{error}"))
-        .and_then(|hwnd| set_refresh_backdrop(hwnd.0, false));
-    let transparency_result = window
-        .hwnd()
-        .map_err(|error| format!("无法获取窗口材质句柄：{error}"))
-        .and_then(|hwnd| set_keep_transparency_on_blur(hwnd.0, false));
+        .map_err(|error| format!("无法获取窗口材质句柄：{error}"))?;
+    let erase_result = set_no_erase_background(hwnd.0, false);
+    let refresh_result = set_refresh_backdrop(hwnd.0, false);
+    let transparency_result = set_keep_transparency_on_blur(hwnd.0, false);
     let results = [
         window_vibrancy::clear_blur(window),
         window_vibrancy::clear_acrylic(window),
     ];
+    erase_result?;
     refresh_result?;
     transparency_result?;
     for result in results {
@@ -440,7 +591,8 @@ mod tests {
             Shell::{DefSubclassProc, GetWindowSubclass, SetWindowSubclass},
             WindowsAndMessaging::{
                 CreateWindowExW, DestroyWindow, GetForegroundWindow, SendMessageW, SIZE_MINIMIZED,
-                WM_ACTIVATE, WM_NCACTIVATE, WM_NCDESTROY, WM_SIZE, WS_OVERLAPPED,
+                SIZE_RESTORED, WM_ACTIVATE, WM_ERASEBKGND, WM_NCACTIVATE, WM_NCDESTROY, WM_SIZE,
+                WS_OVERLAPPED,
             },
         },
     };
@@ -485,6 +637,8 @@ mod tests {
     struct MessageObserver {
         messages: Vec<(u32, WPARAM, LPARAM)>,
         transparency_removed_before_destroy: bool,
+        no_erase_removed_before_destroy: bool,
+        refresh_removed_before_destroy: bool,
     }
 
     unsafe extern "system" fn observe_messages(
@@ -507,6 +661,22 @@ mod tests {
                     hwnd,
                     Some(keep_transparency_subclass),
                     KEEP_TRANSPARENCY_SUBCLASS_ID,
+                    &mut reference,
+                )
+            } == 0;
+            observer.no_erase_removed_before_destroy = unsafe {
+                GetWindowSubclass(
+                    hwnd,
+                    Some(no_erase_subclass),
+                    NO_ERASE_SUBCLASS_ID,
+                    &mut reference,
+                )
+            } == 0;
+            observer.refresh_removed_before_destroy = unsafe {
+                GetWindowSubclass(
+                    hwnd,
+                    Some(refresh_backdrop_subclass),
+                    REFRESH_BACKDROP_SUBCLASS_ID,
                     &mut reference,
                 )
             } == 0;
@@ -550,6 +720,31 @@ mod tests {
                 &mut reference,
             )
         }) != 0
+    }
+
+    fn no_erase_installed(window: &TestWindow) -> bool {
+        let mut reference = 0;
+        (unsafe {
+            GetWindowSubclass(
+                window.0,
+                Some(no_erase_subclass),
+                NO_ERASE_SUBCLASS_ID,
+                &mut reference,
+            )
+        }) != 0
+    }
+
+    fn read_system_backdrop(window: &TestWindow) -> Option<i32> {
+        let mut value = DWMSBT_NONE;
+        let result = unsafe {
+            DwmGetWindowAttribute(
+                window.0,
+                DWMWA_SYSTEMBACKDROP_TYPE as u32,
+                &mut value as *mut _ as _,
+                4,
+            )
+        };
+        (result >= 0).then_some(value)
     }
 
     #[test]
@@ -607,14 +802,34 @@ mod tests {
     }
 
     #[test]
-    fn keep_transparency_is_removed_before_native_window_destruction() {
+    fn native_subclasses_are_removed_before_native_window_destruction() {
         let mut observer = Box::<MessageObserver>::default();
         let mut window = TestWindow::new();
         install_observer(&window, &mut observer);
         assert!(set_keep_transparency_on_blur(window.0, true).is_ok());
+        assert!(set_no_erase_background(window.0, true).is_ok());
+        assert!(set_refresh_backdrop(window.0, true).is_ok());
         assert_ne!(unsafe { DestroyWindow(window.0) }, 0);
         window.0 = std::ptr::null_mut();
         assert!(observer.transparency_removed_before_destroy);
+        assert!(observer.no_erase_removed_before_destroy);
+        assert!(observer.refresh_removed_before_destroy);
+    }
+
+    #[test]
+    fn no_erase_background_installs_removes_and_suppresses_erase() {
+        assert!(set_no_erase_background(std::ptr::null_mut(), true).is_err());
+        assert!(set_no_erase_background(std::ptr::null_mut(), false).is_err());
+        let window = TestWindow::new();
+        assert!(!no_erase_installed(&window));
+        assert!(set_no_erase_background(window.0, false).is_ok());
+        assert!(set_no_erase_background(window.0, true).is_ok());
+        assert!(set_no_erase_background(window.0, true).is_ok());
+        assert!(no_erase_installed(&window));
+        assert_eq!(unsafe { SendMessageW(window.0, WM_ERASEBKGND, 0, 0) }, 1);
+        assert!(set_no_erase_background(window.0, false).is_ok());
+        assert!(set_no_erase_background(window.0, false).is_ok());
+        assert!(!no_erase_installed(&window));
     }
 
     #[test]
@@ -647,17 +862,38 @@ mod tests {
             return;
         }
         assert!(set_refresh_backdrop(window.0, true).is_ok());
-        unsafe { SendMessageW(window.0, WM_SIZE, SIZE_MINIMIZED as WPARAM, 0) };
-        let mut value = DWMSBT_NONE;
-        let result = unsafe {
-            DwmGetWindowAttribute(
+        // 未经历最小化的普通恢复不应多余重建。
+        unsafe { SendMessageW(window.0, WM_SIZE, SIZE_RESTORED as WPARAM, 0) };
+        if let Some(value) = read_system_backdrop(&window) {
+            assert_eq!(value, DWMSBT_NONE);
+        }
+
+        // 最小化期间保留原有系统背景，不提前拆除导致恢复过渡透明。
+        let transient = DWMSBT_TRANSIENTWINDOW;
+        unsafe {
+            DwmSetWindowAttribute(
                 window.0,
                 DWMWA_SYSTEMBACKDROP_TYPE as u32,
-                &mut value as *mut _ as _,
+                &transient as *const _ as _,
                 4,
             )
         };
-        if result >= 0 {
+        unsafe { SendMessageW(window.0, WM_SIZE, SIZE_MINIMIZED as WPARAM, 0) };
+        if let Some(value) = read_system_backdrop(&window) {
+            assert_eq!(value, DWMSBT_TRANSIENTWINDOW);
+        }
+
+        // 模拟系统丢失/清空背景后从最小化恢复，子类应同步重建为 DWMSBT_TRANSIENTWINDOW。
+        unsafe {
+            DwmSetWindowAttribute(
+                window.0,
+                DWMWA_SYSTEMBACKDROP_TYPE as u32,
+                &none as *const _ as _,
+                4,
+            )
+        };
+        unsafe { SendMessageW(window.0, WM_SIZE, SIZE_RESTORED as WPARAM, 0) };
+        if let Some(value) = read_system_backdrop(&window) {
             assert_eq!(value, DWMSBT_TRANSIENTWINDOW);
         }
     }

@@ -47,6 +47,7 @@
   import { canvasAssetsFromText, scanCanvasBlocks } from './lib/canvas/model';
   import type { CanvasSession } from './lib/canvas/types';
 
+  let { onready }: { onready?: () => void } = $props();
   const { native, android, desktop } = platformCapabilities();
   const mobile = android || import.meta.env.DEV && new URLSearchParams(location.search).has('mobile-preview');
   const canvasAssets = createCanvasAssetPort(native);
@@ -280,11 +281,13 @@
 
   // 语言只改变界面文案；复用配置队列持久化，不重建编辑器或修改正文。
   $effect(() => {
+    if (!configReady) return;
     setLocalePreference(config.preferences.locale ?? 'zh-CN');
-    if (ready && configReady) scheduleConfig();
+    if (ready) scheduleConfig();
   });
 
   $effect(() => {
+    if (!configReady) return;
     const p = config.preferences;
     applyTheme(document.documentElement, selectedTheme, p.theme, systemDark);
     // 回写启动首帧缓存，供 main.ts 下次同步取色；写入失败只让下次首帧回退默认主题。
@@ -293,20 +296,22 @@
     document.documentElement.style.setProperty('--document-size', `${p.fontSize}px`);
     document.documentElement.style.setProperty('--document-width', `${p.contentWidth}px`);
     document.documentElement.style.setProperty('--paragraph-indent', `${p.paragraphIndent}em`);
-    if (ready && configReady) scheduleConfig();
+    if (ready) scheduleConfig();
   });
   $effect(() => { void query; void includeArchived; if (ready && (searchOpen || screen === 'all')) scheduleIndex(); });
   $effect(() => {
+    if (!configReady) return;
     document.documentElement.dataset.canvasPreview = config.preferences.canvasPreview ?? 'compact';
     // 卡片高度改变后重新测量块布局，不替换编辑器状态或写入正文历史。
     void tick().then(() => editor?.view.requestMeasure());
-    if (ready && configReady) scheduleConfig();
+    if (ready) scheduleConfig();
   });
   // editor 是普通变量不参与追踪；编辑器创建时经 EditorOptions 取初值，此处只响应偏好变化。
   $effect(() => {
+    if (!configReady) return;
     const enabled = config.preferences.headingAdd ?? false;
     editor?.setHeadingAddEnabled(enabled);
-    if (ready && configReady) scheduleConfig();
+    if (ready) scheduleConfig();
   });
 
   // 编辑器滚动是高亮的唯一驱动；rAF 节流避免每个滚动事件都遍历标题。
@@ -337,11 +342,15 @@
     void activeHeadingFrom;
     void tick().then(() => document.querySelector('.outline-item.outline-active')?.scrollIntoView({ block: 'nearest' }));
   });
+  let initialMaterialReady: Promise<void> | undefined;
   // 显式明暗同步原生窗口；system 解除原生覆盖，避免 WebView 的媒体查询被上一次显式模式锁住。
   $effect(() => {
-    void windowMaterial.update(selectedWindowMaterial, config.preferences.theme, config.preferences.keepTransparentOnBlur ?? false).catch(error => { toast = $t("窗口材质应用失败：{error}", { error: errorMessage(error) }); });
+    if (!configReady) return;
+    const update = windowMaterial.update(selectedWindowMaterial, config.preferences.theme, config.preferences.keepTransparentOnBlur ?? false)
+      .catch(error => { toast = $t("窗口材质应用失败：{error}", { error: errorMessage(error) }); });
+    initialMaterialReady ??= update;
     // 材质偏好走同一配置队列；普通主题禁用控件时仍保留用户上次选择。
-    if (ready && configReady) scheduleConfig();
+    if (ready) scheduleConfig();
   });
 
   /**
@@ -1306,6 +1315,17 @@
     let unlistenClose = () => {};
     let unlistenBack = () => {};
     let disposed = false;
+    const revealDesktopWindow = async () => {
+      if (disposed || !onready) return;
+      await tick();
+      if (initialMaterialReady) await initialMaterialReady;
+      await tick();
+      await Promise.race([
+        new Promise<void>(resolve => requestAnimationFrame(() => resolve())),
+        new Promise<void>(resolve => setTimeout(resolve, 32)),
+      ]);
+      if (!disposed) onready();
+    };
     const initialize = async () => {
       try {
         files = native ? mobile ? new (await import('./lib/files/android')).AndroidFilePort() : new (await import('./lib/files/tauri')).TauriFilePort() : new BrowserFilePort();
@@ -1333,6 +1353,7 @@
         } finally {
           if (!disposed) booted = true;
         }
+        await revealDesktopWindow();
         if (native) await initializeSync();
         if (android) {
           const { onBackButtonPress, exit } = await import('@tauri-apps/api/app');
@@ -1386,7 +1407,14 @@
           });
           if (config.preferences.autoCheckUpdates ?? true) void updater.check();
         }
-      } catch (error) { fatal = errorMessage(error); ready = true; booted = true; }
+      } catch (error) {
+        fatal = errorMessage(error);
+        if (!disposed) {
+          ready = true;
+          booted = true;
+          void revealDesktopWindow();
+        }
+      }
     };
     void initialize();
     const beforeUnload = () => { void (async () => { if (canvasPanel && !await canvasPanel.flush()) return; captureUI(); void persistConfig(); for (const session of sessions.values()) void session.saver.flush(); })(); };
