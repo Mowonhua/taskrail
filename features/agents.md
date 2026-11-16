@@ -117,7 +117,7 @@
 
 悬赏发布（`OPEN`）与未接取撤回（`OPEN -> DRAFT`）在同一数据库写事务内按订阅范围、段位门槛（`Unranked` 等价 `C` 级）与定向指派规则精准分发至目标 Agent 的持久化收件箱（`agent_events`）及本轮分发快照（`bounty_dispatches`），撤回仅通知曾收到本轮分发的活跃 Agent 且不携带草稿正文。Agent 可通过 WebSocket（`/api/v1/agent/ws`）与 SSE（`/api/v1/agent/stream`）实时长连接（按 `cursor`/`Last-Event-ID` 补拉、断开自动释放连接登记并更新 `last_pushed_at`），或配置带 HMAC-SHA256 签名与指数退避重试的 Webhook 回调接收推送，亦可随时分页补拉收件箱并单调推进 `acked_event_id` 游标；工作台「Agent 名录」低密度展示通道状态（`在线长连接` / `Webhook` / `离线`，刷新失败时显示 `状态未知`）与最近推送时间，支持手动「刷新」与切页自动刷新（与停用/启用/吊销操作互不锁死）。
 
-创建提交：-
+创建提交：505811b
 
 ### 功能关系
 
