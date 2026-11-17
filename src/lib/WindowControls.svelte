@@ -59,7 +59,8 @@
 
 <style>
   .window-controls{display:flex;flex-shrink:0;align-self:stretch;user-select:none}
-  .window-controls button{display:grid;place-items:center;width:40px;height:100%;padding:0;border-radius:0;color:var(--muted)}
+  .window-controls button{display:grid;place-items:center;width:40px;height:100%;padding:0;border:0;border-radius:0;background:transparent;box-shadow:none;color:var(--muted)}
+  .window-controls button:hover:not(:disabled){transform:none;box-shadow:none}
   .window-controls button:focus-visible{outline-offset:-3px}
   .window-controls svg{fill:none;stroke:currentColor;stroke-width:1}
   .window-controls .window-close:hover{background:var(--danger);color:var(--surface)}

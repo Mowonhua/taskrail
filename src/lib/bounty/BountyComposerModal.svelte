@@ -849,19 +849,16 @@
         aria-modal="true"
         aria-label={$t('选择项目图标')}
       >
-        <div class="modal-header">
-          <h2 class="modal-title">{$t('选择项目图标')}</h2>
-          <button
-            type="button"
-            class="icon-button"
-            aria-label={$t('关闭对话框')}
-            onclick={() => {
-              inlineIconPickerOpen = false;
-            }}
-          >
-            ✕
-          </button>
-        </div>
+        <button
+          type="button"
+          class="icon-button icon-picker-close"
+          aria-label={$t('关闭对话框')}
+          onclick={() => {
+            inlineIconPickerOpen = false;
+          }}
+        >
+          ✕
+        </button>
         <ProjectIconPicker
           projectName={inlineProjectName.trim() || $t('新项目')}
           icon={inlineProjectIcon ?? undefined}

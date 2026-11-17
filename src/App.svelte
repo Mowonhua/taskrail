@@ -3,6 +3,7 @@
    * 文件职责：承载 Taskrail 悬赏板工作台外壳（左侧四入口紧凑导航 + 右侧多视图主工作区 + 详情抽屉与发布弹窗）。
    * 定义范围：顶层导航切换、同构悬赏服务连接与筛选、项目管理、主题与原生窗口材质协调、配置持久化及应用更新面板。
    */
+  import appIcon from '../src-tauri/icons/icon.png';
   import { onDestroy, onMount, tick, untrack } from 'svelte';
   import { getVersion } from '@tauri-apps/api/app';
   import { invoke } from '@tauri-apps/api/core';
@@ -66,6 +67,7 @@
   } from './lib/project-icons';
   import ProjectIcon from './lib/ProjectIcon.svelte';
   import ProjectIconPicker from './lib/ProjectIconPicker.svelte';
+  import RefreshButton from './lib/RefreshButton.svelte';
   import SettingsPanel from './lib/SettingsPanel.svelte';
   import {
     applyTheme,
@@ -166,6 +168,7 @@
   let allBountiesForDeps = $state<BountyTask[]>([]);
   let selectedInboxDraftIds = $state<string[]>([]);
   let inboxFilter = $state<'ALL' | 'DRAFT' | 'WAITING_INFO' | 'PENDING_ARBITRATION'>('ALL');
+  let refreshingInbox = $state(false);
 
   let onboardingSettings = $state<OnboardingSettings>({
     lan_open_registration: false,
@@ -184,6 +187,7 @@
   let allAgentsLoadError = $state('');
   let agentActivityFilter = $state<'all' | AgentActivity>('all');
   let agentStatusFilter = $state<'ALL' | AgentStatus>('ALL');
+  let refreshingAgents = $state(false);
   let skillGuideOpen = $state(false);
   let skillDocument = $state<SkillDocument | null>(null);
   let agentDetailOpen = $state(false);
@@ -314,29 +318,13 @@
     const _lang = $locale;
     switch (activeSection) {
       case 'bounties':
-        return {
-          title: $t('悬赏板'),
-          subtitle: $t('悬赏大厅与项目工作流'),
-          description: $t('集中浏览公开悬赏、筛选项目与状态流转，跟进 Agent 认领、交付与验收。'),
-        };
+        return { title: $t('悬赏板') };
       case 'inbox':
-        return {
-          title: $t('待我处理'),
-          subtitle: $t('待补充信息与验收裁决'),
-          description: $t('聚合需要人工介入或我方响应的阻塞悬赏、待验收交付与超时预警。'),
-        };
+        return { title: $t('待我处理') };
       case 'agents':
-        return {
-          title: $t('Agent 名录'),
-          subtitle: $t('已注册 Agent 与能力档案'),
-          description: $t('查看接入悬赏板的外部 Agent 身份、擅长领域、当前租约负载与历史交付记录。'),
-        };
+        return { title: $t('Agent 名录') };
       case 'settings':
-        return {
-          title: $t('设置'),
-          subtitle: $t('工作台外观、排版与扩展配置'),
-          description: $t('管理界面语言、内置与自制主题、原生玻璃材质、阅读排版及工作台扩展分组。'),
-        };
+        return { title: $t('设置') };
     }
   });
 
@@ -497,6 +485,26 @@
       }
     } finally {
       bountyListInFlightCount -= 1;
+    }
+  }
+
+  async function handleRefreshInbox(): Promise<void> {
+    if (refreshingInbox) return;
+    refreshingInbox = true;
+    try {
+      await refreshBountiesOnly();
+    } finally {
+      refreshingInbox = false;
+    }
+  }
+
+  async function handleRefreshAgents(): Promise<void> {
+    if (refreshingAgents) return;
+    refreshingAgents = true;
+    try {
+      await refreshAgentsOnly();
+    } finally {
+      refreshingAgents = false;
     }
   }
 
@@ -2263,15 +2271,9 @@
   <aside class="sidebar" aria-label={$t('工作台导航')}>
     <div class="sidebar-header">
       <div class="brand-lockup">
-        <span class="brand-mark" aria-hidden="true">
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-            <rect x="2" y="2.5" width="12" height="11" rx="2.5" />
-            <path d="M5.2 6h5.6M5.2 9.5h3.5" />
-          </svg>
-        </span>
+        <img src={appIcon} width="32" height="32" alt="" draggable={false} />
         <div class="brand-copy">
           <span class="brand-title">Taskrail</span>
-          <span class="brand-subtitle">{$t('Agent 悬赏工作台')}</span>
         </div>
       </div>
       <button
@@ -2376,8 +2378,6 @@
 
         <div class="topbar-heading" data-tauri-drag-region={capabilities.desktop ? true : undefined}>
           <span class="topbar-title">{sectionMeta.title}</span>
-          <span class="topbar-divider" aria-hidden="true">/</span>
-          <span class="topbar-subtitle">{sectionMeta.subtitle}</span>
         </div>
       </div>
 
@@ -2458,12 +2458,8 @@
           <p>{$t('正在加载…')}</p>
         </div>
       {:else if activeSection === 'bounties'}
-        <section class="workspace-view" aria-labelledby="view-heading-bounties" data-view="bounties">
+        <section class="workspace-view" aria-label={sectionMeta.title} data-view="bounties">
           <header class="view-hero">
-            <div class="view-hero-copy">
-              <h1 id="view-heading-bounties" class="view-title">{$t('悬赏板')}</h1>
-              <p class="view-description">{sectionMeta.description}</p>
-            </div>
             <div class="view-hero-actions">
               {#if projects.length > 1}
                 <div class="filter-pills" role="group" aria-label={$t('切换项目')}>
@@ -2601,14 +2597,7 @@
           </div>
         </section>
       {:else if activeSection === 'inbox'}
-        <section class="workspace-view" aria-labelledby="view-heading-inbox" data-view="inbox">
-          <header class="view-hero">
-            <div class="view-hero-copy">
-              <h1 id="view-heading-inbox" class="view-title">{$t('待我处理')}</h1>
-              <p class="view-description">{sectionMeta.description}</p>
-            </div>
-          </header>
-
+        <section class="workspace-view" aria-label={sectionMeta.title} data-view="inbox">
           <div class="workspace-toolbar" data-slot="inbox-toolbar">
             <div class="filter-pills" role="group" aria-label={$t('待我处理')}>
               {#each [
@@ -2631,14 +2620,7 @@
               {/each}
             </div>
 
-            <button
-              type="button"
-              class="secondary-action"
-              data-action="refresh-inbox"
-              onclick={() => void refreshBountiesOnly()}
-            >
-              {$t('刷新')}
-            </button>
+            <RefreshButton action="refresh-inbox" busy={refreshingInbox} onRefresh={handleRefreshInbox} />
           </div>
 
           <div class="skeleton-stage" data-slot="inbox-region">
@@ -2692,12 +2674,8 @@
           </div>
         </section>
       {:else if activeSection === 'agents'}
-        <section class="workspace-view" aria-labelledby="view-heading-agents" data-view="agents">
+        <section class="workspace-view" aria-label={sectionMeta.title} data-view="agents">
           <header class="view-hero">
-            <div class="view-hero-copy">
-              <h1 id="view-heading-agents" class="view-title">{$t('Agent 名录')}</h1>
-              <p class="view-description">{sectionMeta.description}</p>
-            </div>
             <div class="view-hero-actions">
               <button
                 type="button"
@@ -2721,6 +2699,8 @@
             {skillDocument}
             {serviceUrl}
             {serviceEpoch}
+            {refreshingAgents}
+            onRefreshAgents={handleRefreshAgents}
             onRetryLoadAgents={refreshAgentsOnly}
             onChangeActivityFilter={next => {
               agentActivityFilter = next;
@@ -2749,14 +2729,7 @@
           />
         </section>
       {:else if activeSection === 'settings'}
-        <section class="workspace-view workspace-settings-view" aria-labelledby="view-heading-settings" data-view="settings">
-          <header class="view-hero">
-            <div class="view-hero-copy">
-              <h1 id="view-heading-settings" class="view-title">{$t('设置')}</h1>
-              <p class="view-description">{sectionMeta.description}</p>
-            </div>
-          </header>
-
+        <section class="workspace-view workspace-settings-view" aria-label={sectionMeta.title} data-view="settings">
           <div class="workspace-settings-surface">
             <SettingsPanel
               {preferences}
@@ -2869,19 +2842,16 @@
       }}
     >
       <div class="modal-dialog icon-picker-dialog" role="dialog" aria-modal="true" aria-label={$t('设置项目图标')}>
-        <div class="modal-header">
-          <h2 class="modal-title">{$t('设置项目图标')}</h2>
-          <button
-            type="button"
-            class="icon-button"
-            aria-label={$t('关闭对话框')}
-            onclick={() => {
-              iconPickerOpen = false;
-            }}
-          >
-            ✕
-          </button>
-        </div>
+        <button
+          type="button"
+          class="icon-button icon-picker-close"
+          aria-label={$t('关闭对话框')}
+          onclick={() => {
+            iconPickerOpen = false;
+          }}
+        >
+          ✕
+        </button>
         <ProjectIconPicker
           projectName={activeProject?.name ?? selectedBountyProject?.name ?? $t('全部项目')}
           icon={currentProjectIcon}

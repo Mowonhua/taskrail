@@ -237,6 +237,412 @@ button.danger-text {
   color: var(--ink);
 }
 
+/* 刷新按钮只保留图标和通用悬停底色，不绘制边框或常态阴影。 */
+.refresh-button {
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.refresh-button:hover:not(:disabled) {
+  box-shadow: none;
+}
+
+@keyframes refresh-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .refresh-button.refreshing svg {
+    animation: refresh-spin 0.8s linear infinite;
+  }
+}
+
+/* 项目图标在导航、弹窗预览与卡片中保持同一字素位，避免不同字号导致行高跳动。 */
+.project-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 18px;
+  width: 18px;
+  height: 18px;
+  line-height: 1;
+  color: var(--muted);
+}
+
+.project-icon svg {
+  display: block;
+}
+
+.project-icon-glyph {
+  display: block;
+  font-size: 16px;
+  line-height: 1;
+}
+
+.project-icon-svg * {
+  stroke-width: 1.75;
+}
+
+.project-icon-pending {
+  display: block;
+  width: 17px;
+  height: 17px;
+  flex-shrink: 0;
+}
+
+.project-icon-large .project-icon-pending {
+  width: 22px;
+  height: 22px;
+}
+
+/* 图标弹窗沿用窄浮层与紧凑标题；标题由选择器自身绘制，关闭按钮固定在右上角。 */
+.icon-picker-dialog {
+  position: relative;
+  width: min(470px, 100%);
+  max-height: 90dvh;
+  padding: 35px;
+  border-radius: var(--floating-radius-top-left, var(--floating-radius, 9px))
+    var(--floating-radius-top-right, var(--floating-radius, 9px))
+    var(--floating-radius-bottom-right, var(--floating-radius, 9px))
+    var(--floating-radius-bottom-left, var(--floating-radius, 9px));
+  box-shadow: var(--floating-shadow, none);
+}
+
+.icon-picker-dialog h2 {
+  margin: 0 20px 14px 0;
+  font-size: 21px;
+  line-height: 1.5;
+  font-weight: 550;
+}
+
+.icon-picker-close {
+  position: absolute;
+  top: 12px;
+  right: 14px;
+  width: 32px;
+  height: 32px;
+  min-height: 32px;
+  padding: 0;
+  border-radius: var(--control-radius, 5px);
+}
+
+.icon-picker-close:hover:not(:disabled) {
+  border-color: transparent;
+  background: var(--control-hover-background, var(--hover));
+}
+
+/* 图标选择器：分类与结果在同一弹窗内滚动，避免数据量变化时撑高弹窗；
+   网格单元、分类与页签沿用通用控件之外的透明底，仅选中态绘制强调色边框。 */
+.project-icon-picker {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.icon-picker-current {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 4px 0 16px;
+  min-width: 0;
+}
+
+.project-icon-large {
+  flex: 0 0 40px;
+  width: 40px;
+  height: 40px;
+  border: 1px solid var(--field-border, var(--line));
+  border-radius: var(--control-radius, 7px);
+  background: var(--field-background, var(--surface));
+  color: var(--muted);
+}
+
+.project-icon-large .project-icon-glyph {
+  font-size: 25px;
+}
+
+.project-icon-large svg {
+  width: 22px;
+  height: 22px;
+}
+
+.icon-picker-project {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+  font-weight: 550;
+}
+
+.icon-picker-toolbar {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.icon-picker-tabs {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--field-border, var(--line));
+  border-radius: var(--control-radius, 6px);
+  align-self: flex-start;
+}
+
+.icon-picker-tab {
+  height: 26px;
+  min-height: 0;
+  padding: 0 12px;
+  border-color: transparent;
+  border-radius: calc(var(--control-radius, 6px) - 2px);
+  background: transparent;
+  box-shadow: none;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.icon-picker-tab[aria-pressed="true"] {
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 550;
+}
+
+.icon-picker-tab[aria-pressed="true"]:hover:not(:disabled) {
+  background: var(--accent-soft);
+}
+
+.icon-picker-search {
+  display: block;
+  width: 100%;
+  height: 34px;
+  padding: 7px 10px;
+  border: 1px solid var(--field-border, var(--line));
+  border-radius: var(--field-radius, 5px);
+  background: var(--field-background, var(--surface));
+  box-shadow: var(--field-shadow, none);
+  font-size: 13px;
+}
+
+.icon-picker-categories {
+  display: flex;
+  gap: 4px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+  margin-bottom: 8px;
+  padding: 5px 0;
+  flex-shrink: 0;
+  mask-image: linear-gradient(to right, #000 calc(100% - 18px), transparent);
+}
+
+.icon-picker-categories::-webkit-scrollbar {
+  display: none;
+}
+
+.icon-picker-category {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 30px;
+  height: 28px;
+  min-height: 0;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--control-radius, 5px);
+  background: transparent;
+  box-shadow: none;
+  color: var(--muted);
+}
+
+.icon-picker-category:hover:not(:disabled) {
+  border-color: transparent;
+  background: var(--hover);
+  box-shadow: none;
+  transform: none;
+}
+
+.icon-picker-category[aria-pressed="true"] {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.icon-picker-category[aria-pressed="true"]:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.icon-picker-category-emoji {
+  font-size: 15px;
+  line-height: 1;
+  pointer-events: none;
+}
+
+.icon-picker-category-svg {
+  width: 15px;
+  height: 15px;
+  color: var(--muted);
+  pointer-events: none;
+}
+
+.icon-picker-category-svg * {
+  stroke-width: 1.8;
+}
+
+.icon-picker-category[aria-pressed="true"] .icon-picker-category-svg {
+  color: var(--accent);
+}
+
+.icon-picker-viewport {
+  min-height: 0;
+}
+
+.icon-picker-grid {
+  display: grid;
+  grid-template-columns: repeat(8, minmax(0, 1fr));
+  grid-auto-rows: min-content;
+  align-content: start;
+  gap: 6px;
+  max-height: clamp(220px, 38dvh, 320px);
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 5px;
+}
+
+.icon-choice {
+  display: grid;
+  place-items: center;
+  aspect-ratio: 1;
+  min-width: 0;
+  min-height: 0;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--control-radius, 5px);
+  background: transparent;
+  box-shadow: none;
+  line-height: 1;
+}
+
+.icon-choice:hover:not(:disabled) {
+  border-color: transparent;
+  background: var(--hover);
+  box-shadow: none;
+  transform: none;
+}
+
+.icon-choice-active,
+.icon-choice-active:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  box-shadow: none;
+}
+
+.icon-choice-emoji {
+  display: block;
+  font-size: 21px;
+  line-height: 1;
+  pointer-events: none;
+}
+
+.icon-choice-lucide {
+  width: 19px;
+  height: 19px;
+  color: var(--ink);
+  pointer-events: none;
+}
+
+.icon-choice-lucide * {
+  stroke-width: 1.75;
+}
+
+.icon-choice[aria-pressed="true"] .icon-choice-lucide {
+  color: var(--accent);
+}
+
+.icon-picker-state {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  min-height: clamp(150px, 24dvh, 190px);
+  padding: 24px;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
+}
+
+.icon-picker-retry {
+  flex-shrink: 0;
+  padding: 6px 10px;
+  border: 1px solid var(--control-border, var(--line));
+  border-radius: var(--control-radius, 5px);
+  background: transparent;
+  box-shadow: none;
+  font-size: 12px;
+}
+
+.icon-picker-note {
+  margin: 6px 0 0;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.icon-custom-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.icon-custom-input {
+  flex: 1;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--field-border, var(--line));
+  border-radius: var(--field-radius, 5px);
+  background: var(--field-background, var(--surface));
+  box-shadow: var(--field-shadow, none);
+}
+
+.icon-custom-apply {
+  flex-shrink: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--control-border, var(--line));
+  border-radius: var(--control-radius, 5px);
+  background: var(--control-background, transparent);
+  box-shadow: var(--control-shadow, none);
+  font-size: 12px;
+}
+
+.icon-reset {
+  display: block;
+  margin: 16px 0 0;
+  padding: 4px 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.icon-reset:hover:not(:disabled) {
+  background: transparent;
+  box-shadow: none;
+  color: var(--ink);
+  transform: none;
+}
+
+@media (max-width: 520px) {
+  .icon-picker-grid {
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+  }
+}
+
 /* 顶层工作台外壳布局 */
 .app-shell {
   position: relative;
@@ -325,19 +731,12 @@ button.danger-text {
 .brand-lockup {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 9px;
   min-width: 0;
 }
 
-.brand-mark {
-  display: grid;
-  place-items: center;
-  width: 28px;
-  height: 28px;
+.brand-lockup img {
   flex-shrink: 0;
-  border-radius: var(--control-radius, 8px);
-  background: var(--accent-soft);
-  color: var(--accent);
 }
 
 .brand-copy {
@@ -347,18 +746,10 @@ button.danger-text {
 }
 
 .brand-title {
-  font-size: 13px;
-  font-weight: 600;
-  letter-spacing: 0.01em;
+  font-size: 22px;
+  font-weight: 650;
+  letter-spacing: -0.8px;
   color: var(--ink);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.brand-subtitle {
-  font-size: 11px;
-  color: var(--muted);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -473,19 +864,6 @@ button.danger-text {
   white-space: nowrap;
 }
 
-.topbar-divider {
-  font-size: 12px;
-  color: var(--muted);
-}
-
-.topbar-subtitle {
-  font-size: 12px;
-  color: var(--muted);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
 .topbar-actions {
   display: flex;
   align-items: center;
@@ -546,32 +924,9 @@ button.danger-text {
 .view-hero {
   display: flex;
   align-items: flex-start;
-  justify-content: space-between;
+  justify-content: flex-end;
   gap: 16px;
   flex-wrap: wrap;
-}
-
-.view-hero-copy {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  min-width: 220px;
-  flex: 1;
-}
-
-.view-title {
-  margin: 0;
-  font-size: 22px;
-  font-weight: 650;
-  line-height: 1.25;
-  color: var(--ink);
-}
-
-.view-description {
-  margin: 0;
-  font-size: 13px;
-  line-height: 1.6;
-  color: var(--muted);
 }
 
 .view-hero-actions {
@@ -1222,6 +1577,11 @@ button.danger-text {
   gap: 6px;
   min-width: 240px;
   padding: 8px;
+}
+
+/* 作者样式中的 display 会覆盖浏览器对 [hidden] 与关闭态 popover 的默认隐藏，必须显式恢复。 */
+.font-select-popup[hidden] {
+  display: none;
 }
 
 .font-select-search {

@@ -13,6 +13,7 @@
   } from '../api/types';
   import { clipboard } from '../clipboard';
   import { locale, t } from '../i18n';
+  import RefreshButton from '../RefreshButton.svelte';
   import {
     formatActiveDuration,
     formatAgentChannelStatus,
@@ -42,6 +43,8 @@
     skillDocument?: SkillDocument | null;
     serviceUrl?: string;
     serviceEpoch?: number;
+    refreshingAgents?: boolean;
+    onRefreshAgents?: () => Promise<void> | void;
     onRetryLoadAgents?: () => Promise<void> | void;
     onChangeActivityFilter: (filter: 'all' | 'idle' | 'busy') => void;
     onChangeStatusFilter: (filter: 'ALL' | AgentStatus) => void;
@@ -72,6 +75,8 @@
     skillDocument = null,
     serviceUrl = '',
     serviceEpoch = 0,
+    refreshingAgents = false,
+    onRefreshAgents,
     onRetryLoadAgents,
     onChangeActivityFilter,
     onChangeStatusFilter,
@@ -505,16 +510,12 @@
     </div>
   </div>
 
-  {#if onRetryLoadAgents}
-    <button
-      type="button"
-      class="secondary-action"
-      data-action="refresh-agents"
-      disabled={retryingAgents}
-      onclick={() => void handleRetryLoadAgents()}
-    >
-      {$t('刷新')}
-    </button>
+  {#if onRefreshAgents || onRetryLoadAgents}
+    <RefreshButton
+      action="refresh-agents"
+      busy={refreshingAgents || retryingAgents}
+      onRefresh={onRefreshAgents ?? handleRetryLoadAgents}
+    />
   {/if}
 </div>
 
