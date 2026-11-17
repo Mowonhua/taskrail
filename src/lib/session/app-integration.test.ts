@@ -100,6 +100,7 @@ describe('悬赏板工作台外壳集成测试', () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.restoreAllMocks();
     if (instance) {
       unmount(instance);
@@ -3310,5 +3311,400 @@ describe('悬赏板工作台外壳集成测试', () => {
     // 切换策略回 open 不隐式公开既有未处理的 draftLate
     await bountyApi.updateProject(draftProject.id, { agent_draft_policy: 'open' });
     expect((await bountyApi.getBountyDetail(draftLate.id)).bounty.status).toBe('DRAFT');
+  });
+
+  it('实时展示执行者段位、租约倒计时与完成备注，支持管理员强制释放租约、定向婉拒回退及异常次数展示', async () => {
+    vi.useFakeTimers({
+      toFake: ['Date', 'setInterval', 'clearInterval'],
+    });
+    const baseTime = new Date('2026-11-17T10:00:00.000Z');
+    vi.setSystemTime(baseTime);
+
+    const { port } = createMemoryPort({
+      preferences: { ...emptyAppConfig().preferences, workspaceSection: 'bounties' },
+    });
+    const bountyApi = createMemoryBountyClient({ lan_open_registration: true });
+    const project = await bountyApi.createProject({
+      name: '租约交付项目',
+      agent_draft_policy: 'open',
+    });
+
+    const alpha = await bountyApi.registerAgent({ name: '执行工兵 Alpha' });
+    const beta = await bountyApi.registerAgent({ name: '执行工兵 Beta' });
+    await bountyApi.simulateAgentTier(alpha.agent.id, 'A');
+    await bountyApi.simulateAgentTier(beta.agent.id, 'B');
+
+    const leaseTask = await bountyApi.createBounty({
+      project_id: project.id,
+      title: '并发抢单与租约倒计时任务',
+      description: '验证卡片与详情抽屉实时展示执行者与倒计时',
+      acceptance_criteria: '- [ ] 通过测试',
+      difficulty: 'B',
+      assignee_mode: 'min_tier',
+      assignee_min_tier: 'B',
+      require_arbitration: false,
+      status: 'OPEN',
+    });
+
+    const specificTask = await bountyApi.createBounty({
+      project_id: project.id,
+      title: '定向指派与无仲裁直接交付任务',
+      description: '先由定向 Agent 婉拒，再由接单者完成交付',
+      acceptance_criteria: '- [ ] 交付完成说明',
+      difficulty: 'C',
+      assignee_mode: 'specific',
+      assignee_agent_id: alpha.agent.id,
+      require_arbitration: false,
+      status: 'OPEN',
+    });
+
+    const claimed = await bountyApi.agentClaimBounty(alpha.api_key, leaseTask.id);
+    expect(claimed.lease_id).toBe(1);
+
+    instance = mount(App, { target, props: { files: port, bountyApi } });
+    await flush();
+
+    // 1. 悬赏板卡片实时展示执行者名称+段位与租约剩余时间倒计时（无 · 分隔符）
+    const activeCard = target.querySelector<HTMLElement>(`[data-bounty-id="${leaseTask.id}"]`)!;
+    expect(activeCard).not.toBeNull();
+    expect(activeCard.textContent).not.toContain('·');
+    expect(activeCard.querySelector('[data-slot="card-executor"]')?.textContent?.trim()).toBe(
+      '执行者: 执行工兵 Alpha（A 级）',
+    );
+    const cardCountdown = activeCard.querySelector<HTMLElement>(
+      '[data-slot="card-lease-countdown"]',
+    )!;
+    expect(cardCountdown.dataset.leaseState).toBe('active');
+    expect(cardCountdown.textContent?.trim()).toBe('租约剩余 15:00');
+
+    // 推进 2 秒，验证卡片倒计时实时跳动
+    vi.advanceTimersByTime(2000);
+    await flush();
+    expect(
+      activeCard.querySelector('[data-slot="card-lease-countdown"]')?.textContent?.trim(),
+    ).toBe('租约剩余 14:58');
+
+    // 打开详情抽屉，验证执行者段位、倒计时（含 <=3 分钟临期告警态）及强制释放按钮
+    activeCard.querySelector<HTMLButtonElement>('.bounty-card-button')!.click();
+    await flush();
+
+    const drawer = target.querySelector<HTMLElement>('[data-dialog="bounty-detail"]')!;
+    expect(drawer.querySelector('[data-slot="detail-executor"]')?.textContent?.trim()).toBe(
+      '执行者: 执行工兵 Alpha（A 级）',
+    );
+    expect(drawer.querySelector('[data-slot="detail-lease-countdown"]')?.textContent?.trim()).toBe(
+      '租约剩余 14:58',
+    );
+    expect(drawer.querySelector('[data-action="release-lease"]')).not.toBeNull();
+
+    // 推进至剩余 2 分 30 秒，验证卡片与抽屉均切为 expiring 态
+    vi.advanceTimersByTime(12 * 60 * 1000 + 28 * 1000);
+    await flush();
+    const drawerCountdown = drawer.querySelector<HTMLElement>(
+      '[data-slot="detail-lease-countdown"]',
+    )!;
+    expect(drawerCountdown.dataset.leaseState).toBe('expiring');
+    expect(drawerCountdown.textContent?.trim()).toBe('租约剩余 02:30');
+    expect(
+      activeCard.querySelector<HTMLElement>('[data-slot="card-lease-countdown"]')?.dataset
+        .leaseState,
+    ).toBe('expiring');
+
+    // 2. 管理员点击「强制释放租约」，任务重置回 OPEN、清理执行者与倒计时并写入时间线
+    drawer.querySelector<HTMLButtonElement>('[data-action="release-lease"]')!.click();
+    await flush();
+
+    expect(drawer.dataset.bountyStatus).toBe('OPEN');
+    expect(drawer.querySelector('[data-slot="detail-executor"]')).toBeNull();
+    expect(drawer.querySelector('[data-slot="detail-lease-countdown"]')).toBeNull();
+    expect(drawer.querySelector('[data-action="release-lease"]')).toBeNull();
+    expect(
+      drawer.querySelector(
+        '.detail-timeline-item[data-event-type="lease_released"] .detail-timeline-action',
+      )?.textContent?.trim(),
+    ).toBe('释放租约');
+    expect(
+      drawer.querySelector(
+        '.detail-timeline-item[data-event-type="lease_released"] .detail-timeline-actor',
+      )?.textContent?.trim(),
+    ).toBe('管理员');
+
+    drawer.querySelector<HTMLButtonElement>('[aria-label="关闭对话框"]')!.click();
+    await flush();
+
+    const reopenedCard = target.querySelector<HTMLElement>(`[data-bounty-id="${leaseTask.id}"]`)!;
+    expect(reopenedCard.dataset.bountyStatus).toBe('OPEN');
+    expect(reopenedCard.querySelector('[data-slot="card-executor"]')).toBeNull();
+    expect(reopenedCard.querySelector('[data-slot="card-lease-countdown"]')).toBeNull();
+
+    // 3. 定向指派任务：详情抽屉展示响应倒计时，婉拒后回退公开并由 Beta 接单直接完成交付
+    const specificCard = target.querySelector<HTMLElement>(
+      `[data-bounty-id="${specificTask.id}"]`,
+    )!;
+    specificCard.querySelector<HTMLButtonElement>('.bounty-card-button')!.click();
+    await flush();
+    const specificDrawer = target.querySelector<HTMLElement>('[data-dialog="bounty-detail"]')!;
+    expect(
+      specificDrawer.querySelector('[data-slot="detail-assignment-countdown"]')?.textContent?.trim(),
+    ).toContain('指派响应剩余');
+    specificDrawer.querySelector<HTMLButtonElement>('[aria-label="关闭对话框"]')!.click();
+    await flush();
+
+    await bountyApi.agentDeclineBounty(alpha.api_key, specificTask.id, {
+      reason: '当前队列繁忙',
+    });
+    const betaClaimed = await bountyApi.agentClaimBounty(beta.api_key, specificTask.id);
+    await bountyApi.agentCompleteBounty(beta.api_key, specificTask.id, {
+      lease_id: betaClaimed.lease_id,
+      completion_note: '  已修复并补齐端到端测试  ',
+      completion_cost: 1.75,
+    });
+
+    // 4. 制造一次超时回收与一次主动弃单，验证 Agent 名录展示异常计数且工作台刷新后展示交付说明
+    const timeoutClaim = await bountyApi.agentClaimBounty(beta.api_key, leaseTask.id);
+    await bountyApi.sweepLeases(Date.parse(timeoutClaim.lease_expires_at!) + 1000);
+    const abandonClaim = await bountyApi.agentClaimBounty(beta.api_key, leaseTask.id);
+    await bountyApi.agentAbandonBounty(beta.api_key, leaseTask.id, {
+      lease_id: abandonClaim.lease_id,
+      reason: '需切换分支',
+    });
+
+    target.querySelector<HTMLButtonElement>('[data-nav-section="agents"]')!.click();
+    await flush();
+    const betaCard = target.querySelector<HTMLElement>(`[data-agent-id="${beta.agent.id}"]`)!;
+    expect(
+      betaCard.querySelector('[data-slot="agent-lease-incidents"]')?.textContent?.trim(),
+    ).toContain('超时 1 次 弃单 1 次');
+    expect(betaCard.textContent).not.toContain('·');
+
+    // 切回悬赏板验证已完成卡片与详情抽屉的交付说明、资源成本、保留的执行者段位及系统调度时间线
+    target.querySelector<HTMLButtonElement>('[data-nav-section="bounties"]')!.click();
+    await flush();
+
+    const completedCard = target.querySelector<HTMLElement>(
+      `[data-bounty-id="${specificTask.id}"]`,
+    )!;
+    expect(completedCard.dataset.bountyStatus).toBe('COMPLETED');
+    expect(completedCard.querySelector('[data-slot="card-executor"]')?.textContent?.trim()).toBe(
+      '执行者: 执行工兵 Beta（B 级）',
+    );
+    expect(completedCard.querySelector('[data-slot="card-lease-countdown"]')).toBeNull();
+    expect(
+      completedCard.querySelector('[data-slot="card-completion-note"]')?.textContent?.trim(),
+    ).toBe('已修复并补齐端到端测试');
+    expect(
+      completedCard.querySelector('[data-slot="card-completion-cost"]')?.textContent?.trim(),
+    ).toBe('成本 1.75');
+
+    completedCard.querySelector<HTMLButtonElement>('.bounty-card-button')!.click();
+    await flush();
+    const completedDrawer = target.querySelector<HTMLElement>('[data-dialog="bounty-detail"]')!;
+    expect(completedDrawer.querySelector('[data-action="release-lease"]')).toBeNull();
+    expect(
+      completedDrawer.querySelector('[data-slot="detail-executor"]')?.textContent?.trim(),
+    ).toBe('执行者: 执行工兵 Beta（B 级）');
+    expect(
+      completedDrawer.querySelector('[data-slot="detail-completion-note"]')?.textContent?.trim(),
+    ).toBe('已修复并补齐端到端测试');
+    expect(
+      completedDrawer.querySelector('[data-slot="detail-completion-cost"]')?.textContent?.trim(),
+    ).toBe('成本 1.75');
+    expect(
+      completedDrawer.querySelector(
+        '.detail-timeline-item[data-event-type="declined"] .detail-timeline-action',
+      )?.textContent?.trim(),
+    ).toBe('婉拒指派');
+    expect(
+      completedDrawer.querySelector(
+        '.detail-timeline-item[data-event-type="completed"] .detail-timeline-action',
+      )?.textContent?.trim(),
+    ).toBe('完成交付');
+    expect(completedDrawer.textContent).not.toContain('·');
+    expect(completedDrawer.textContent?.toLowerCase()).not.toContain('mmr');
+  });
+
+  it('无需切页或点击，外部 Agent 接单、续租与直接完成时自动实时同步卡片、已打开详情抽屉与名录', async () => {
+    vi.useFakeTimers({
+      toFake: ['Date', 'setInterval', 'clearInterval'],
+    });
+    const baseTime = new Date('2026-11-17T11:00:00.000Z');
+    vi.setSystemTime(baseTime);
+
+    const { port } = createMemoryPort({
+      preferences: { ...emptyAppConfig().preferences, workspaceSection: 'bounties' },
+    });
+    const bountyApi = createMemoryBountyClient({ lan_open_registration: true });
+    const project = await bountyApi.createProject({
+      name: '实时同步项目',
+      agent_draft_policy: 'open',
+    });
+
+    const alpha = await bountyApi.registerAgent({ name: '实时工兵 Alpha' });
+    await bountyApi.simulateAgentTier(alpha.agent.id, 'A');
+
+    const syncTask = await bountyApi.createBounty({
+      project_id: project.id,
+      title: '外部 Agent 全流程实时同步任务',
+      description: '不切页验证接单、续租与直接完成自动同步',
+      acceptance_criteria: '- [ ] 自动同步状态与备注',
+      difficulty: 'A',
+      assignee_mode: 'any',
+      require_arbitration: false,
+      status: 'OPEN',
+    });
+    const directoryTask = await bountyApi.createBounty({
+      project_id: project.id,
+      title: '名录负载与异常实时同步任务',
+      difficulty: 'B',
+      assignee_mode: 'any',
+      require_arbitration: false,
+      status: 'OPEN',
+    });
+
+    instance = mount(App, { target, props: { files: port, bountyApi } });
+    await flush();
+
+    // 先打开任务详情抽屉，此时卡片与详情均为 OPEN，后续全程不切页、不点击重新打开
+    const card = target.querySelector<HTMLElement>(`[data-bounty-id="${syncTask.id}"]`)!;
+    expect(card.dataset.bountyStatus).toBe('OPEN');
+    expect(card.querySelector('[data-slot="card-executor"]')).toBeNull();
+    expect(card.querySelector('[data-slot="card-lease-countdown"]')).toBeNull();
+
+    card.querySelector<HTMLButtonElement>('.bounty-card-button')!.click();
+    await flush();
+
+    const drawer = target.querySelector<HTMLElement>('[data-dialog="bounty-detail"]')!;
+    expect(drawer).not.toBeNull();
+    expect(drawer.dataset.bountyStatus).toBe('OPEN');
+    expect(drawer.querySelector('[data-slot="detail-executor"]')).toBeNull();
+    expect(drawer.querySelector('[data-slot="detail-lease-countdown"]')).toBeNull();
+
+    // 1. 外部 Agent 接单 -> 推进时间后卡片与已打开详情抽屉自动变为 IN_PROGRESS 并显示执行者段位与倒计时
+    const claimed = await bountyApi.agentClaimBounty(alpha.api_key, syncTask.id);
+    expect(claimed.lease_id).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(2000);
+    await flush();
+
+    expect(card.dataset.bountyStatus).toBe('IN_PROGRESS');
+    expect(card.querySelector('[data-slot="card-executor"]')?.textContent?.trim()).toBe(
+      '执行者: 实时工兵 Alpha（A 级）',
+    );
+    expect(card.querySelector('[data-slot="card-lease-countdown"]')?.textContent?.trim()).toBe(
+      '租约剩余 14:58',
+    );
+
+    expect(drawer.dataset.bountyStatus).toBe('IN_PROGRESS');
+    expect(drawer.querySelector('[data-slot="detail-executor"]')?.textContent?.trim()).toBe(
+      '执行者: 实时工兵 Alpha（A 级）',
+    );
+    expect(drawer.querySelector('[data-slot="detail-lease-countdown"]')?.textContent?.trim()).toBe(
+      '租约剩余 14:58',
+    );
+    expect(drawer.querySelector('[data-action="release-lease"]')).not.toBeNull();
+    expect(
+      drawer.querySelector('.detail-timeline-item[data-event-type="claimed"]'),
+    ).not.toBeNull();
+
+    // 2. 推进 5 分钟后外部 Agent 心跳续租 -> 自动刷新延长后的 lease_expires_at 倒计时
+    await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+    await flush();
+    expect(card.querySelector('[data-slot="card-lease-countdown"]')?.textContent?.trim()).toBe(
+      '租约剩余 09:58',
+    );
+    expect(drawer.querySelector('[data-slot="detail-lease-countdown"]')?.textContent?.trim()).toBe(
+      '租约剩余 09:58',
+    );
+
+    await bountyApi.agentHeartbeatBounty(alpha.api_key, syncTask.id, {
+      lease_id: claimed.lease_id,
+    });
+    await vi.advanceTimersByTimeAsync(2000);
+    await flush();
+
+    expect(card.querySelector('[data-slot="card-lease-countdown"]')?.textContent?.trim()).toBe(
+      '租约剩余 14:58',
+    );
+    expect(drawer.querySelector('[data-slot="detail-lease-countdown"]')?.textContent?.trim()).toBe(
+      '租约剩余 14:58',
+    );
+
+    // 3. 外部 Agent 直接完成并附带 completion_note -> 自动刷新为 COMPLETED 并展示完成说明备注
+    await bountyApi.agentCompleteBounty(alpha.api_key, syncTask.id, {
+      lease_id: claimed.lease_id,
+      completion_note: '  外部自动同步完成备注  ',
+      completion_cost: 2.5,
+    });
+    await vi.advanceTimersByTimeAsync(2000);
+    await flush();
+
+    expect(card.dataset.bountyStatus).toBe('COMPLETED');
+    expect(card.querySelector('[data-slot="card-executor"]')?.textContent?.trim()).toBe(
+      '执行者: 实时工兵 Alpha（A 级）',
+    );
+    expect(card.querySelector('[data-slot="card-lease-countdown"]')).toBeNull();
+    expect(card.querySelector('[data-slot="card-completion-note"]')?.textContent?.trim()).toBe(
+      '外部自动同步完成备注',
+    );
+    expect(card.querySelector('[data-slot="card-completion-cost"]')?.textContent?.trim()).toBe(
+      '成本 2.5',
+    );
+
+    expect(drawer.dataset.bountyStatus).toBe('COMPLETED');
+    expect(drawer.querySelector('[data-action="release-lease"]')).toBeNull();
+    expect(drawer.querySelector('[data-slot="detail-executor"]')?.textContent?.trim()).toBe(
+      '执行者: 实时工兵 Alpha（A 级）',
+    );
+    expect(drawer.querySelector('[data-slot="detail-lease-countdown"]')).toBeNull();
+    expect(drawer.querySelector('[data-slot="detail-completion-note"]')?.textContent?.trim()).toBe(
+      '外部自动同步完成备注',
+    );
+    expect(drawer.querySelector('[data-slot="detail-completion-cost"]')?.textContent?.trim()).toBe(
+      '成本 2.5',
+    );
+    expect(
+      drawer.querySelector('.detail-timeline-item[data-event-type="completed"]'),
+    ).not.toBeNull();
+
+    // 4. 在 Agent 名录视图下同样无需切页或点击，自动同步外部 Agent 的活跃租约数与异常计数
+    unmount(instance);
+    instance = null;
+    const { port: agentsPort } = createMemoryPort({
+      preferences: { ...emptyAppConfig().preferences, workspaceSection: 'agents' },
+    });
+    instance = mount(App, { target, props: { files: agentsPort, bountyApi } });
+    await flush();
+
+    const alphaCard = target.querySelector<HTMLElement>(`[data-agent-id="${alpha.agent.id}"]`)!;
+    expect(alphaCard).not.toBeNull();
+    expect(alphaCard.querySelector<HTMLElement>('[data-agent-activity]')?.dataset.agentActivity).toBe(
+      'idle',
+    );
+    expect(alphaCard.querySelector('[data-slot="agent-lease-incidents"]')).toBeNull();
+
+    const dirClaim = await bountyApi.agentClaimBounty(alpha.api_key, directoryTask.id);
+    await vi.advanceTimersByTimeAsync(2000);
+    await flush();
+
+    expect(alphaCard.querySelector<HTMLElement>('[data-agent-activity]')?.dataset.agentActivity).toBe(
+      'busy',
+    );
+    expect(alphaCard.querySelector('[data-agent-activity]')?.textContent?.trim()).toBe(
+      '1 个进行中租约',
+    );
+
+    await bountyApi.agentAbandonBounty(alpha.api_key, directoryTask.id, {
+      lease_id: dirClaim.lease_id,
+      reason: '外部释放',
+    });
+    await vi.advanceTimersByTimeAsync(2000);
+    await flush();
+
+    expect(alphaCard.querySelector<HTMLElement>('[data-agent-activity]')?.dataset.agentActivity).toBe(
+      'idle',
+    );
+    expect(
+      alphaCard.querySelector('[data-slot="agent-lease-incidents"]')?.textContent?.trim(),
+    ).toContain('超时 0 次 弃单 1 次');
   });
 });

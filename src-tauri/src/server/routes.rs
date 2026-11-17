@@ -48,6 +48,7 @@ pub(super) fn router(state: AppState) -> Router {
         .route("/api/v1/bounties/{id}/publish", post(publish_bounty))
         .route("/api/v1/bounties/{id}/withdraw", post(withdraw_bounty))
         .route("/api/v1/bounties/{id}/cancel", post(cancel_bounty))
+        .route("/api/v1/bounties/{id}/release-lease", post(release_lease))
         .fallback(|| async { ApiError::new(StatusCode::NOT_FOUND, "NOT_FOUND", "接口不存在") })
         .method_not_allowed_fallback(|| async {
             ApiError::new(
@@ -229,6 +230,11 @@ async fn update_bounty(
 }
 async fn publish_bounty(State(state): State<AppState>, Id(id): Id) -> Result<Json<Bounty>> {
     disk(state, move |r| r.publish_bounty(&id, "human"))
+        .await
+        .map(Json)
+}
+async fn release_lease(State(state): State<AppState>, Id(id): Id) -> Result<Json<Bounty>> {
+    disk(state, move |r| r.admin_release_lease(&id))
         .await
         .map(Json)
 }

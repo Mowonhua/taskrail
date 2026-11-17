@@ -8,10 +8,13 @@
   import ProjectIcon from '../ProjectIcon.svelte';
   import {
     formatAssigneeConstraint,
+    formatBountyExecutor,
     formatBountyPublisher,
     formatBountyStatus,
+    formatCompletionCost,
     formatEventActor,
     formatEventLabel,
+    formatLeaseCountdown,
     formatServiceError,
     formatTimestamp,
     renderMarkdownAction,
@@ -25,6 +28,7 @@
     onPublish: (bountyId: string) => Promise<void>;
     onWithdraw: (bountyId: string) => Promise<void>;
     onCancel: (bountyId: string) => Promise<void>;
+    onReleaseLease: (bountyId: string) => Promise<void>;
   }
 
   let {
@@ -35,13 +39,30 @@
     onPublish,
     onWithdraw,
     onCancel,
+    onReleaseLease,
   }: Props = $props();
 
   let busy = $state(false);
   let actionError = $state('');
+  let nowMs = $state(Date.now());
 
   const bounty = $derived(detail.bounty);
   const events = $derived(detail.events);
+
+  $effect(() => {
+    const activeCountdownTarget =
+      bounty.status === 'IN_PROGRESS'
+        ? bounty.lease_expires_at
+        : bounty.status === 'OPEN' && bounty.assignee_mode === 'specific'
+          ? bounty.assignment_expires_at
+          : null;
+    nowMs = Date.now();
+    if (!activeCountdownTarget) return;
+    const timer = setInterval(() => {
+      nowMs = Date.now();
+    }, 1000);
+    return () => clearInterval(timer);
+  });
 
   const statusLabel = $derived.by(() => {
     const _lang = $locale;
@@ -57,6 +78,40 @@
     const _lang = $locale;
     return formatBountyPublisher(bounty);
   });
+
+  const executor = $derived.by(() => {
+    const _lang = $locale;
+    return formatBountyExecutor(bounty);
+  });
+
+  const leaseCountdown = $derived.by(() => {
+    const _lang = $locale;
+    if (bounty.status !== 'IN_PROGRESS') return null;
+    return formatLeaseCountdown(bounty.lease_expires_at, nowMs);
+  });
+
+  const assignmentCountdown = $derived.by(() => {
+    const _lang = $locale;
+    if (bounty.status !== 'OPEN' || bounty.assignee_mode !== 'specific') return null;
+    return formatLeaseCountdown(bounty.assignment_expires_at, nowMs);
+  });
+
+  const completionCostLabel = $derived.by(() => {
+    const _lang = $locale;
+    return formatCompletionCost(bounty.completion_cost);
+  });
+
+  const hasCompletionSection = $derived(
+    bounty.status === 'COMPLETED' ||
+      Boolean(bounty.completion_note?.trim()) ||
+      completionCostLabel !== null,
+  );
+
+  const canReleaseLease = $derived(
+    bounty.status === 'IN_PROGRESS' ||
+      ((bounty.status === 'WAITING_INFO' || bounty.status === 'PENDING_ARBITRATION') &&
+        bounty.lease_agent_id !== null),
+  );
 
   async function runAction(fn: () => Promise<void>): Promise<void> {
     if (busy) return;
@@ -135,9 +190,42 @@
           {publisher.label}
         </span>
         <span class="detail-meta-pill">{assigneeLabel}</span>
-        {#if bounty.lease_agent_id}
-          <span class="detail-meta-pill">
-            {$t('执行者: {agent}', { agent: bounty.lease_agent_id })}
+        {#if executor}
+          <span
+            class="detail-meta-pill"
+            data-slot="detail-executor"
+            data-executor-tier={executor.tier ?? 'unknown'}
+          >
+            {$t('执行者: {agent}', { agent: executor.label })}
+          </span>
+        {/if}
+        {#if leaseCountdown}
+          <span
+            class="detail-meta-pill bounty-lease-pill"
+            data-slot="detail-lease-countdown"
+            data-lease-state={leaseCountdown.expired
+              ? 'expired'
+              : leaseCountdown.expiringSoon
+                ? 'expiring'
+                : 'active'}
+          >
+            {leaseCountdown.expired
+              ? leaseCountdown.label
+              : $t('租约剩余 {countdown}', { countdown: leaseCountdown.label })}
+          </span>
+        {:else if assignmentCountdown}
+          <span
+            class="detail-meta-pill bounty-lease-pill"
+            data-slot="detail-assignment-countdown"
+            data-lease-state={assignmentCountdown.expired
+              ? 'expired'
+              : assignmentCountdown.expiringSoon
+                ? 'expiring'
+                : 'active'}
+          >
+            {assignmentCountdown.expired
+              ? $t('指派窗口已超时待回退')
+              : $t('指派响应剩余 {countdown}', { countdown: assignmentCountdown.label })}
           </span>
         {/if}
         <span class="detail-meta-time">
@@ -145,7 +233,7 @@
         </span>
       </div>
 
-      {#if bounty.status === 'DRAFT' || bounty.status === 'OPEN' || bounty.status === 'WAITING_INFO'}
+      {#if bounty.status === 'DRAFT' || bounty.status === 'OPEN' || bounty.status === 'WAITING_INFO' || canReleaseLease}
         <div class="detail-drawer-actions" data-slot="detail-actions">
           {#if bounty.status === 'DRAFT'}
             <button
@@ -192,16 +280,29 @@
             >
               {$t('取消任务')}
             </button>
-          {:else if bounty.status === 'WAITING_INFO'}
-            <button
-              type="button"
-              class="danger-text"
-              data-action="cancel-bounty"
-              disabled={busy}
-              onclick={() => void runAction(() => onCancel(bounty.id))}
-            >
-              {$t('取消任务')}
-            </button>
+          {:else}
+            {#if canReleaseLease}
+              <button
+                type="button"
+                class="danger-text"
+                data-action="release-lease"
+                disabled={busy}
+                onclick={() => void runAction(() => onReleaseLease(bounty.id))}
+              >
+                {$t('强制释放租约')}
+              </button>
+            {/if}
+            {#if bounty.status === 'WAITING_INFO'}
+              <button
+                type="button"
+                class="danger-text"
+                data-action="cancel-bounty"
+                disabled={busy}
+                onclick={() => void runAction(() => onCancel(bounty.id))}
+              >
+                {$t('取消任务')}
+              </button>
+            {/if}
           {/if}
         </div>
       {/if}
@@ -214,6 +315,28 @@
     </header>
 
     <div class="detail-drawer-body">
+      {#if hasCompletionSection}
+        <section class="detail-section detail-completion-card" data-slot="detail-completion">
+          <div class="detail-completion-header">
+            <h3 class="detail-section-title">{$t('完成说明')}</h3>
+            {#if completionCostLabel !== null}
+              <span class="detail-meta-pill" data-slot="detail-completion-cost">
+                {$t('成本 {cost}', { cost: completionCostLabel })}
+              </span>
+            {/if}
+          </div>
+          {#if bounty.completion_note?.trim()}
+            <div
+              class="bounty-detail-markdown"
+              data-slot="detail-completion-note"
+              use:renderMarkdownAction={bounty.completion_note.trim()}
+            ></div>
+          {:else}
+            <p class="detail-empty-hint">{$t('执行者未填写完成说明')}</p>
+          {/if}
+        </section>
+      {/if}
+
       <section class="detail-section">
         <h3 class="detail-section-title">{$t('任务详情')}</h3>
         <div

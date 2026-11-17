@@ -2,6 +2,19 @@
 use super::agents::active_agent;
 use super::*;
 
+/// 函数职责：在状态变更事务内通知仍 active 的指定身份；不向停用、吊销或历史未知身份投递。
+pub(super) fn notify_active(
+    tx: &Transaction<'_>,
+    agent_id: Option<&str>,
+    bounty: &Bounty,
+    kind: &str,
+    data: serde_json::Value,
+) -> Result<()> {
+    let payload = json!({"project_id":bounty.project_id,"data":data}).to_string();
+    tx.execute("INSERT INTO agent_events(agent_id,bounty_id,event_type,payload_json,created_at) SELECT id,?2,?3,?4,?5 FROM agents WHERE id=?1 AND status='active'", params![agent_id,bounty.id,kind,payload,now()])?;
+    Ok(())
+}
+
 /// 函数职责：与悬赏状态变化共用写事务；撤回只投递给本轮已记录的 active 接收者。
 /// 约束条件：发布只接受 OPEN 快照；撤回只保存标识，不能序列化 DRAFT 内容。
 pub(super) fn dispatch(tx: &Transaction<'_>, bounty: &Bounty, withdrawn: bool) -> Result<()> {

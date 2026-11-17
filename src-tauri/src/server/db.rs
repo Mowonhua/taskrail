@@ -16,6 +16,7 @@ use uuid::Uuid;
 
 mod agents;
 mod events;
+mod leases;
 
 /// 结构职责：可克隆的文件数据库入口；每次调用独立连接，可跨进程共享同一文件。
 /// 约束条件：同步接口应在阻塞线程执行，不接受 :memory:，以保证多连接共享数据。
@@ -26,8 +27,8 @@ pub struct Repository {
 }
 
 const PROJECT_COLUMNS: &str = "id,name,icon,description,workspace_path,default_acceptance_criteria,agent_draft_policy,arbitrator_chain_json,archived,created_at,updated_at";
-const BOUNTY_COLUMNS: &str = "b.id,b.project_id,b.title,b.description,b.acceptance_criteria,b.difficulty,b.assignee_mode,b.assignee_min_tier,b.assignee_agent_id,b.require_arbitration,b.status,b.created_by,b.lease_id,b.lease_agent_id,b.lease_expires_at,b.rejection_count,b.completion_note,b.published_at,b.withdrawn_at,b.cancelled_at,b.completed_at,b.created_at,b.updated_at,b.created_by_agent_id,a.name";
-const BOUNTY_SOURCE: &str = "bounties b LEFT JOIN agents a ON a.id=b.created_by_agent_id";
+const BOUNTY_COLUMNS: &str = "b.id,b.project_id,b.title,b.description,b.acceptance_criteria,b.difficulty,b.assignee_mode,b.assignee_min_tier,b.assignee_agent_id,b.require_arbitration,b.status,b.created_by,b.lease_id,b.lease_agent_id,b.lease_expires_at,b.rejection_count,b.completion_note,b.published_at,b.withdrawn_at,b.cancelled_at,b.completed_at,b.created_at,b.updated_at,b.created_by_agent_id,a.name,la.name,la.tier,aa.name,aa.tier,b.assignment_expires_at,b.completion_cost";
+const BOUNTY_SOURCE: &str = "bounties b LEFT JOIN agents a ON a.id=b.created_by_agent_id LEFT JOIN agents la ON la.id=b.lease_agent_id LEFT JOIN agents aa ON aa.id=b.assignee_agent_id";
 
 impl Repository {
     /// 函数职责：初始化文件、连接参数和版本化迁移；重复打开不重置数据。
@@ -53,13 +54,13 @@ impl Repository {
             [],
             |r| r.get(0),
         )?;
-        if version > 4 {
+        if version > 5 {
             return Err(ApiError::internal("数据库版本高于当前服务支持版本"));
         }
         if version == 0 {
             tx.execute_batch(include_str!("schema.sql"))?;
             tx.execute(
-                "INSERT INTO schema_migrations(version,applied_at) VALUES(4,?1)",
+                "INSERT INTO schema_migrations(version,applied_at) VALUES(5,?1)",
                 [now()],
             )?;
         } else {
@@ -68,9 +69,17 @@ impl Repository {
                 (2, include_str!("schema_v2.sql")),
                 (3, include_str!("schema_v3.sql")),
                 (4, include_str!("schema_v4.sql")),
+                (5, include_str!("schema_v5.sql")),
             ] {
                 if version < target {
                     tx.execute_batch(schema)?;
+                    if target == 5 {
+                        // 旧库的待接定向任务从升级时起获得完整响应窗口；复用租约格式，保证回收查询可按字符串比较时间。
+                        tx.execute(
+                            "UPDATE bounties SET assignment_expires_at=?1 WHERE status='OPEN' AND assignee_mode='specific' AND assignment_expires_at IS NULL",
+                            [leases::deadline()],
+                        )?;
+                    }
                     tx.execute(
                         "INSERT INTO schema_migrations(version,applied_at) VALUES(?1,?2)",
                         params![target, now()],
@@ -179,8 +188,9 @@ impl Repository {
             let id = Uuid::new_v4().to_string();
             let timestamp = now();
             let published = (input.status == BountyStatus::Open).then_some(&timestamp);
-            tx.execute("INSERT INTO bounties(id,project_id,title,description,acceptance_criteria,difficulty,assignee_mode,assignee_min_tier,assignee_agent_id,require_arbitration,status,created_by,published_at,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?14)",
-                params![id,input.project_id,input.title,input.description,input.acceptance_criteria,input.difficulty.as_str(),input.assignee_mode.as_str(),input.assignee_min_tier.map(Tier::as_str),input.assignee_agent_id,input.require_arbitration,input.status.as_str(),input.created_by,published,timestamp])?;
+            let assignment = (published.is_some() && input.assignee_mode == AssigneeMode::Specific).then(leases::deadline);
+            tx.execute("INSERT INTO bounties(id,project_id,title,description,acceptance_criteria,difficulty,assignee_mode,assignee_min_tier,assignee_agent_id,require_arbitration,status,created_by,published_at,created_at,updated_at,assignment_expires_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?14,?15)",
+                params![id,input.project_id,input.title,input.description,input.acceptance_criteria,input.difficulty.as_str(),input.assignee_mode.as_str(),input.assignee_min_tier.map(Tier::as_str),input.assignee_agent_id,input.require_arbitration,input.status.as_str(),input.created_by,published,timestamp,assignment])?;
             let b = find_bounty(tx, &id)?;
             event(tx, &b, "created", &b.created_by, None, json!({}))?;
             if b.status == BountyStatus::Open { events::dispatch(tx, &b, false)?; }
@@ -212,8 +222,9 @@ impl Repository {
             };
             let published = (status == BountyStatus::Open).then_some(&timestamp);
             let actor = format!("agent:{agent_id}");
-            tx.execute("INSERT INTO bounties(id,project_id,title,description,acceptance_criteria,difficulty,assignee_mode,assignee_min_tier,assignee_agent_id,require_arbitration,status,created_by,created_by_agent_id,published_at,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?15)",
-                params![id,input.project_id,input.title,input.description,input.acceptance_criteria,input.difficulty.as_str(),input.assignee_mode.as_str(),input.assignee_min_tier.map(Tier::as_str),input.assignee_agent_id,input.require_arbitration,status.as_str(),actor,agent_id,published,timestamp])?;
+            let assignment = (published.is_some() && input.assignee_mode == AssigneeMode::Specific).then(leases::deadline);
+            tx.execute("INSERT INTO bounties(id,project_id,title,description,acceptance_criteria,difficulty,assignee_mode,assignee_min_tier,assignee_agent_id,require_arbitration,status,created_by,created_by_agent_id,published_at,created_at,updated_at,assignment_expires_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?15,?16)",
+                params![id,input.project_id,input.title,input.description,input.acceptance_criteria,input.difficulty.as_str(),input.assignee_mode.as_str(),input.assignee_min_tier.map(Tier::as_str),input.assignee_agent_id,input.require_arbitration,status.as_str(),actor,agent_id,published,timestamp,assignment])?;
             let bounty = find_bounty(tx, &id)?;
             event(tx, &bounty, "created", &actor, None, json!({
                 "publisher_agent_id": agent_id,
@@ -301,12 +312,12 @@ impl Repository {
         self.transition(id, actor, Transition::Cancel)
     }
     /// 函数职责：原子接取 OPEN 悬赏并签发递增令牌和十五分钟租约。
-    /// 约束条件：此入口只维护租约原子性；Agent 身份、段位、订阅与仲裁准入由未来的授权层校验。
+    /// 约束条件：兼容允许未注册身份的仓储调用；HTTP 必须使用复核身份及准入的 agent_claim_bounty。
     pub fn try_claim_bounty(&self, id: &str, agent_id: &str) -> Result<Bounty> {
         if agent_id.trim().is_empty() {
             return Err(ApiError::invalid("agent_id 不能为空"));
         }
-        self.transition(id, agent_id, Transition::Claim)
+        self.write(|tx| leases::claim(tx, &find_bounty(tx, id)?, agent_id))
     }
 
     fn transition(&self, id: &str, actor: &str, action: Transition) -> Result<Bounty> {
@@ -329,31 +340,22 @@ impl Repository {
                     if !matches!(b.status,BountyStatus::Draft | BountyStatus::Open | BountyStatus::WaitingInfo) { return Err(invalid_transition()); }
                     (BountyStatus::Cancelled,"cancelled","cancelled_at")
                 }
-                Transition::Claim => {
-                    if b.status == BountyStatus::InProgress || b.lease_agent_id.is_some() { return Err(already_claimed()); }
-                    if b.status != BountyStatus::Open { return Err(invalid_transition()); }
-                    (BountyStatus::InProgress,"claimed","")
-                }
             };
             let timestamp = now();
             // WHERE 再次约束读取到的状态与 fencing token；事务同时保护事件写入。
-            let changed = if matches!(action,Transition::Claim) {
-                let expires = (Utc::now()+chrono::Duration::minutes(15)).to_rfc3339_opts(SecondsFormat::Millis,true);
-                tx.execute("UPDATE bounties SET status='IN_PROGRESS',lease_id=lease_id+1,lease_agent_id=?2,lease_expires_at=?3,updated_at=?4 WHERE id=?1 AND status='OPEN' AND lease_agent_id IS NULL AND lease_id=?5",
-                    params![id,actor,expires,timestamp,b.lease_id])?
-            } else if matches!(action,Transition::Withdraw) {
-                tx.execute("UPDATE bounties SET status='DRAFT',withdrawn_at=?2,updated_at=?2 WHERE id=?1 AND status='OPEN' AND lease_agent_id IS NULL AND lease_id=?3",params![id,timestamp,b.lease_id])?
+            let changed = if matches!(action,Transition::Withdraw) {
+                tx.execute("UPDATE bounties SET status='DRAFT',withdrawn_at=?2,assignment_expires_at=NULL,updated_at=?2 WHERE id=?1 AND status='OPEN' AND lease_agent_id IS NULL AND lease_id=?3",params![id,timestamp,b.lease_id])?
             } else {
+                let assignment = (matches!(action,Transition::Publish) && b.assignee_mode == AssigneeMode::Specific).then(leases::deadline);
                 // column 仅来自上方固定动作分支，不接受调用方提供 SQL 标识符。
-                tx.execute(&format!("UPDATE bounties SET status=?2,{column}=?3,updated_at=?3 WHERE id=?1 AND status=?4 AND lease_id=?5"),params![id,to.as_str(),timestamp,b.status.as_str(),b.lease_id])?
+                tx.execute(&format!("UPDATE bounties SET status=?2,{column}=?3,assignment_expires_at=?6,updated_at=?3 WHERE id=?1 AND status=?4 AND lease_id=?5"),params![id,to.as_str(),timestamp,b.status.as_str(),b.lease_id,assignment])?
             };
             if changed != 1 { return Err(invalid_transition()); }
             let updated = find_bounty(tx,id)?;
             if matches!(action, Transition::Publish | Transition::Withdraw) {
                 events::dispatch(tx, &updated, matches!(action, Transition::Withdraw))?;
             }
-            let detail = if matches!(action,Transition::Claim) { json!({"lease_id":updated.lease_id,"lease_agent_id":updated.lease_agent_id,"lease_expires_at":updated.lease_expires_at}) } else { json!({}) };
-            event(tx,&updated,event_type,actor,Some(b.status),detail)?;
+            event(tx,&updated,event_type,actor,Some(b.status),json!({}))?;
             Ok(updated)
         })
     }
@@ -364,7 +366,6 @@ enum Transition {
     Publish,
     Withdraw,
     Cancel,
-    Claim,
 }
 fn now() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
@@ -539,6 +540,12 @@ fn bounty_row(r: &Row<'_>) -> rusqlite::Result<Bounty> {
         updated_at: r.get(22)?,
         created_by_agent_id: r.get(23)?,
         created_by_agent_name: r.get(24)?,
+        lease_agent_name: r.get(25)?,
+        lease_agent_tier: optional_enum(r, 26)?,
+        assignee_agent_name: r.get(27)?,
+        assignee_agent_tier: optional_enum(r, 28)?,
+        assignment_expires_at: r.get(29)?,
+        completion_cost: r.get(30)?,
     })
 }
 
@@ -573,7 +580,7 @@ mod tests {
         Repository::open(&path).unwrap();
         let conn = Connection::open(&path).unwrap();
         conn.execute(
-            "INSERT INTO schema_migrations(version,applied_at) VALUES(5,'future')",
+            "INSERT INTO schema_migrations(version,applied_at) VALUES(6,'future')",
             [],
         )
         .unwrap();
@@ -582,7 +589,7 @@ mod tests {
             conn.query_row("SELECT MAX(version) FROM schema_migrations", [], |r| r
                 .get::<_, i64>(0))
                 .unwrap(),
-            5
+            6
         );
     }
 }

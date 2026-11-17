@@ -377,6 +377,14 @@
     }
   }
 
+  const REALTIME_SYNC_INTERVAL_MS = 2000;
+  let realtimeSyncTimer: ReturnType<typeof setInterval> | null = null;
+  let realtimeSyncInFlight = false;
+  let componentDisposed = false;
+  let bountyListInFlightCount = 0;
+  let agentListInFlightCount = 0;
+  let detailInFlightCount = 0;
+
   let bountyListRequestSeq = 0;
   let workspaceRequestSeq = 0;
   let detailRequestSeq = 0;
@@ -421,6 +429,7 @@
     const serviceSeq = serviceReconnectSeq;
     const api = activeBountyApi;
     const query = buildBountyQuery();
+    bountyListInFlightCount += 1;
     try {
       const [filteredList, fullList] = await Promise.all([
         api.listBounties(query),
@@ -451,6 +460,8 @@
         serviceConnected = false;
         serviceConnectionError = formatServiceError(error);
       }
+    } finally {
+      bountyListInFlightCount -= 1;
     }
   }
 
@@ -470,6 +481,7 @@
     const serviceSeq = serviceReconnectSeq;
     const api = activeBountyApi;
     const filter = buildAgentFilter();
+    agentListInFlightCount += 1;
     try {
       const list = await api.listAgents(filter);
       if (
@@ -490,6 +502,8 @@
       ) {
         agentsLoadError = formatServiceError(error);
       }
+    } finally {
+      agentListInFlightCount -= 1;
     }
   }
 
@@ -568,6 +582,8 @@
     const api = activeBountyApi;
     const query = buildBountyQuery();
     const agentFilterQuery = buildAgentFilter();
+    bountyListInFlightCount += 1;
+    agentListInFlightCount += 1;
     try {
       const [projectsList, filteredList, fullList, onboardingSettled, agentsSettled] =
         await Promise.all([
@@ -651,6 +667,105 @@
         serviceConnectionError = formatServiceError(error);
       }
       if (throwOnError) throw error;
+    } finally {
+      bountyListInFlightCount -= 1;
+      agentListInFlightCount -= 1;
+    }
+  }
+
+  /**
+   * 后台静默同步当前悬赏列表、Agent 名录与已打开详情抽屉，响应外部 Agent 抢单、续租与交付状态变更。
+   * 仅在页面可见、服务已连接且无重叠后台轮询时执行；某子项已有前台请求在途时跳过该子项，防止与前台操作竞争序列号。
+   */
+  async function syncRealtimeWorkspace(): Promise<void> {
+    if (
+      componentDisposed ||
+      loading ||
+      !serviceConnected ||
+      realtimeSyncInFlight ||
+      (typeof document !== 'undefined' && document.visibilityState === 'hidden')
+    ) {
+      return;
+    }
+    realtimeSyncInFlight = true;
+    const serviceSeq = serviceReconnectSeq;
+    const api = activeBountyApi;
+    const tasks: Promise<void>[] = [];
+
+    if (bountyListInFlightCount === 0) {
+      const listSeq = ++bountyListRequestSeq;
+      const query = buildBountyQuery();
+      tasks.push(
+        Promise.all([
+          api.listBounties(query),
+          api.listBounties({ include_drafts: true }),
+        ]).then(([filteredList, fullList]) => {
+          if (
+            componentDisposed ||
+            serviceSeq !== serviceReconnectSeq ||
+            api !== activeBountyApi ||
+            listSeq !== bountyListRequestSeq
+          ) {
+            return;
+          }
+          bounties = filteredList;
+          actionableBounties = fullList.filter(
+            item =>
+              item.status === 'DRAFT' ||
+              item.status === 'WAITING_INFO' ||
+              item.status === 'PENDING_ARBITRATION',
+          );
+        }),
+      );
+    }
+
+    if (
+      agentListInFlightCount === 0 &&
+      typeof api.listAgents === 'function' &&
+      !agentsLoadError
+    ) {
+      const agentsSeq = ++agentListRequestSeq;
+      const agentFilter = buildAgentFilter();
+      tasks.push(
+        api.listAgents(agentFilter).then(list => {
+          if (
+            componentDisposed ||
+            serviceSeq !== serviceReconnectSeq ||
+            api !== activeBountyApi ||
+            agentsSeq !== agentListRequestSeq ||
+            agentsLoadError
+          ) {
+            return;
+          }
+          agents = Array.isArray(list) ? list : [];
+          agentsLoaded = true;
+        }),
+      );
+    }
+
+    if (detailInFlightCount === 0 && activeDetail !== null) {
+      const detailBountyId = activeDetail.bounty.id;
+      const detailSeq = ++detailRequestSeq;
+      tasks.push(
+        api.getBountyDetail(detailBountyId).then(refreshedDetail => {
+          if (
+            componentDisposed ||
+            serviceSeq !== serviceReconnectSeq ||
+            api !== activeBountyApi ||
+            detailSeq !== detailRequestSeq ||
+            activeDetail?.bounty.id !== detailBountyId
+          ) {
+            return;
+          }
+          activeDetail = refreshedDetail;
+        }),
+      );
+    }
+
+    try {
+      await Promise.allSettled(tasks);
+    } finally {
+      realtimeSyncInFlight = false;
     }
   }
 
@@ -682,6 +797,9 @@
   async function reconnectBountyService(preferInjected = false, throwOnError = false): Promise<void> {
     const serviceSeq = ++serviceReconnectSeq;
     let statusSeq = ++connectionStatusSeq;
+    bountyListInFlightCount += 1;
+    agentListInFlightCount += 1;
+    detailInFlightCount += 1;
     try {
       const resolved = await resolveBountyApiInstance(preferences, preferInjected);
       if (serviceSeq !== serviceReconnectSeq) {
@@ -718,6 +836,10 @@
         serviceConnectionError = formatServiceError(error);
       }
       if (throwOnError) throw error;
+    } finally {
+      bountyListInFlightCount -= 1;
+      agentListInFlightCount -= 1;
+      detailInFlightCount -= 1;
     }
   }
 
@@ -884,40 +1006,55 @@
   async function handleDisableAgent(id: string): Promise<AgentSummary> {
     const serviceSeq = serviceReconnectSeq;
     const api = activeBountyApi;
-    const updated = await api.disableAgent(id);
-    if (serviceSeq === serviceReconnectSeq && api === activeBountyApi) {
-      await refreshAgentsOnly();
+    agentListInFlightCount += 1;
+    try {
+      const updated = await api.disableAgent(id);
       if (serviceSeq === serviceReconnectSeq && api === activeBountyApi) {
-        showToast($t('已停用 Agent'));
+        await refreshAgentsOnly();
+        if (serviceSeq === serviceReconnectSeq && api === activeBountyApi) {
+          showToast($t('已停用 Agent'));
+        }
       }
+      return updated;
+    } finally {
+      agentListInFlightCount -= 1;
     }
-    return updated;
   }
 
   async function handleEnableAgent(id: string): Promise<AgentSummary> {
     const serviceSeq = serviceReconnectSeq;
     const api = activeBountyApi;
-    const updated = await api.enableAgent(id);
-    if (serviceSeq === serviceReconnectSeq && api === activeBountyApi) {
-      await refreshAgentsOnly();
+    agentListInFlightCount += 1;
+    try {
+      const updated = await api.enableAgent(id);
       if (serviceSeq === serviceReconnectSeq && api === activeBountyApi) {
-        showToast($t('已启用 Agent'));
+        await refreshAgentsOnly();
+        if (serviceSeq === serviceReconnectSeq && api === activeBountyApi) {
+          showToast($t('已启用 Agent'));
+        }
       }
+      return updated;
+    } finally {
+      agentListInFlightCount -= 1;
     }
-    return updated;
   }
 
   async function handleRevokeAgent(id: string): Promise<AgentSummary> {
     const serviceSeq = serviceReconnectSeq;
     const api = activeBountyApi;
-    const updated = await api.revokeAgent(id);
-    if (serviceSeq === serviceReconnectSeq && api === activeBountyApi) {
-      await refreshAgentsOnly();
+    agentListInFlightCount += 1;
+    try {
+      const updated = await api.revokeAgent(id);
       if (serviceSeq === serviceReconnectSeq && api === activeBountyApi) {
-        showToast($t('已吊销 Agent'));
+        await refreshAgentsOnly();
+        if (serviceSeq === serviceReconnectSeq && api === activeBountyApi) {
+          showToast($t('已吊销 Agent'));
+        }
       }
+      return updated;
+    } finally {
+      agentListInFlightCount -= 1;
     }
-    return updated;
   }
 
   async function handleCreateBounty(input: CreateBountyInput): Promise<BountyTask> {
@@ -934,36 +1071,42 @@
   ): Promise<BountyTask> {
     const serviceSeq = serviceReconnectSeq;
     const api = activeBountyApi;
-    let updated = await api.updateBounty(id, input);
-    if (publishAfter) {
-      updated = await api.publishBounty(id);
-    }
-    await refreshBountyWorkspace();
-    if (
-      activeDetail &&
-      activeDetail.bounty.id === id &&
-      serviceSeq === serviceReconnectSeq &&
-      api === activeBountyApi
-    ) {
-      const detailSeq = ++detailRequestSeq;
-      const refreshedDetail = await api.getBountyDetail(id);
-      if (
-        detailSeq === detailRequestSeq &&
-        serviceSeq === serviceReconnectSeq &&
-        api === activeBountyApi &&
-        activeDetail?.bounty.id === id
-      ) {
-        activeDetail = refreshedDetail;
+    detailInFlightCount += 1;
+    try {
+      let updated = await api.updateBounty(id, input);
+      if (publishAfter) {
+        updated = await api.publishBounty(id);
       }
+      await refreshBountyWorkspace();
+      if (
+        activeDetail &&
+        activeDetail.bounty.id === id &&
+        serviceSeq === serviceReconnectSeq &&
+        api === activeBountyApi
+      ) {
+        const detailSeq = ++detailRequestSeq;
+        const refreshedDetail = await api.getBountyDetail(id);
+        if (
+          detailSeq === detailRequestSeq &&
+          serviceSeq === serviceReconnectSeq &&
+          api === activeBountyApi &&
+          activeDetail?.bounty.id === id
+        ) {
+          activeDetail = refreshedDetail;
+        }
+      }
+      showToast(publishAfter ? $t('悬赏已发布') : $t('草稿已保存'));
+      return updated;
+    } finally {
+      detailInFlightCount -= 1;
     }
-    showToast(publishAfter ? $t('悬赏已发布') : $t('草稿已保存'));
-    return updated;
   }
 
   async function openBountyDetail(bountyId: string): Promise<void> {
     const detailSeq = ++detailRequestSeq;
     const serviceSeq = serviceReconnectSeq;
     const api = activeBountyApi;
+    detailInFlightCount += 1;
     try {
       const detail = await api.getBountyDetail(bountyId);
       if (
@@ -983,6 +1126,8 @@
         return;
       }
       showToast(formatServiceError(error));
+    } finally {
+      detailInFlightCount -= 1;
     }
   }
 
@@ -990,23 +1135,29 @@
     const detailSeq = ++detailRequestSeq;
     const serviceSeq = serviceReconnectSeq;
     const api = activeBountyApi;
-    await api.publishBounty(bountyId);
-    const refreshedDetail = await api.getBountyDetail(bountyId);
-    if (
-      detailSeq === detailRequestSeq &&
-      serviceSeq === serviceReconnectSeq &&
-      api === activeBountyApi
-    ) {
-      activeDetail = refreshedDetail;
+    detailInFlightCount += 1;
+    try {
+      await api.publishBounty(bountyId);
+      const refreshedDetail = await api.getBountyDetail(bountyId);
+      if (
+        detailSeq === detailRequestSeq &&
+        serviceSeq === serviceReconnectSeq &&
+        api === activeBountyApi
+      ) {
+        activeDetail = refreshedDetail;
+      }
+      await refreshBountyWorkspace();
+      showToast($t('悬赏已发布'));
+    } finally {
+      detailInFlightCount -= 1;
     }
-    await refreshBountyWorkspace();
-    showToast($t('悬赏已发布'));
   }
 
   async function handleWithdrawFromDrawer(bountyId: string): Promise<void> {
     const detailSeq = ++detailRequestSeq;
     const serviceSeq = serviceReconnectSeq;
     const api = activeBountyApi;
+    detailInFlightCount += 1;
     try {
       await api.withdrawBounty(bountyId);
       const refreshedDetail = await api.getBountyDetail(bountyId);
@@ -1035,6 +1186,8 @@
       }
       await refreshBountyWorkspace();
       throw error;
+    } finally {
+      detailInFlightCount -= 1;
     }
   }
 
@@ -1042,17 +1195,60 @@
     const detailSeq = ++detailRequestSeq;
     const serviceSeq = serviceReconnectSeq;
     const api = activeBountyApi;
-    await api.cancelBounty(bountyId);
-    const refreshedDetail = await api.getBountyDetail(bountyId);
-    if (
-      detailSeq === detailRequestSeq &&
-      serviceSeq === serviceReconnectSeq &&
-      api === activeBountyApi
-    ) {
-      activeDetail = refreshedDetail;
+    detailInFlightCount += 1;
+    try {
+      await api.cancelBounty(bountyId);
+      const refreshedDetail = await api.getBountyDetail(bountyId);
+      if (
+        detailSeq === detailRequestSeq &&
+        serviceSeq === serviceReconnectSeq &&
+        api === activeBountyApi
+      ) {
+        activeDetail = refreshedDetail;
+      }
+      await refreshBountyWorkspace();
+      showToast($t('任务已取消'));
+    } finally {
+      detailInFlightCount -= 1;
     }
-    await refreshBountyWorkspace();
-    showToast($t('任务已取消'));
+  }
+
+  async function handleReleaseLeaseFromDrawer(bountyId: string): Promise<void> {
+    const detailSeq = ++detailRequestSeq;
+    const serviceSeq = serviceReconnectSeq;
+    const api = activeBountyApi;
+    detailInFlightCount += 1;
+    try {
+      await api.releaseLease(bountyId);
+      const refreshedDetail = await api.getBountyDetail(bountyId);
+      if (
+        detailSeq === detailRequestSeq &&
+        serviceSeq === serviceReconnectSeq &&
+        api === activeBountyApi
+      ) {
+        activeDetail = refreshedDetail;
+      }
+      await refreshBountyWorkspace();
+      showToast($t('已释放租约并重新开放悬赏'));
+    } catch (error) {
+      showToast(formatServiceError(error));
+      try {
+        const refreshedDetail = await api.getBountyDetail(bountyId);
+        if (
+          detailSeq === detailRequestSeq &&
+          serviceSeq === serviceReconnectSeq &&
+          api === activeBountyApi
+        ) {
+          activeDetail = refreshedDetail;
+        }
+      } catch {
+        /* 忽略刷新详情失败 */
+      }
+      await refreshBountyWorkspace();
+      throw error;
+    } finally {
+      detailInFlightCount -= 1;
+    }
   }
 
   function openCreateComposer(): void {
@@ -1390,7 +1586,19 @@
 
   onMount(() => {
     let disposed = false;
+    componentDisposed = false;
     const cleanups: Array<() => void> = [];
+
+    if (realtimeSyncTimer) clearInterval(realtimeSyncTimer);
+    realtimeSyncTimer = setInterval(() => {
+      void syncRealtimeWorkspace();
+    }, REALTIME_SYNC_INTERVAL_MS);
+    cleanups.push(() => {
+      if (realtimeSyncTimer) {
+        clearInterval(realtimeSyncTimer);
+        realtimeSyncTimer = null;
+      }
+    });
 
     if (typeof window !== 'undefined' && typeof window.matchMedia === 'function') {
       const media = window.matchMedia('(prefers-color-scheme: dark)');
@@ -1526,11 +1734,17 @@
 
     return () => {
       disposed = true;
+      componentDisposed = true;
       for (const cleanup of cleanups) cleanup();
     };
   });
 
   onDestroy(() => {
+    componentDisposed = true;
+    if (realtimeSyncTimer) {
+      clearInterval(realtimeSyncTimer);
+      realtimeSyncTimer = null;
+    }
     if (toastTimer) clearTimeout(toastTimer);
     windowMaterial?.dispose();
     updateCoordinator.dispose();
@@ -2077,6 +2291,7 @@
       onPublish={handlePublishFromDrawer}
       onWithdraw={handleWithdrawFromDrawer}
       onCancel={handleCancelFromDrawer}
+      onReleaseLease={handleReleaseLeaseFromDrawer}
     />
   {/if}
 

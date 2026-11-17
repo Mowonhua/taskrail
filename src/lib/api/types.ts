@@ -85,6 +85,9 @@ export interface BountyTask {
   assignee_mode: AssigneeMode;
   assignee_min_tier: BountyDifficulty | null;
   assignee_agent_id: string | null;
+  assignee_agent_name: string | null;
+  assignee_agent_tier: AgentTier | null;
+  assignment_expires_at: string | null;
   require_arbitration: boolean;
   status: BountyStatus;
   created_by: string;
@@ -92,9 +95,12 @@ export interface BountyTask {
   created_by_agent_name: string | null;
   lease_id: number;
   lease_agent_id: string | null;
+  lease_agent_name: string | null;
+  lease_agent_tier: AgentTier | null;
   lease_expires_at: string | null;
   rejection_count: number;
   completion_note: string | null;
+  completion_cost: number | null;
   published_at: string | null;
   withdrawn_at: string | null;
   cancelled_at: string | null;
@@ -164,6 +170,25 @@ export interface BountyQuery {
   include_drafts?: boolean;
 }
 
+export interface DeclineBountyInput {
+  reason?: string | null;
+}
+
+export interface LeaseHeartbeatInput {
+  lease_id: number;
+}
+
+export interface AbandonBountyInput {
+  lease_id: number;
+  reason?: string | null;
+}
+
+export interface CompleteBountyInput {
+  lease_id: number;
+  completion_note?: string | null;
+  completion_cost?: number | null;
+}
+
 export type AgentTier = 'Unranked' | 'C' | 'B' | 'A' | 'S';
 export type AgentStatus = 'active' | 'disabled' | 'revoked';
 export type AgentActivity = 'idle' | 'busy';
@@ -219,6 +244,8 @@ export interface AgentSummary {
   status: AgentStatus;
   invite_token_id: string | null;
   active_lease_count: number;
+  timeout_count: number;
+  abandon_count: number;
   last_seen_at: string | null;
   channel_status: AgentChannelStatus;
   stream_connected: boolean;
@@ -261,7 +288,16 @@ export interface AgentSubscriptionsInput {
   project_ids?: string[];
 }
 
-export type AgentEventType = 'task.published' | 'task.assigned' | 'task.withdrawn' | string;
+export type AgentEventType =
+  | 'task.published'
+  | 'task.assigned'
+  | 'task.withdrawn'
+  | 'task.assignment_declined'
+  | 'task.assignment_expired'
+  | 'lease.expiring'
+  | 'lease.expired'
+  | 'lease.released'
+  | string;
 
 export interface AgentEvent {
   event_id: number;
@@ -305,6 +341,9 @@ export type ServiceErrorCode =
   | 'INVITE_TOKEN_INVALID'
   | 'AGENT_REVOKED'
   | 'AGENT_DISABLED'
+  | 'ASSIGNEE_MISMATCH'
+  | 'TIER_INSUFFICIENT'
+  | 'LEASE_OWNER_MISMATCH'
   | 'PROJECT_NOT_FOUND'
   | 'BOUNTY_NOT_FOUND'
   | 'AGENT_NOT_FOUND'
@@ -316,6 +355,8 @@ export type ServiceErrorCode =
   | 'INVALID_TRANSITION'
   | 'AGENT_NAME_TAKEN'
   | 'BOUNTY_ALREADY_CLAIMED'
+  | 'STALE_LEASE'
+  | 'ARBITRATION_REQUIRED'
   | 'INTERNAL_ERROR';
 
 export class ServiceApiError extends Error {

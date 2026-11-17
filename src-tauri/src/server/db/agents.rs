@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 const INVITE_COLUMNS: &str =
     "id,label,token_prefix,max_uses,use_count,expires_at,revoked_at,created_at";
 // 显式列出公开字段，避免增加存储字段时意外暴露 MMR 或密钥摘要。
-const AGENT_COLUMNS: &str = "id,name,description,capabilities_json,api_key_prefix,tier,placement_completed,subscribe_all_projects,status,invite_token_id,last_seen_at,created_at,updated_at,webhook_url,last_pushed_at";
+const AGENT_COLUMNS: &str = "id,name,description,capabilities_json,api_key_prefix,tier,placement_completed,subscribe_all_projects,status,invite_token_id,last_seen_at,created_at,updated_at,webhook_url,last_pushed_at,timeout_count,abandon_count";
 
 impl Repository {
     fn agent_summary(&self, conn: &Connection, id: &str) -> Result<AgentSummary> {
@@ -384,6 +384,8 @@ fn find_agent(conn: &Connection, id: &str) -> Result<AgentSummary> {
                     webhook_configured: false,
                     webhook_url: r.get(13)?,
                     last_pushed_at: r.get(14)?,
+                    timeout_count: r.get(15)?,
+                    abandon_count: r.get(16)?,
                 })
             },
         )

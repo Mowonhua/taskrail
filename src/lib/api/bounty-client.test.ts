@@ -19,9 +19,14 @@ import {
   formatAgentStatus,
   formatAgentSubscriptionSummary,
   formatAgentTier,
+  formatAssigneeConstraint,
+  formatBountyExecutor,
   formatBountyPublisher,
+  formatCompletionCost,
   formatEventActor,
+  formatEventLabel,
   formatInviteTokenStatus,
+  formatLeaseCountdown,
   formatServiceError,
 } from '../bounty/helpers';
 import { setLocalePreference } from '../i18n';
@@ -369,7 +374,7 @@ describe('createMemoryBountyClient', () => {
       'published:human:DRAFT->OPEN',
       'withdrawn:human:OPEN->DRAFT',
       'published:human:DRAFT->OPEN',
-      'claimed:agent-7:OPEN->IN_PROGRESS',
+      'claimed:agent:agent-7:OPEN->IN_PROGRESS',
     ]);
   });
 
@@ -397,6 +402,9 @@ describe('createMemoryBountyClient', () => {
       assignee_mode: 'any',
       assignee_min_tier: null,
       assignee_agent_id: null,
+      assignee_agent_name: null,
+      assignee_agent_tier: null,
+      assignment_expires_at: null,
       require_arbitration: false,
       status: 'WAITING_INFO',
       created_by: 'human',
@@ -404,9 +412,12 @@ describe('createMemoryBountyClient', () => {
       created_by_agent_name: null,
       lease_id: 1,
       lease_agent_id: null,
+      lease_agent_name: null,
+      lease_agent_tier: null,
       lease_expires_at: null,
       rejection_count: 0,
       completion_note: null,
+      completion_cost: null,
       published_at: '2026-11-16T10:01:00.000Z',
       withdrawn_at: null,
       cancelled_at: null,
@@ -862,6 +873,8 @@ describe('Issue 03 辅助格式化函数与中英文翻译', () => {
       status: 'active',
       invite_token_id: null,
       active_lease_count: 0,
+      timeout_count: 0,
+      abandon_count: 0,
       last_seen_at: null,
       channel_status: 'offline',
       stream_connected: false,
@@ -1687,4 +1700,420 @@ describe('Issue 05 Agent 自动发单与项目级草稿审核策略', () => {
   });
 });
 
+describe('Issue 06: 租约令牌、并发抢单、指派婉拒、超时回收与无仲裁交付', () => {
+  it('HttpBountyClient.releaseLease 与 HttpAgentClient 租约接口发送正确路由与正文', async () => {
+    const calls: Array<{ url: string; method?: string; headers: Record<string, string>; body?: string }> = [];
+    const fetchMock: typeof fetch = async (input, init) => {
+      calls.push({
+        url: String(input),
+        method: init?.method,
+        headers: (init?.headers ?? {}) as Record<string, string>,
+        body: typeof init?.body === 'string' ? init.body : undefined,
+      });
+      return jsonResponse({ id: 'b1' }, 200);
+    };
 
+    const adminClient = new HttpBountyClient('http://127.0.0.1:8420/', 'admin-tok', fetchMock);
+    await adminClient.releaseLease('b/1');
+
+    const agentClient = new HttpAgentClient('http://127.0.0.1:8420/', 'tr_ag_secret', fetchMock);
+    await agentClient.claimBounty('b/1');
+    await agentClient.declineBounty('b/1');
+    await agentClient.declineBounty('b/1', { reason: '超出能力范围' });
+    await agentClient.heartbeatBounty('b/1', { lease_id: 2 });
+    await agentClient.abandonBounty('b/1', { lease_id: 2, reason: '依赖缺失' });
+    await agentClient.completeBounty('b/1', {
+      lease_id: 2,
+      completion_note: '测试全部通过',
+      completion_cost: 1.25,
+    });
+
+    expect(calls.map(c => `${c.method} ${c.url}`)).toEqual([
+      'POST http://127.0.0.1:8420/api/v1/bounties/b%2F1/release-lease',
+      'POST http://127.0.0.1:8420/api/v1/agent/bounties/b%2F1/claim',
+      'POST http://127.0.0.1:8420/api/v1/agent/bounties/b%2F1/decline',
+      'POST http://127.0.0.1:8420/api/v1/agent/bounties/b%2F1/decline',
+      'POST http://127.0.0.1:8420/api/v1/agent/bounties/b%2F1/heartbeat',
+      'POST http://127.0.0.1:8420/api/v1/agent/bounties/b%2F1/abandon',
+      'POST http://127.0.0.1:8420/api/v1/agent/bounties/b%2F1/complete',
+    ]);
+    expect(calls[0].headers.Authorization).toBe('Bearer admin-tok');
+    expect(calls[0].body).toBeUndefined();
+    expect(calls[1].headers.Authorization).toBe('Bearer tr_ag_secret');
+    expect(calls[1].body).toBeUndefined();
+    expect(calls[2].body).toBeUndefined();
+    expect(JSON.parse(calls[3].body!)).toEqual({ reason: '超出能力范围' });
+    expect(JSON.parse(calls[4].body!)).toEqual({ lease_id: 2 });
+    expect(JSON.parse(calls[5].body!)).toEqual({ lease_id: 2, reason: '依赖缺失' });
+    expect(JSON.parse(calls[6].body!)).toEqual({
+      lease_id: 2,
+      completion_note: '测试全部通过',
+      completion_cost: 1.25,
+    });
+  });
+
+  it('HttpAgentClient.completeBounty 与 MemoryBountyClient 一致拒绝 NaN、Infinity、-Infinity 与负数成本且不触发 fetch', async () => {
+    const fetchCalls: Array<{ url: string; body?: string }> = [];
+    const fetchMock: typeof fetch = async (input, init) => {
+      fetchCalls.push({
+        url: String(input),
+        body: typeof init?.body === 'string' ? init.body : undefined,
+      });
+      return jsonResponse({ id: 'b-http', status: 'COMPLETED' }, 200);
+    };
+    const httpAgent = new HttpAgentClient('http://127.0.0.1:8420', 'tr_ag_secret', fetchMock);
+
+    const memoryClient = createMemoryBountyClient({ lan_open_registration: true });
+    const project = await memoryClient.createProject({ name: 'Cost Validation' });
+    const agent = await memoryClient.registerAgent({ name: 'cost-checker' });
+    const task = await memoryClient.createBounty({
+      project_id: project.id,
+      title: 'Cost check task',
+      difficulty: 'C',
+      assignee_mode: 'any',
+      status: 'OPEN',
+    });
+    const claimed = await memoryClient.agentClaimBounty(agent.api_key, task.id);
+
+    for (const invalidCost of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, -0.01, -5]) {
+      await expect(
+        httpAgent.completeBounty('b-http', {
+          lease_id: 1,
+          completion_cost: invalidCost,
+        }),
+      ).rejects.toMatchObject({
+        code: 'VALIDATION_ERROR',
+        status: 400,
+      });
+      await expect(
+        memoryClient.agentCompleteBounty(agent.api_key, task.id, {
+          lease_id: claimed.lease_id,
+          completion_cost: invalidCost,
+        }),
+      ).rejects.toMatchObject({
+        code: 'VALIDATION_ERROR',
+        status: 400,
+      });
+    }
+    expect(fetchCalls).toHaveLength(0);
+    expect((await memoryClient.getBountyDetail(task.id)).bounty.status).toBe('IN_PROGRESS');
+
+    // 有效非负有限值（0、正数）与省略/null 成本在两端均正常通过
+    await httpAgent.completeBounty('b-http', { lease_id: 1, completion_cost: 0 });
+    await httpAgent.completeBounty('b-http', { lease_id: 1, completion_cost: 2.5 });
+    await httpAgent.completeBounty('b-http', { lease_id: 1 });
+    await httpAgent.completeBounty('b-http', { lease_id: 1, completion_cost: null });
+    expect(fetchCalls).toHaveLength(4);
+    expect(JSON.parse(fetchCalls[0].body!)).toEqual({ lease_id: 1, completion_cost: 0 });
+    expect(JSON.parse(fetchCalls[1].body!)).toEqual({ lease_id: 1, completion_cost: 2.5 });
+    expect(JSON.parse(fetchCalls[2].body!)).toEqual({ lease_id: 1 });
+    expect(JSON.parse(fetchCalls[3].body!)).toEqual({ lease_id: 1, completion_cost: null });
+
+    const completedZero = await memoryClient.agentCompleteBounty(agent.api_key, task.id, {
+      lease_id: claimed.lease_id,
+      completion_cost: 0,
+    });
+    expect(completedZero.status).toBe('COMPLETED');
+    expect(completedZero.completion_cost).toBe(0);
+
+    const taskOmitted = await memoryClient.createBounty({
+      project_id: project.id,
+      title: 'Omitted cost task',
+      difficulty: 'C',
+      assignee_mode: 'any',
+      status: 'OPEN',
+    });
+    const claimedOmitted = await memoryClient.agentClaimBounty(agent.api_key, taskOmitted.id);
+    const completedOmitted = await memoryClient.agentCompleteBounty(
+      agent.api_key,
+      taskOmitted.id,
+      { lease_id: claimedOmitted.lease_id },
+    );
+    expect(completedOmitted.status).toBe('COMPLETED');
+    expect(completedOmitted.completion_cost).toBeNull();
+  });
+
+  it('MemoryBountyClient 并发抢单互斥、段位准入与递增 lease_id 脑裂校验', async () => {
+    const client = createMemoryBountyClient({ lan_open_registration: true });
+    const project = await client.createProject({ name: 'Lease Core' });
+    const rookie = await client.registerAgent({ name: 'rookie-agent' });
+    const senior = await client.registerAgent({ name: 'senior-agent' });
+    await client.simulateAgentTier(senior.agent.id, 'B');
+
+    const minTierTask = await client.createBounty({
+      project_id: project.id,
+      title: 'Tier B task',
+      difficulty: 'B',
+      assignee_mode: 'min_tier',
+      assignee_min_tier: 'B',
+      status: 'OPEN',
+    });
+
+    await expect(client.agentClaimBounty(rookie.api_key, minTierTask.id)).rejects.toMatchObject({
+      code: 'TIER_INSUFFICIENT',
+      status: 403,
+    });
+
+    const claimed = await client.agentClaimBounty(senior.api_key, minTierTask.id);
+    expect(claimed.status).toBe('IN_PROGRESS');
+    expect(claimed.lease_id).toBe(1);
+    expect(claimed.lease_agent_id).toBe(senior.agent.id);
+    expect(claimed.lease_agent_name).toBe('senior-agent');
+    expect(claimed.lease_agent_tier).toBe('B');
+    expect(claimed.lease_expires_at).not.toBeNull();
+
+    await expect(client.agentClaimBounty(senior.api_key, minTierTask.id)).rejects.toMatchObject({
+      code: 'BOUNTY_ALREADY_CLAIMED',
+      status: 409,
+    });
+
+    await expect(
+      client.agentHeartbeatBounty(rookie.api_key, minTierTask.id, { lease_id: 1 }),
+    ).rejects.toMatchObject({ code: 'LEASE_OWNER_MISMATCH', status: 403 });
+
+    await expect(
+      client.agentCompleteBounty(senior.api_key, minTierTask.id, { lease_id: 0 }),
+    ).rejects.toMatchObject({ code: 'STALE_LEASE', status: 409 });
+
+    const abandoned = await client.agentAbandonBounty(senior.api_key, minTierTask.id, {
+      lease_id: 1,
+      reason: '需要交接',
+    });
+    expect(abandoned.status).toBe('OPEN');
+    expect(abandoned.lease_id).toBe(1);
+    expect(abandoned.lease_agent_id).toBeNull();
+    expect((await client.agentGetMe(senior.api_key)).abandon_count).toBe(1);
+
+    const reclaimed = await client.agentClaimBounty(senior.api_key, minTierTask.id);
+    expect(reclaimed.lease_id).toBe(2);
+    await expect(
+      client.agentHeartbeatBounty(senior.api_key, minTierTask.id, { lease_id: 1 }),
+    ).rejects.toMatchObject({ code: 'STALE_LEASE', status: 409 });
+
+    const completed = await client.agentCompleteBounty(senior.api_key, minTierTask.id, {
+      lease_id: 2,
+      completion_note: '  已通过全量回归  ',
+      completion_cost: 3.5,
+    });
+    expect(completed.status).toBe('COMPLETED');
+    expect(completed.lease_id).toBe(2);
+    expect(completed.lease_agent_id).toBe(senior.agent.id);
+    expect(completed.lease_agent_name).toBe('senior-agent');
+    expect(completed.lease_agent_tier).toBe('B');
+    expect(completed.lease_expires_at).toBeNull();
+    expect(completed.completion_note).toBe('已通过全量回归');
+    expect(completed.completion_cost).toBe(3.5);
+    expect(completed.completed_at).not.toBeNull();
+  });
+
+  it('定向指派婉拒、指派超时回退、租约临期提醒/到期回收、强制释放与仲裁拦截', async () => {
+    const client = createMemoryBountyClient({ lan_open_registration: true });
+    const project = await client.createProject({ name: 'Lease Flow' });
+    const publisher = await client.registerAgent({ name: 'pub-bot' });
+    const target = await client.registerAgent({ name: 'target-bot' });
+    const bystander = await client.registerAgent({ name: 'bystander-bot' });
+
+    const specificTask = await client.agentCreateBounty(publisher.api_key, {
+      project_id: project.id,
+      title: 'Specific task',
+      difficulty: 'C',
+      assignee_mode: 'specific',
+      assignee_agent_id: target.agent.id,
+    });
+    expect(specificTask.assignment_expires_at).not.toBeNull();
+    expect(specificTask.assignee_agent_name).toBe('target-bot');
+
+    await expect(client.agentClaimBounty(bystander.api_key, specificTask.id)).rejects.toMatchObject({
+      code: 'ASSIGNEE_MISMATCH',
+      status: 403,
+    });
+
+    const declined = await client.agentDeclineBounty(target.api_key, specificTask.id, {
+      reason: '正在处理其他任务',
+    });
+    expect(declined.status).toBe('OPEN');
+    expect(declined.assignee_mode).toBe('any');
+    expect(declined.assignee_agent_id).toBeNull();
+    expect(declined.assignment_expires_at).toBeNull();
+
+    const pubEventsAfterDecline = await client.agentListEvents(publisher.api_key);
+    expect(pubEventsAfterDecline.events.some(e => e.event_type === 'task.assignment_declined')).toBe(
+      true,
+    );
+
+    const claimedByBystander = await client.agentClaimBounty(bystander.api_key, specificTask.id);
+    const expiresMs = Date.parse(claimedByBystander.lease_expires_at!);
+
+    await client.sweepLeases(expiresMs - 2 * 60 * 1000);
+    await client.sweepLeases(expiresMs - 60 * 1000);
+    const expiringEvents = (await client.agentListEvents(bystander.api_key)).events.filter(
+      e => e.event_type === 'lease.expiring' && e.bounty_id === specificTask.id,
+    );
+    expect(expiringEvents).toHaveLength(1);
+
+    await client.sweepLeases(expiresMs + 1000);
+    const afterTimeout = await client.getBountyDetail(specificTask.id);
+    expect(afterTimeout.bounty.status).toBe('OPEN');
+    expect(afterTimeout.bounty.lease_agent_id).toBeNull();
+    expect(afterTimeout.events.some(e => e.event_type === 'lease_expired' && e.actor === 'system')).toBe(
+      true,
+    );
+    expect((await client.agentGetMe(bystander.api_key)).timeout_count).toBe(1);
+    expect(
+      (await client.agentListEvents(bystander.api_key)).events.some(
+        e => e.event_type === 'lease.expired',
+      ),
+    ).toBe(true);
+
+    const timedAssignment = await client.agentCreateBounty(publisher.api_key, {
+      project_id: project.id,
+      title: 'Timed assignment',
+      difficulty: 'C',
+      assignee_mode: 'specific',
+      assignee_agent_id: target.agent.id,
+    });
+    const assignmentExpiresMs = Date.parse(timedAssignment.assignment_expires_at!);
+    await client.sweepLeases(assignmentExpiresMs + 1000);
+    const fallbackTask = await client.getBountyDetail(timedAssignment.id);
+    expect(fallbackTask.bounty.assignee_mode).toBe('any');
+    expect(fallbackTask.events.some(e => e.event_type === 'assignment_expired')).toBe(true);
+    expect(
+      (await client.agentListEvents(publisher.api_key)).events.some(
+        e => e.event_type === 'task.assignment_expired',
+      ),
+    ).toBe(true);
+
+    const arbTask = await client.createBounty({
+      project_id: project.id,
+      title: 'Arbitrated task',
+      difficulty: 'C',
+      assignee_mode: 'specific',
+      assignee_agent_id: target.agent.id,
+      require_arbitration: true,
+      status: 'OPEN',
+    });
+    const arbClaimed = await client.agentClaimBounty(target.api_key, arbTask.id);
+    await expect(
+      client.agentCompleteBounty(target.api_key, arbTask.id, { lease_id: arbClaimed.lease_id }),
+    ).rejects.toMatchObject({ code: 'ARBITRATION_REQUIRED', status: 409 });
+
+    const released = await client.releaseLease(arbTask.id);
+    expect(released.status).toBe('OPEN');
+    expect(released.lease_agent_id).toBeNull();
+    expect(released.assignee_mode).toBe('specific');
+    expect(released.assignee_agent_id).toBe(target.agent.id);
+    expect(released.assignment_expires_at).not.toBeNull();
+    expect((await client.agentGetMe(target.api_key)).timeout_count).toBe(0);
+    expect((await client.agentGetMe(target.api_key)).abandon_count).toBe(0);
+    expect(
+      (await client.agentListEvents(target.api_key)).events.some(
+        e => e.event_type === 'lease.released',
+      ),
+    ).toBe(true);
+  });
+
+  it('helpers 格式化执行者、倒计时、成本、系统调度事件与租约错误码', () => {
+    setLocalePreference('zh-CN');
+    expect(
+      formatBountyExecutor({
+        lease_agent_id: 'ag-1',
+        lease_agent_name: 'Runner',
+        lease_agent_tier: 'A',
+      }),
+    ).toEqual({
+      agentId: 'ag-1',
+      name: 'Runner',
+      tier: 'A',
+      label: 'Runner（A 级）',
+    });
+    expect(
+      formatBountyExecutor({
+        lease_agent_id: null,
+        lease_agent_name: null,
+        lease_agent_tier: null,
+      }),
+    ).toBeNull();
+
+    const baseNow = Date.parse('2026-11-17T10:00:00.000Z');
+    expect(formatLeaseCountdown('2026-11-17T10:15:00.000Z', baseNow)).toEqual({
+      expired: false,
+      expiringSoon: false,
+      remainingMs: 15 * 60 * 1000,
+      label: '15:00',
+    });
+    expect(formatLeaseCountdown('2026-11-17T10:02:05.000Z', baseNow)).toEqual({
+      expired: false,
+      expiringSoon: true,
+      remainingMs: 125_000,
+      label: '02:05',
+    });
+    expect(formatLeaseCountdown('2026-11-17T09:59:59.000Z', baseNow)).toEqual({
+      expired: true,
+      expiringSoon: true,
+      remainingMs: 0,
+      label: '已超时待回收',
+    });
+
+    expect(formatCompletionCost(null)).toBeNull();
+    expect(formatCompletionCost(0)).toBe('0');
+    expect(formatCompletionCost(2.5)).toBe('2.5');
+
+    expect(
+      formatAssigneeConstraint({
+        assignee_mode: 'specific',
+        assignee_min_tier: null,
+        assignee_agent_id: 'ag-9',
+        assignee_agent_name: 'TargetBot',
+      }),
+    ).toBe('指派: TargetBot');
+
+    expect(formatEventLabel('declined')).toBe('婉拒指派');
+    expect(formatEventLabel('lease_released')).toBe('释放租约');
+    expect(formatEventLabel('lease_expired')).toBe('租约超时回收');
+    expect(formatEventActor('system')).toBe('系统调度');
+    expect(
+      formatEventActor('agent:ag-1', {
+        lease_agent_id: 'ag-1',
+        lease_agent_name: 'Runner',
+      }),
+    ).toBe('Agent: Runner');
+
+    expect(formatServiceError(new ServiceApiError('STALE_LEASE', 409, 'raw'))).toBe(
+      '租约令牌已过期或租约已失效，请重新获取最新任务状态。',
+    );
+    expect(formatServiceError(new ServiceApiError('ARBITRATION_REQUIRED', 409, 'raw'))).toBe(
+      '该任务已开启仲裁验收，不能直接标记为完成。',
+    );
+
+    setLocalePreference('en');
+    expect(
+      formatBountyExecutor({
+        lease_agent_id: 'ag-1',
+        lease_agent_name: 'Runner',
+        lease_agent_tier: 'Unranked',
+      })?.label,
+    ).toBe('Runner (Unranked)');
+    expect(formatLeaseCountdown('2026-11-17T09:59:59.000Z', baseNow)?.label).toBe(
+      'Expired, awaiting reclaim',
+    );
+    expect(formatEventActor('system')).toBe('System scheduler');
+    expect(formatEventLabel('completed')).toBe('Completed delivery');
+    expect(formatServiceError(new ServiceApiError('TIER_INSUFFICIENT', 403, 'raw'))).toBe(
+      "This Agent's tier does not meet the minimum requirement for this bounty.",
+    );
+
+    for (const sample of [
+      formatBountyExecutor({
+        lease_agent_id: 'ag-1',
+        lease_agent_name: 'Runner',
+        lease_agent_tier: 'A',
+      })!.label,
+      formatEventActor('system'),
+      formatEventLabel('lease_released'),
+      formatServiceError(new ServiceApiError('STALE_LEASE', 409, 'raw')),
+    ]) {
+      expect(sample).not.toContain('·');
+    }
+    setLocalePreference('zh-CN');
+  });
+});

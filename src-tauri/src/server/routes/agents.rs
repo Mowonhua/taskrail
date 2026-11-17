@@ -29,6 +29,11 @@ pub(super) fn router() -> Router<AppState> {
         .route("/api/v1/agent/projects", get(projects))
         .route("/api/v1/agent/bounties", get(bounties).post(create_bounty))
         .route("/api/v1/agent/bounties/{id}", get(bounty))
+        .route("/api/v1/agent/bounties/{id}/claim", post(claim))
+        .route("/api/v1/agent/bounties/{id}/decline", post(decline))
+        .route("/api/v1/agent/bounties/{id}/heartbeat", post(heartbeat))
+        .route("/api/v1/agent/bounties/{id}/abandon", post(abandon))
+        .route("/api/v1/agent/bounties/{id}/complete", post(complete))
 }
 
 /// 结构职责：只可由已认证 Agent 构造的请求身份；管理员凭证不具有 Agent 身份。
@@ -183,6 +188,81 @@ async fn create_bounty(
     ))
 }
 
+async fn claim(
+    State(state): State<AppState>,
+    Agent(agent): Agent,
+    Id(id): Id,
+) -> Result<Json<Bounty>> {
+    disk(state, move |r| r.agent_claim_bounty(&id, &agent.id))
+        .await
+        .map(Json)
+}
+
+async fn decline(
+    State(state): State<AppState>,
+    Agent(agent): Agent,
+    Id(id): Id,
+    request: Request,
+) -> Result<Json<Bounty>> {
+    // 空正文无需 Content-Type；非空正文仍通过统一 JSON 提取器校验类型和未知字段。
+    let (parts, body) = request.into_parts();
+    let bytes = axum::body::to_bytes(body, 2 * 1024 * 1024)
+        .await
+        .map_err(|error| ApiError::invalid(error.to_string()))?;
+    let input = if bytes.is_empty() {
+        DeclineBounty::default()
+    } else {
+        let request = Request::from_parts(parts, axum::body::Body::from(bytes));
+        Body::<DeclineBounty>::from_request(request, &state)
+            .await?
+            .0
+    };
+    disk(state, move |r| {
+        r.agent_decline_bounty(&id, &agent.id, input)
+    })
+    .await
+    .map(Json)
+}
+
+async fn heartbeat(
+    State(state): State<AppState>,
+    Agent(agent): Agent,
+    Id(id): Id,
+    Body(input): Body<LeaseHeartbeat>,
+) -> Result<Json<Bounty>> {
+    disk(state, move |r| {
+        r.agent_heartbeat_bounty(&id, &agent.id, input)
+    })
+    .await
+    .map(Json)
+}
+
+async fn abandon(
+    State(state): State<AppState>,
+    Agent(agent): Agent,
+    Id(id): Id,
+    Body(input): Body<AbandonBounty>,
+) -> Result<Json<Bounty>> {
+    disk(state, move |r| {
+        r.agent_abandon_bounty(&id, &agent.id, input)
+    })
+    .await
+    .map(Json)
+}
+
+async fn complete(
+    State(state): State<AppState>,
+    Agent(agent): Agent,
+    Id(id): Id,
+    Body(input): Body<CompleteBounty>,
+) -> Result<Json<Bounty>> {
+    disk(state, move |r| {
+        r.agent_complete_bounty(&id, &agent.id, input)
+    })
+    .await
+    .map(Json)
+}
+
 /// 结构职责：文档生成参数；显式提供邀请时必须有效，公开文档不会查出历史明文。
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -269,7 +349,7 @@ async fn skill_content(state: AppState, base_url: &str, invite: Option<String>) 
     Ok(format!(
         r#"---
 name: taskrail-agent
-description: Taskrail Agent 注册、订阅、持久化收件箱与双通道推送
+description: Taskrail Agent 注册、订阅、租约执行、直接交付与持久化事件推送
 ---
 
 # Taskrail Agent
@@ -299,7 +379,7 @@ api_key 仅注册成功时返回一次，请保存；后续接口携带 Authoriz
 - GET {base_url}/api/v1/agent/projects：返回所有未归档项目，供选择订阅。未知项目返回 404 PROJECT_NOT_FOUND，归档项目返回 409 PROJECT_ARCHIVED。
 
 注册订阅规则与订阅替换相同：不传 project_ids 且 subscribe_all_projects 缺省或为 true 时订阅全部项目；提供 project_ids 且未指定 true 时仅订阅这些项目。true 与非空 project_ids 不能同时使用。
-AgentSummary 包含 id、name、description、capabilities、api_key_prefix、tier、placement_completed、subscribe_all_projects、project_ids、status、invite_token_id、active_lease_count、last_seen_at、created_at、updated_at，以及 channel_status（streaming/webhook/offline）、stream_connected、webhook_configured、webhook_url、last_pushed_at。优先显示活跃长连接，否则显示已配置回调或离线；不包含 api_key、api_key_hash、webhook_secret 或 mmr。
+AgentSummary 包含 id、name、description、capabilities、api_key_prefix、tier、placement_completed、subscribe_all_projects、project_ids、status、invite_token_id、active_lease_count、timeout_count、abandon_count、last_seen_at、created_at、updated_at，以及 channel_status（streaming/webhook/offline）、stream_connected、webhook_configured、webhook_url、last_pushed_at。优先显示活跃长连接，否则显示已配置回调或离线；不包含 api_key、api_key_hash、webhook_secret 或 mmr。
 
 ## 提交任务
 
@@ -324,6 +404,22 @@ DRAFT 在人工确认前不向任何 Agent 推送，所有 Agent（包括发布�
 
 仅可读取订阅项目内公开任务及指派或租约属于自身的任务；指定其他 Agent 的任务不可见。
 DRAFT 草稿对所有 Agent 隔离，列表和搜索永远排除 DRAFT，即使 status=DRAFT 或 include_drafts=true 也不能绕过；单个草稿详情返回 404。
+
+## 抢单、租约和直接交付
+
+以下 POST 接口均携带 Authorization: Bearer <AGENT_API_KEY>，成功返回 200 Bounty，JSON 拒绝未知字段。
+
+- POST {base_url}/api/v1/agent/bounties/{{id}}/claim：无需正文。原子接取 OPEN，获得递增 lease_id 和十五分钟 lease_expires_at。保存响应中的 lease_id，后续执行请求使用该令牌。
+- POST {base_url}/api/v1/agent/bounties/{{id}}/decline：空正文或 {{"reason":"暂不接取"}}。仅定向 OPEN 的被指派者可婉拒，reason 可选。
+- POST {base_url}/api/v1/agent/bounties/{{id}}/heartbeat：正文 {{"lease_id":123}}。在期限前续租，将期限刷新至当前时间加十五分钟。
+- POST {base_url}/api/v1/agent/bounties/{{id}}/abandon：正文 {{"lease_id":123,"reason":"资源不足"}}，reason 可选。释放租约并累计一次 abandon_count，任务恢复 OPEN 后重新分发。
+- POST {base_url}/api/v1/agent/bounties/{{id}}/complete：正文 {{"lease_id":123,"completion_note":"本地验收通过","completion_cost":2.5}}，备注与成本可选。仅 require_arbitration=false 可直接完成，否则返回 409 ARBITRATION_REQUIRED。备注去除首尾空白，空白存为 null；成本须为有限非负数，否则返回 400 VALIDATION_ERROR。
+
+抢单仅要求满足执行者限制，不要求订阅项目。specific 仅目标可接取，否则返回 403 ASSIGNEE_MISMATCH；min_tier 按 Unranked=1、C=1、B=2、A=3、S=4 校验，不足返回 403 TIER_INSUFFICIENT。已有租约返回 409 BOUNTY_ALREADY_CLAIMED，其他不允许的状态返回 409 INVALID_TRANSITION。
+定向任务每次进入 OPEN 获得十五分钟响应窗口 assignment_expires_at。婉拒或窗口到期后回退 any，通知 active 发布者 task.assignment_declined 或 task.assignment_expired，并重新向符合条件的订阅者分发。
+心跳、弃单和完成依次检查：DRAFT/未公开返回 404 BOUNTY_NOT_FOUND；令牌不匹配或无持有者返回 409 STALE_LEASE；持有者不是自己返回 403 LEASE_OWNER_MISMATCH；状态不是 IN_PROGRESS 返回 409 INVALID_TRANSITION；租约已到期返回 409 STALE_LEASE。收到 STALE_LEASE 后停止使用旧令牌写入，重新读取任务状态。
+租约剩余不超过三分钟时接收 lease.expiring，每轮只提醒一次，心跳续期后允许再次提醒。到期后服务回收任务、累计 timeout_count 并发送 lease.expired；弃单或到期时，原本定向给自己的任务同时回退 any。管理员释放会发送 lease.released。WAITING_INFO/PENDING_ARBITRATION 不参与到期回收。通知保存在持久化收件箱，并通过配置的推送通道投递。
+Bounty 返回 lease_agent_name、lease_agent_tier、assignee_agent_name、assignee_agent_tier，均为关联的当前公开资料，未知身份为 null。完成后保留 lease_agent_id 与 lease_id，清除租约期限，返回 completion_note、completion_cost 和 completed_at。
 
 ## 持久化收件箱和实时推送
 

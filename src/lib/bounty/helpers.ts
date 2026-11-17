@@ -117,15 +117,85 @@ export function formatAgentSubscriptionSummary(
     .join(translate('、'));
 }
 
-export function formatAssigneeConstraint(bounty: Pick<BountyTask, 'assignee_mode' | 'assignee_min_tier' | 'assignee_agent_id'>): string {
+export function formatAssigneeConstraint(
+  bounty: Pick<BountyTask, 'assignee_mode' | 'assignee_min_tier' | 'assignee_agent_id'> &
+    Partial<Pick<BountyTask, 'assignee_agent_name'>>,
+): string {
   switch (bounty.assignee_mode) {
     case 'any':
       return translate('无要求');
     case 'min_tier':
       return translate('最低 {tier} 级', { tier: bounty.assignee_min_tier ?? 'C' });
     case 'specific':
-      return translate('指派: {agent}', { agent: bounty.assignee_agent_id ?? '' });
+      return translate('指派: {agent}', {
+        agent: bounty.assignee_agent_name || bounty.assignee_agent_id || '',
+      });
   }
+}
+
+export function formatBountyExecutor(
+  bounty: Pick<BountyTask, 'lease_agent_id' | 'lease_agent_name' | 'lease_agent_tier'>,
+): { agentId: string; name: string; tier: AgentTier | null; label: string } | null {
+  if (!bounty.lease_agent_id) {
+    return null;
+  }
+  const name = bounty.lease_agent_name || bounty.lease_agent_id;
+  const tier = bounty.lease_agent_tier ?? null;
+  return {
+    agentId: bounty.lease_agent_id,
+    name,
+    tier,
+    label: tier ? translate('{name}（{tier}）', { name, tier: formatAgentTier(tier) }) : name,
+  };
+}
+
+export interface LeaseCountdownInfo {
+  expired: boolean;
+  expiringSoon: boolean;
+  remainingMs: number;
+  label: string;
+}
+
+export function formatLeaseCountdown(
+  expiresAt: string | null | undefined,
+  nowMs = Date.now(),
+): LeaseCountdownInfo | null {
+  if (!expiresAt) {
+    return null;
+  }
+  const expiresAtMs = Date.parse(expiresAt);
+  if (Number.isNaN(expiresAtMs)) {
+    return null;
+  }
+  const remainingMs = Math.max(0, expiresAtMs - nowMs);
+  if (expiresAtMs <= nowMs) {
+    return {
+      expired: true,
+      expiringSoon: true,
+      remainingMs: 0,
+      label: translate('已超时待回收'),
+    };
+  }
+  const totalSeconds = Math.ceil(remainingMs / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const label =
+    hours > 0 ? `${hours}:${pad(minutes)}:${pad(seconds)}` : `${pad(minutes)}:${pad(seconds)}`;
+  return {
+    expired: false,
+    expiringSoon: remainingMs <= 3 * 60 * 1000,
+    remainingMs,
+    label,
+  };
+}
+
+export function formatCompletionCost(cost: number | null | undefined): string | null {
+  if (cost === null || cost === undefined || !Number.isFinite(cost) || cost < 0) {
+    return null;
+  }
+  return Number.isInteger(cost) ? String(cost) : Number(cost.toFixed(4)).toString();
 }
 
 export function formatEventLabel(eventType: string): string {
@@ -142,6 +212,18 @@ export function formatEventLabel(eventType: string): string {
       return translate('取消任务');
     case 'claimed':
       return translate('认领任务');
+    case 'declined':
+      return translate('婉拒指派');
+    case 'abandoned':
+      return translate('主动弃单');
+    case 'completed':
+      return translate('完成交付');
+    case 'lease_released':
+      return translate('释放租约');
+    case 'lease_expired':
+      return translate('租约超时回收');
+    case 'assignment_expired':
+      return translate('指派超时回退');
     default:
       return eventType;
   }
@@ -177,10 +259,40 @@ export function formatBountyPublisher(
 
 export function formatEventActor(
   actor: string,
-  bounty?: Pick<BountyTask, 'created_by' | 'created_by_agent_id' | 'created_by_agent_name'>,
+  bounty?: Partial<
+    Pick<
+      BountyTask,
+      | 'created_by'
+      | 'created_by_agent_id'
+      | 'created_by_agent_name'
+      | 'lease_agent_id'
+      | 'lease_agent_name'
+      | 'assignee_agent_id'
+      | 'assignee_agent_name'
+    >
+  >,
 ): string {
   if (actor === 'human') {
     return translate('管理员');
+  }
+  if (actor === 'system') {
+    return translate('系统调度');
+  }
+  if (
+    bounty?.lease_agent_id &&
+    (actor === `agent:${bounty.lease_agent_id}` || actor === bounty.lease_agent_id)
+  ) {
+    return translate('Agent: {name}', {
+      name: bounty.lease_agent_name || bounty.lease_agent_id,
+    });
+  }
+  if (
+    bounty?.assignee_agent_id &&
+    (actor === `agent:${bounty.assignee_agent_id}` || actor === bounty.assignee_agent_id)
+  ) {
+    return translate('Agent: {name}', {
+      name: bounty.assignee_agent_name || bounty.assignee_agent_id,
+    });
   }
   if (
     bounty?.created_by_agent_id &&
@@ -233,6 +345,16 @@ export function formatServiceError(error: unknown): string {
         return translate('该 Agent 已被停用，请先启用后再试。');
       case 'AGENT_NAME_TAKEN':
         return translate('该 Agent 名称已被占用，请更换名称。');
+      case 'ASSIGNEE_MISMATCH':
+        return translate('仅被指派的 Agent 可执行此操作。');
+      case 'TIER_INSUFFICIENT':
+        return translate('当前 Agent 段位未达到该悬赏的最低接取要求。');
+      case 'LEASE_OWNER_MISMATCH':
+        return translate('当前租约不属于该 Agent，无法写入。');
+      case 'STALE_LEASE':
+        return translate('租约令牌已过期或租约已失效，请重新获取最新任务状态。');
+      case 'ARBITRATION_REQUIRED':
+        return translate('该任务已开启仲裁验收，不能直接标记为完成。');
       case 'UNAUTHORIZED':
         return translate('管理员凭证无效或未授权（401）。');
       case 'VALIDATION_ERROR':

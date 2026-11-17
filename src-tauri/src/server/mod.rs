@@ -76,14 +76,18 @@ pub struct RunningServer {
     shutdown: Option<oneshot::Sender<()>>,
     task: Option<JoinHandle<std::io::Result<()>>>,
     hub: push::Hub,
-    dispatcher_stop: watch::Sender<bool>,
+    background_stop: watch::Sender<bool>,
     dispatcher: Option<JoinHandle<()>>,
+    lease_sweeper: Option<JoinHandle<()>>,
 }
 
 impl RunningServer {
     pub async fn shutdown(mut self) -> Result<()> {
         self.hub.shutdown();
-        let _ = self.dispatcher_stop.send(true);
+        let _ = self.background_stop.send(true);
+        if let Some(sweeper) = self.lease_sweeper.take() {
+            sweeper.await.map_err(ApiError::internal)?;
+        }
         if let Some(dispatcher) = self.dispatcher.take() {
             dispatcher.await.map_err(ApiError::internal)?;
         }
@@ -119,7 +123,7 @@ impl RunningServer {
 impl Drop for RunningServer {
     fn drop(&mut self) {
         self.hub.shutdown();
-        let _ = self.dispatcher_stop.send(true);
+        let _ = self.background_stop.send(true);
         if let Some(signal) = self.shutdown.take() {
             let _ = signal.send(());
         }
@@ -148,7 +152,8 @@ pub async fn start(config: ServerConfig) -> Result<RunningServer> {
         db_path: repository.path().to_string_lossy().into_owned(),
     };
     let hub = repository.hub.clone();
-    let (dispatcher_stop, stop_receiver) = watch::channel(false);
+    let (background_stop, stop_receiver) = watch::channel(false);
+    let lease_sweeper = tokio::spawn(run_lease_sweeper(repository.clone(), stop_receiver.clone()));
     let dispatcher = tokio::spawn(push::dispatch_webhooks(
         repository,
         webhook_client,
@@ -167,9 +172,29 @@ pub async fn start(config: ServerConfig) -> Result<RunningServer> {
         shutdown: Some(shutdown),
         task: Some(task),
         hub,
-        dispatcher_stop,
+        background_stop,
         dispatcher: Some(dispatcher),
+        lease_sweeper: Some(lease_sweeper),
     })
+}
+
+/// 函数职责：每百毫秒扫描租约；关闭时等待已开始的阻塞事务结束，避免后台写入越过 shutdown。
+async fn run_lease_sweeper(repository: Repository, mut stop: watch::Receiver<bool>) {
+    loop {
+        if *stop.borrow() {
+            return;
+        }
+        let repo = repository.clone();
+        match tokio::task::spawn_blocking(move || repo.sweep_leases()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => eprintln!("Taskrail lease scheduler: {error}"),
+            Err(error) => eprintln!("Taskrail lease scheduler: {error}"),
+        }
+        tokio::select! {
+            _ = stop.changed() => return,
+            _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {},
+        }
+    }
 }
 
 /// 函数职责：从系统随机源生成 32 字节会话密钥，以 64 位十六进制传递给 WebView。

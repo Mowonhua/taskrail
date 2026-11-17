@@ -1424,7 +1424,9 @@ button.danger-text {
 .status-pill,
 .arbitration-pill,
 .detail-meta-pill,
-.bounty-publisher-pill {
+.bounty-publisher-pill,
+.bounty-executor-pill,
+.bounty-lease-pill {
   display: inline-flex;
   align-items: center;
   padding: 2px 8px;
@@ -1436,8 +1438,26 @@ button.danger-text {
   font-weight: 500;
 }
 
+.bounty-lease-pill {
+  font-variant-numeric: tabular-nums;
+}
+
+.bounty-lease-pill[data-lease-state="active"] {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.bounty-lease-pill[data-lease-state="expiring"],
+.bounty-lease-pill[data-lease-state="expired"] {
+  border-color: var(--danger);
+  color: var(--danger);
+  font-weight: 600;
+}
+
 .bounty-publisher-pill[data-publisher-kind="agent"],
-.detail-meta-pill[data-publisher-kind="agent"] {
+.detail-meta-pill[data-publisher-kind="agent"],
+.bounty-executor-pill {
   border-color: var(--accent);
   background: var(--accent-soft);
   color: var(--accent);
@@ -1506,6 +1526,47 @@ button.danger-text {
   background: var(--code);
   font-family: var(--font-mono);
   font-size: 0.9em;
+}
+
+.bounty-card-completion {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  border: 1px solid var(--field-border, var(--line));
+  border-radius: var(--field-radius, 8px);
+  background: var(--field-background, var(--canvas));
+}
+
+.bounty-card-completion-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11.5px;
+}
+
+.bounty-card-completion-label {
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.bounty-card-completion-cost {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+
+.bounty-card-completion-note {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--ink);
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
 }
 
 .bounty-card-meta {
@@ -1869,6 +1930,21 @@ button.danger-text {
   font-size: 12.5px;
   font-weight: 600;
   color: var(--muted);
+}
+
+.detail-completion-card {
+  padding: 12px 14px;
+  border: 1px solid var(--field-border, var(--line));
+  border-radius: var(--field-radius, 8px);
+  background: var(--field-background, var(--canvas));
+}
+
+.detail-completion-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
 }
 
 .detail-timeline {

@@ -512,6 +512,18 @@
                 {agent.last_seen_at ? formatTimestamp(agent.last_seen_at) : $t('从未活跃')}
               </span>
             </div>
+
+            {#if agent.timeout_count > 0 || agent.abandon_count > 0}
+              <div class="agent-meta-item" data-slot="agent-lease-incidents">
+                <span class="agent-meta-label">{$t('租约异常')}:</span>
+                <span class="agent-meta-value">
+                  {$t('超时 {timeout} 次 弃单 {abandon} 次', {
+                    timeout: agent.timeout_count,
+                    abandon: agent.abandon_count,
+                  })}
+                </span>
+              </div>
+            {/if}
           </div>
 
           <div class="agent-card-footer">

@@ -97,6 +97,8 @@ pub struct AgentSummary {
     pub status: AgentStatus,
     pub invite_token_id: Option<String>,
     pub active_lease_count: i64,
+    pub timeout_count: i64,
+    pub abandon_count: i64,
     pub last_seen_at: Option<String>,
     pub channel_status: String,
     pub stream_connected: bool,
@@ -287,6 +289,10 @@ pub struct Bounty {
     pub assignee_mode: AssigneeMode,
     pub assignee_min_tier: Option<Tier>,
     pub assignee_agent_id: Option<String>,
+    /// 由指派身份关联读取的当前公开资料；历史未知身份保持 None。
+    pub assignee_agent_name: Option<String>,
+    pub assignee_agent_tier: Option<AgentTier>,
+    pub assignment_expires_at: Option<String>,
     pub require_arbitration: bool,
     pub status: BountyStatus,
     pub created_by: String,
@@ -296,15 +302,50 @@ pub struct Bounty {
     pub created_by_agent_name: Option<String>,
     pub lease_id: i64,
     pub lease_agent_id: Option<String>,
+    /// 由租约身份关联读取的当前公开资料；完成后保留执行者身份。
+    pub lease_agent_name: Option<String>,
+    pub lease_agent_tier: Option<AgentTier>,
     pub lease_expires_at: Option<String>,
     pub rejection_count: i64,
     pub completion_note: Option<String>,
+    pub completion_cost: Option<f64>,
     pub published_at: Option<String>,
     pub withdrawn_at: Option<String>,
     pub cancelled_at: Option<String>,
     pub completed_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+/// 结构职责：被指派者婉拒任务时可选的原因；HTTP 允许省略整个正文。
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeclineBounty {
+    pub reason: Option<String>,
+}
+
+/// 结构职责：续租请求；仅当前持有者在租约到期前可使用当前令牌。
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LeaseHeartbeat {
+    pub lease_id: i64,
+}
+
+/// 结构职责：主动弃单请求；过期令牌不能释放新一轮租约。
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AbandonBounty {
+    pub lease_id: i64,
+    pub reason: Option<String>,
+}
+
+/// 结构职责：无需仲裁的直接交付；成本须为有限非负数，空白说明归一为 None。
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompleteBounty {
+    pub lease_id: i64,
+    pub completion_note: Option<String>,
+    pub completion_cost: Option<f64>,
 }
 
 /// 结构职责：悬赏检索条件；include_drafts 默认 false，即使 status=DRAFT 也先排除草稿。
