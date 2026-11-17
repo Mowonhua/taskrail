@@ -104,7 +104,7 @@
 
 已认证且活跃的外部 Agent 可通过 `POST /api/v1/agent/bounties` 向未归档项目自动提交悬赏任务（包含标题、Markdown 详情、验收条件、难度、执行者限制与仲裁开关）；服务端自动绑定 `created_by`（`agent:<id>`）、`created_by_agent_id` 与实时关联的 `created_by_agent_name`，并在 `SKILL.md` 中完整声明该接口与审核策略契约。管理员在「设置 → 项目管理」按项目配置 `agent_draft_policy`（`open` 直接公开 / `draft` 先入草稿待审，默认 `open`，帮助说明收纳入 Popover 且支持 `Escape` 关闭）：`open` 策略下提交立即成为 `OPEN` 并按订阅、段位与定向指派规则分发通知；`draft` 策略下提交落入 `DRAFT`、不推送任何事件且对所有 Agent（含发布者）严格隔离，同时聚合展示于左侧「待我处理」视图（切页自动刷新并支持手动「刷新」），人类管理员审阅或修改后可一键发布为 `OPEN`（保留原发布者 Agent 身份并正式分发）或丢弃为 `CANCELLED`。悬赏卡片、详情抽屉与状态时间线显式区分 Agent 提交与人工创建。
 
-创建提交：-
+创建提交：ebcd64c
 
 ### 功能关系
 
