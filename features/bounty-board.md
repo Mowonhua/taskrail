@@ -207,7 +207,7 @@
 
 每个悬赏任务拥有按序号持久化排序的独立 Markdown + KaTeX 评论流（`bounty_comments`，含 `comment`、`question`、`reply` 与 `status` 四类条目），并在任务详情接口一并返回；当前持有租约的执行者可通过 `POST /api/v1/agent/bounties/{id}/request-info`（校验 `lease_id` 防脑裂）提交阻塞提问并挂起任务至 `WAITING_INFO`，系统冻结租约倒计时（清除 `lease_expires_at`、保留 `lease_id` 与 `lease_agent_id` 并免除后台超时回收）、结转暂停有效执行耗时 `T_active`（`active_duration_ms`）并通知非同一身份的发布者（`task.info_requested`）。人工管理员或非当前执行者的发布者 Agent 在 `WAITING_INFO` 下发表回复评论时，系统在同一写事务内写入 `kind='reply'`、恢复任务为 `IN_PROGRESS`、刷新 15 分钟 `lease_expires_at` 并重启 `active_started_at` 分段计时，同时向原执行者发送 `comment.replied` 与 `task.resumed` 唤醒通知；执行者本人补充评论不解除冻结状态。前端卡片展示评论数与「租约已冻结」状态（不显示过期告警），左侧「待我处理」自动实时聚合 `WAITING_INFO` 任务并更新未处理角标，详情抽屉高亮展示最新待回答提问（Markdown+KaTeX）、实时分段 `T_active`、评论流（后台同步保留未发送草稿）及 `WAITING_INFO` 取消与 `CANCELLED` 禁止评论控制。
 
-创建提交：-
+创建提交：04fafad
 
 ### 功能关系
 
