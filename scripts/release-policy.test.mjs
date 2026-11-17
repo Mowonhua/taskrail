@@ -54,8 +54,8 @@ test('更新清单拒绝空签名、路径注入和非版本安装包名', () =>
   assert.throws(() => createUpdateManifest({ ...input, installerName: '../installer.exe' }), /安装包/);
 });
 
-test('v0.7.1 起缺少、损坏或版本错误的 Android APK 阻止完整发布，旧版本保持兼容', () => {
-  for (const version of ['0.7.1', '0.7.1-rc.1']) {
+test('所有发布包均要求同版本 APK，缺少、损坏或版本错误时拒绝发布', () => {
+  for (const version of ['0.7.0', '0.8.8', '0.8.9-rc.1']) {
     const fixture = releaseFixture(version);
     const apk = `Taskrail-${version}-arm64.apk`;
     assert.deepEqual(verifyReleaseFiles(fixture.files, fixture.repository, version), fixture.manifest);
@@ -66,10 +66,7 @@ test('v0.7.1 起缺少、损坏或版本错误的 Android APK 阻止完整发布
     assert.throws(() => verifyReleaseFiles(corrupt, fixture.repository, version), /摘要/);
     const wrongVersion = new Map(fixture.files);
     wrongVersion.delete(apk);
-    wrongVersion.set('Taskrail-0.7.0-arm64.apk', Buffer.from('old'));
+    wrongVersion.set('Taskrail-9.9.9-arm64.apk', Buffer.from('old'));
     assert.throws(() => verifyReleaseFiles(wrongVersion, fixture.repository, version), /资源/);
   }
-  const legacy = releaseFixture('0.7.0');
-  assert.equal(legacy.files.size, 4);
-  verifyReleaseFiles(legacy.files, legacy.repository, legacy.version);
 });

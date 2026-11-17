@@ -35,7 +35,7 @@ export async function readReleaseVersion(root, tag) {
 /**
  * 函数职责：将签名后的 Windows x64 NSIS 与 Android arm64 产物整理为完整发布资源。
  * 输入说明：root 指向仓库，repository 和 tag 标识 GitHub 发布；output 是独立输出目录。
- * 输出说明：从 v0.7.1（含预发布）起必须读取 dist-android 中的同版本 APK；写入安装包、签名、APK、latest.json、SHA256SUMS，并返回输出目录；不执行远端操作。
+ * 输出说明：必须读取 dist-android 中的同版本 APK；写入安装包、签名、APK、latest.json、SHA256SUMS，并返回输出目录；不执行远端操作。
  */
 export async function prepareRelease({ root, repository, tag, output }) {
   const { version } = await readReleaseVersion(root, tag);
@@ -52,9 +52,7 @@ export async function prepareRelease({ root, repository, tag, output }) {
     [signatureName, signature],
     ['latest.json', Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`)],
   ]);
-  if (apkName) {
-    files.set(apkName, await readFile(join(root, 'dist-android', apkName)));
-  }
+  files.set(apkName, await readFile(join(root, 'dist-android', apkName)));
   const sums = [...files].map(([name, bytes]) => `${createHash('sha256').update(bytes).digest('hex')}  ${name}`).join('\n');
   files.set('SHA256SUMS', Buffer.from(`${sums}\n`));
   verifyReleaseFiles(files, repository, version);

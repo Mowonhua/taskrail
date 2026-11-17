@@ -91,11 +91,6 @@ fn blocked_open_defers_assignment_dispatch_and_claim_until_completion() {
         "BOUNTY_BLOCKED",
     );
     error(
-        k.repo.try_claim_bounty(&b.id, &a.agent.id),
-        StatusCode::CONFLICT,
-        "BOUNTY_BLOCKED",
-    );
-    error(
         k.repo
             .agent_decline_bounty(&b.id, &a.agent.id, DeclineBounty::default()),
         StatusCode::CONFLICT,
@@ -1018,127 +1013,6 @@ fn agent_snapshots_and_notifications_redact_hidden_draft_titles_and_filter_relat
             .unwrap()
             .draft_needs_human_review
     );
-}
-
-fn legacy_v8(path: &std::path::Path) -> Connection {
-    let conn = Connection::open(path).unwrap();
-    conn.execute_batch(include_str!("fixtures/server_v1.sql"))
-        .unwrap();
-    for schema in [
-        include_str!("../src/server/schema_v2.sql"),
-        include_str!("../src/server/schema_v3.sql"),
-        include_str!("../src/server/schema_v4.sql"),
-        include_str!("../src/server/schema_v5.sql"),
-        include_str!("../src/server/schema_v6.sql"),
-        include_str!("../src/server/schema_v7.sql"),
-        include_str!("../src/server/schema_v8.sql"),
-    ] {
-        conn.execute_batch(schema).unwrap();
-    }
-    conn.execute_batch("CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY,applied_at TEXT NOT NULL); INSERT INTO schema_migrations VALUES(8,'old'); INSERT INTO projects(id,name,created_at,updated_at) VALUES('p','legacy','old','old'); INSERT INTO agents(id,name,api_key_hash,api_key_prefix,created_at,updated_at) VALUES('a','legacy','hash','prefix','old','old'); INSERT INTO bounties(id,project_id,title,difficulty,assignee_mode,status,created_by_agent_id,lease_id,created_at,updated_at) VALUES('b','p','legacy task','C','any','DRAFT','a',42,'old','old'); INSERT INTO bounty_events(bounty_id,event_type,actor,to_status,created_at) VALUES('b','created','human','DRAFT','old');").unwrap();
-    conn
-}
-fn schema(conn: &Connection) -> Vec<(String, Option<String>)> {
-    conn.prepare("SELECT name,sql FROM sqlite_master ORDER BY name")
-        .unwrap()
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
-        .unwrap()
-        .collect::<rusqlite::Result<_>>()
-        .unwrap()
-}
-
-#[test]
-fn v8_to_v9_preserves_data_is_idempotent_and_rolls_back_ddl_and_version_on_failure() {
-    for failure in ["none", "column", "table", "index", "version"] {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("legacy.db");
-        let conn = legacy_v8(&path);
-        match failure {
-            "column"=>conn.execute_batch("ALTER TABLE bounties ADD COLUMN draft_needs_human_review INTEGER;").unwrap(),
-            "table"=>conn.execute_batch("CREATE TABLE bounty_dependencies(conflict TEXT);").unwrap(),
-            "index"=>conn.execute_batch("CREATE TABLE bounty_dependencies_reverse(conflict TEXT);").unwrap(),
-            "version"=>conn.execute_batch("CREATE TRIGGER fail_version BEFORE INSERT ON schema_migrations WHEN NEW.version=9 BEGIN SELECT RAISE(ABORT,'version'); END;").unwrap(),
-            _=>{}
-        }
-        let before = schema(&conn);
-        if failure != "none" {
-            assert!(Repository::open(&path).is_err());
-            assert_eq!(schema(&conn), before);
-            assert_eq!(
-                conn.query_row("SELECT MAX(version) FROM schema_migrations", [], |r| r
-                    .get::<_, i64>(0))
-                    .unwrap(),
-                8
-            );
-            assert_eq!(
-                conn.query_row("SELECT title FROM bounties WHERE id='b'", [], |r| r
-                    .get::<_, String>(0))
-                    .unwrap(),
-                "legacy task"
-            );
-            continue;
-        }
-        let repo = Repository::open(&path).unwrap();
-        let detail = repo.get_bounty_detail("b").unwrap();
-        assert_eq!(detail.bounty.title, "legacy task");
-        assert_eq!(detail.bounty.lease_id, 42);
-        assert_eq!(detail.bounty.created_by_agent_id.as_deref(), Some("a"));
-        assert_eq!(detail.events.len(), 1);
-        assert!(detail.bounty.draft_collaborator_agent_id.is_none());
-        assert!(detail.bounty.parent_bounty_id.is_none());
-        assert!(!detail.bounty.draft_needs_human_review);
-        assert!(!detail.bounty.is_blocked);
-        assert!(detail.bounty.blocked_by.is_empty());
-        let after = schema(&conn);
-        let reopened = Repository::open(&path).unwrap();
-        assert_eq!(schema(&conn), after);
-        assert_eq!(
-            serde_json::to_value(reopened.get_bounty_detail("b").unwrap()).unwrap(),
-            serde_json::to_value(detail).unwrap()
-        );
-        assert_eq!(
-            conn.query_row("SELECT MAX(version) FROM schema_migrations", [], |r| r
-                .get::<_, i64>(0))
-                .unwrap(),
-            9
-        );
-        assert_eq!(
-            conn.query_row(
-                "SELECT COUNT(*) FROM schema_migrations WHERE version=9",
-                [],
-                |r| r.get::<_, i64>(0)
-            )
-            .unwrap(),
-            1
-        );
-        conn.pragma_update(None, "foreign_keys", "ON").unwrap();
-        assert!(conn
-            .execute("INSERT INTO bounty_dependencies VALUES('b','b','now')", [])
-            .is_err());
-        assert!(conn
-            .execute(
-                "INSERT INTO bounty_dependencies VALUES('b','missing','now')",
-                []
-            )
-            .is_err());
-        assert!(conn
-            .execute(
-                "UPDATE bounties SET draft_collaborator_agent_id='missing' WHERE id='b'",
-                []
-            )
-            .is_err());
-        let fresh_path = dir.path().join("fresh.db");
-        Repository::open(&fresh_path).unwrap();
-        let business = |rows: Vec<(String, Option<String>)>| {
-            rows.into_iter()
-                .filter(|(name, _)| name != "schema_migrations" && !name.starts_with("sqlite_"))
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(
-            business(schema(&Connection::open(fresh_path).unwrap())),
-            business(after)
-        );
-    }
 }
 
 #[tokio::test]

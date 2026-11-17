@@ -7,6 +7,74 @@ fn project() -> CreateProject {
     serde_json::from_value(json!({"name":"Taskrail", "icon":"emoji:🚆"})).unwrap()
 }
 
+fn register_agent(repo: &Repository, name: &str) -> String {
+    repo.onboarding(Some(UpdateOnboarding {
+        lan_open_registration: true,
+    }))
+    .unwrap();
+    repo.register_agent(serde_json::from_value(json!({"name":name})).unwrap())
+        .unwrap()
+        .agent
+        .id
+}
+
+#[test]
+fn current_schema_enforces_comment_incident_arbitration_and_dependency_constraints() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("constraints.db");
+    let repo = Repository::open(&path).unwrap();
+    let p = repo.create_project(project()).unwrap();
+    let b = repo.create_bounty(bounty(&p.id, "DRAFT")).unwrap();
+    let dependent = repo.create_bounty(bounty(&p.id, "DRAFT")).unwrap();
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+    conn.execute_batch("INSERT INTO agents(id,name,api_key_hash,api_key_prefix,created_at,updated_at) VALUES('a','agent','hash','prefix','now','now');").unwrap();
+    for sql in [
+        "UPDATE bounties SET quality_grade='invalid' WHERE id=?1",
+        "UPDATE bounties SET calibrated_difficulty='D' WHERE id=?1",
+        "UPDATE bounties SET draft_collaborator_agent_id='missing' WHERE id=?1",
+        "INSERT INTO bounty_comments(bounty_id,author_type,author_name,kind,body,created_at) VALUES(?1,'invalid','human','comment','text','now')",
+        "INSERT INTO bounty_comments(bounty_id,author_type,author_name,kind,body,created_at) VALUES(?1,'human','human','invalid','text','now')",
+        "INSERT INTO lease_incidents(bounty_id,agent_id,lease_id,kind,created_at) VALUES(?1,'missing',1,'timeout','now')",
+        "INSERT INTO lease_incidents(bounty_id,agent_id,lease_id,kind,created_at) VALUES(?1,'a',1,'invalid','now')",
+        "INSERT INTO bounty_dependencies VALUES(?1,?1,'now')",
+        "INSERT INTO bounty_dependencies VALUES(?1,'missing','now')",
+    ] {
+        assert!(conn.execute(sql, [&b.id]).is_err(), "{sql}");
+    }
+    assert!(conn.execute("INSERT INTO bounty_comments(bounty_id,author_type,author_name,kind,body,created_at) VALUES('missing','human','human','comment','text','now')", []).is_err());
+    conn.execute("INSERT INTO bounty_comments(bounty_id,author_type,author_name,kind,body,created_at) VALUES(?1,'human','human','comment','keep comment','now')", [&b.id]).unwrap();
+    conn.execute("INSERT INTO lease_incidents(bounty_id,agent_id,lease_id,kind,created_at) VALUES(?1,'a',1,'timeout','now')", [&b.id]).unwrap();
+    conn.execute(
+        "INSERT INTO bounty_dependencies VALUES(?1,?2,'now')",
+        rusqlite::params![dependent.id, b.id],
+    )
+    .unwrap();
+    let before = serde_json::to_value(repo.get_bounty_detail(&b.id).unwrap()).unwrap();
+    let reopened = Repository::open(&path).unwrap();
+    assert_eq!(
+        serde_json::to_value(reopened.get_bounty_detail(&b.id).unwrap()).unwrap(),
+        before
+    );
+    conn.execute("DELETE FROM agents WHERE id='a'", []).unwrap();
+    assert_eq!(
+        conn.query_row("SELECT COUNT(*) FROM lease_incidents", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    conn.execute("DELETE FROM bounties WHERE id=?1", [&b.id])
+        .unwrap();
+    for table in ["bounty_comments", "bounty_dependencies"] {
+        assert_eq!(
+            conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+}
+
 fn bounty(project_id: &str, status: &str) -> CreateBounty {
     serde_json::from_value(json!({"project_id":project_id,"title":"实现内核", "difficulty":"B", "assignee_mode":"any", "status":status})).unwrap()
 }
@@ -15,6 +83,7 @@ fn bounty(project_id: &str, status: &str) -> CreateBounty {
 fn draft_publish_withdraw_and_claim_conflict() {
     let dir = tempfile::tempdir().unwrap();
     let repo = Repository::open(dir.path().join("taskrail.db")).unwrap();
+    let agent_id = register_agent(&repo, "worker");
     let p = repo.create_project(project()).unwrap();
     let b = repo.create_bounty(bounty(&p.id, "DRAFT")).unwrap();
     assert_eq!(b.status, BountyStatus::Draft);
@@ -28,11 +97,11 @@ fn draft_publish_withdraw_and_claim_conflict() {
     let b = repo.withdraw_bounty(&b.id, "human").unwrap();
     assert!(b.withdrawn_at.is_some());
     assert_eq!(
-        repo.try_claim_bounty(&b.id, "agent-1").unwrap_err().code,
-        "INVALID_TRANSITION"
+        repo.agent_claim_bounty(&b.id, &agent_id).unwrap_err().code,
+        "BOUNTY_NOT_FOUND"
     );
     repo.publish_bounty(&b.id, "human").unwrap();
-    let b = repo.try_claim_bounty(&b.id, "agent-1").unwrap();
+    let b = repo.agent_claim_bounty(&b.id, &agent_id).unwrap();
     assert_eq!(b.lease_id, 1);
     assert_eq!(b.status, BountyStatus::InProgress);
     assert_eq!(
@@ -51,7 +120,7 @@ fn draft_publish_withdraw_and_claim_conflict() {
 }
 
 #[test]
-fn migrations_persist_and_project_crud_enforces_archive_and_references() {
+fn initialization_persists_and_project_crud_enforces_archive_and_references() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("nested/taskrail.db");
     let repo = Repository::open(&path).unwrap();
@@ -59,10 +128,13 @@ fn migrations_persist_and_project_crud_enforces_archive_and_references() {
     let repo = Repository::open(&path).unwrap();
     let conn = rusqlite::Connection::open(&path).unwrap();
     assert_eq!(
-        conn.query_row("SELECT COUNT(*) FROM schema_migrations", [], |r| r
-            .get::<_, i64>(0))
-            .unwrap(),
-        1
+        conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name='schema_migrations'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        0
     );
     assert_eq!(
         conn.query_row("PRAGMA journal_mode", [], |r| r.get::<_, String>(0))
@@ -283,6 +355,7 @@ fn drafts_edit_publish_filter_and_non_drafts_reject_edits() {
 fn cancellation_and_missing_bounty_errors_cover_all_states() {
     let dir = tempfile::tempdir().unwrap();
     let repo = Repository::open(dir.path().join("taskrail.db")).unwrap();
+    let agent_id = register_agent(&repo, "worker");
     let p = repo.create_project(project()).unwrap();
     for initial in [
         "DRAFT",
@@ -324,7 +397,7 @@ fn cancellation_and_missing_bounty_errors_cover_all_states() {
         repo.publish_bounty("missing", "human"),
         repo.withdraw_bounty("missing", "human"),
         repo.cancel_bounty("missing", "human"),
-        repo.try_claim_bounty("missing", "agent"),
+        repo.agent_claim_bounty("missing", &agent_id),
         repo.update_bounty("missing", UpdateBounty::default(), "human"),
     ] {
         assert_eq!(result.unwrap_err().code, "BOUNTY_NOT_FOUND");
@@ -340,6 +413,7 @@ fn claim_and_withdraw_are_exclusive_across_independent_connections() {
     use std::sync::{Arc, Barrier};
     let dir = tempfile::tempdir().unwrap();
     let repo = Repository::open(dir.path().join("taskrail.db")).unwrap();
+    let agent_id = register_agent(&repo, "worker");
     let p = repo.create_project(project()).unwrap();
     for _ in 0..24 {
         let b = repo.create_bounty(bounty(&p.id, "OPEN")).unwrap();
@@ -350,9 +424,10 @@ fn claim_and_withdraw_are_exclusive_across_independent_connections() {
         let withdraw_id = b.id.clone();
         let claim_gate = barrier.clone();
         let withdraw_gate = barrier.clone();
+        let claimant_agent_id = agent_id.clone();
         let claim = std::thread::spawn(move || {
             claim_gate.wait();
-            claimant.try_claim_bounty(&claim_id, "agent")
+            claimant.agent_claim_bounty(&claim_id, &claimant_agent_id)
         });
         let withdraw = std::thread::spawn(move || {
             withdraw_gate.wait();
@@ -368,7 +443,7 @@ fn claim_and_withdraw_are_exclusive_across_independent_connections() {
             (Ok(claimed), Err(error)) => {
                 assert_eq!(error.code, "BOUNTY_ALREADY_CLAIMED");
                 assert_eq!(claimed.lease_id, 1);
-                assert_eq!(claimed.lease_agent_id.as_deref(), Some("agent"));
+                assert_eq!(claimed.lease_agent_id.as_deref(), Some(agent_id.as_str()));
                 let expires = chrono::DateTime::parse_from_rfc3339(
                     claimed.lease_expires_at.as_deref().unwrap(),
                 )
@@ -379,7 +454,7 @@ fn claim_and_withdraw_are_exclusive_across_independent_connections() {
                 assert_eq!(detail.bounty.status, BountyStatus::InProgress);
             }
             (Err(error), Ok(_)) => {
-                assert_eq!(error.code, "INVALID_TRANSITION");
+                assert_eq!(error.code, "BOUNTY_NOT_FOUND");
                 assert_eq!(detail.bounty.status, BountyStatus::Draft);
                 assert_eq!(detail.bounty.lease_id, 0);
             }
@@ -394,15 +469,19 @@ fn competing_claims_have_one_winner_and_fencing_token_increases() {
     let repo = Repository::open(dir.path().join("taskrail.db")).unwrap();
     let p = repo.create_project(project()).unwrap();
     let b = repo.create_bounty(bounty(&p.id, "OPEN")).unwrap();
+    let agents: Vec<_> = (0..8)
+        .map(|i| register_agent(&repo, &format!("agent-{i}")))
+        .collect();
     let gate = std::sync::Arc::new(std::sync::Barrier::new(8));
     let threads: Vec<_> = (0..8)
         .map(|i| {
             let repo = repo.clone();
             let gate = gate.clone();
             let id = b.id.clone();
+            let agent_id = agents[i].clone();
             std::thread::spawn(move || {
                 gate.wait();
-                repo.try_claim_bounty(&id, &format!("agent-{i}"))
+                repo.agent_claim_bounty(&id, &agent_id)
             })
         })
         .collect();
@@ -418,7 +497,13 @@ fn competing_claims_have_one_winner_and_fencing_token_increases() {
         [&b.id],
     )
     .unwrap();
-    assert_eq!(repo.try_claim_bounty(&b.id, "next").unwrap().lease_id, 2);
+    let next_agent_id = register_agent(&repo, "next");
+    assert_eq!(
+        repo.agent_claim_bounty(&b.id, &next_agent_id)
+            .unwrap()
+            .lease_id,
+        2
+    );
 }
 
 #[test]

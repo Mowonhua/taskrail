@@ -1,4 +1,4 @@
-CREATE TABLE projects (
+CREATE TABLE IF NOT EXISTS projects (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
     icon TEXT,
@@ -11,7 +11,7 @@ CREATE TABLE projects (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
-CREATE TABLE bounties (
+CREATE TABLE IF NOT EXISTS bounties (
     id TEXT PRIMARY KEY,
     project_id TEXT NOT NULL REFERENCES projects(id),
     title TEXT NOT NULL,
@@ -34,9 +34,24 @@ CREATE TABLE bounties (
     cancelled_at TEXT,
     completed_at TEXT,
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    created_by_agent_id TEXT REFERENCES agents(id),
+    assignment_expires_at TEXT,
+    lease_warned_id INTEGER NOT NULL DEFAULT 0,
+    completion_cost REAL,
+    active_duration_ms INTEGER NOT NULL DEFAULT 0,
+    active_started_at TEXT,
+    -- 仲裁响应锁独立于执行租约；失败事故保存在 bounty_events 的结构化历史中。
+    arbitrator_agent_id TEXT,
+    arbitration_expires_at TEXT,
+    arbitration_tried_ids_json TEXT NOT NULL DEFAULT '[]',
+    quality_grade TEXT CHECK (quality_grade IN ('perfect','flawed')),
+    calibrated_difficulty TEXT CHECK (calibrated_difficulty IN ('C','B','A','S')),
+    draft_collaborator_agent_id TEXT REFERENCES agents(id),
+    draft_needs_human_review INTEGER NOT NULL DEFAULT 0,
+    parent_bounty_id TEXT REFERENCES bounties(id) ON DELETE SET NULL
 );
-CREATE TABLE bounty_events (
+CREATE TABLE IF NOT EXISTS bounty_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     bounty_id TEXT NOT NULL REFERENCES bounties(id) ON DELETE CASCADE,
     event_type TEXT NOT NULL,
@@ -46,16 +61,19 @@ CREATE TABLE bounty_events (
     detail_json TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL
 );
-CREATE INDEX bounties_project_status ON bounties(project_id, status);
-CREATE INDEX bounty_events_order ON bounty_events(bounty_id, id);
-CREATE TABLE server_settings (
+CREATE INDEX IF NOT EXISTS bounties_project_status ON bounties(project_id, status);
+CREATE INDEX IF NOT EXISTS bounty_events_order ON bounty_events(bounty_id, id);
+CREATE TABLE IF NOT EXISTS server_settings (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     lan_open_registration INTEGER NOT NULL DEFAULT 0,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    arbitrator_chain_json TEXT NOT NULL DEFAULT '[]'
 );
+-- 默认配置仅在首次创建时写入；重复打开数据库不得覆盖管理员设置。
 INSERT INTO server_settings(id,lan_open_registration,updated_at)
-VALUES(1,0,strftime('%Y-%m-%dT%H:%M:%fZ','now'));
-CREATE TABLE invite_tokens (
+VALUES(1,0,strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+ON CONFLICT(id) DO NOTHING;
+CREATE TABLE IF NOT EXISTS invite_tokens (
     id TEXT PRIMARY KEY,
     label TEXT NOT NULL DEFAULT '',
     token_hash TEXT NOT NULL UNIQUE,
@@ -66,7 +84,7 @@ CREATE TABLE invite_tokens (
     revoked_at TEXT,
     created_at TEXT NOT NULL
 );
-CREATE TABLE agents (
+CREATE TABLE IF NOT EXISTS agents (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL UNIQUE,
     description TEXT NOT NULL DEFAULT '',
@@ -81,20 +99,27 @@ CREATE TABLE agents (
     invite_token_id TEXT REFERENCES invite_tokens(id),
     last_seen_at TEXT,
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    webhook_url TEXT,
+    webhook_secret TEXT,
+    acked_event_id INTEGER NOT NULL DEFAULT 0,
+    last_pushed_at TEXT,
+    timeout_count INTEGER NOT NULL DEFAULT 0,
+    abandon_count INTEGER NOT NULL DEFAULT 0,
+    settled_count INTEGER NOT NULL DEFAULT 0,
+    completed_count INTEGER NOT NULL DEFAULT 0,
+    failed_count INTEGER NOT NULL DEFAULT 0,
+    verified_as_wins INTEGER NOT NULL DEFAULT 0,
+    verified_s_wins INTEGER NOT NULL DEFAULT 0
 );
-CREATE TABLE agent_subscriptions (
+CREATE TABLE IF NOT EXISTS agent_subscriptions (
     agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
     project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     created_at TEXT NOT NULL,
     PRIMARY KEY (agent_id, project_id)
 );
-CREATE INDEX bounties_agent_lease ON bounties(lease_agent_id,status,lease_expires_at);
-ALTER TABLE agents ADD COLUMN webhook_url TEXT;
-ALTER TABLE agents ADD COLUMN webhook_secret TEXT;
-ALTER TABLE agents ADD COLUMN acked_event_id INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE agents ADD COLUMN last_pushed_at TEXT;
-CREATE TABLE agent_events (
+CREATE INDEX IF NOT EXISTS bounties_agent_lease ON bounties(lease_agent_id,status,lease_expires_at);
+CREATE TABLE IF NOT EXISTS agent_events (
     event_id INTEGER PRIMARY KEY AUTOINCREMENT,
     agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
     bounty_id TEXT,
@@ -107,22 +132,16 @@ CREATE TABLE agent_events (
     delivered_at TEXT,
     created_at TEXT NOT NULL
 );
-CREATE INDEX agent_events_agent_order ON agent_events(agent_id, event_id);
-CREATE INDEX agent_events_delivery ON agent_events(delivery_status, next_attempt_at);
-CREATE TABLE bounty_dispatches (
+CREATE INDEX IF NOT EXISTS agent_events_agent_order ON agent_events(agent_id, event_id);
+CREATE INDEX IF NOT EXISTS agent_events_delivery ON agent_events(delivery_status, next_attempt_at);
+CREATE TABLE IF NOT EXISTS bounty_dispatches (
     bounty_id TEXT NOT NULL REFERENCES bounties(id) ON DELETE CASCADE,
     agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
     created_at TEXT NOT NULL,
     PRIMARY KEY (bounty_id, agent_id)
 );
-ALTER TABLE bounties ADD COLUMN created_by_agent_id TEXT REFERENCES agents(id);
 CREATE INDEX IF NOT EXISTS bounties_publisher_agent ON bounties(created_by_agent_id);
-ALTER TABLE bounties ADD COLUMN assignment_expires_at TEXT;
-ALTER TABLE bounties ADD COLUMN lease_warned_id INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE bounties ADD COLUMN completion_cost REAL;
-ALTER TABLE agents ADD COLUMN timeout_count INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE agents ADD COLUMN abandon_count INTEGER NOT NULL DEFAULT 0;
-CREATE TABLE lease_incidents (
+CREATE TABLE IF NOT EXISTS lease_incidents (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     bounty_id TEXT NOT NULL REFERENCES bounties(id) ON DELETE CASCADE,
     agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
@@ -130,10 +149,8 @@ CREATE TABLE lease_incidents (
     kind TEXT NOT NULL CHECK (kind IN ('timeout','abandon')),
     created_at TEXT NOT NULL
 );
-CREATE INDEX lease_incidents_agent ON lease_incidents(agent_id, id);
-ALTER TABLE bounties ADD COLUMN active_duration_ms INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE bounties ADD COLUMN active_started_at TEXT;
-CREATE TABLE bounty_comments (
+CREATE INDEX IF NOT EXISTS lease_incidents_agent ON lease_incidents(agent_id, id);
+CREATE TABLE IF NOT EXISTS bounty_comments (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     bounty_id TEXT NOT NULL REFERENCES bounties(id) ON DELETE CASCADE,
     author_type TEXT NOT NULL CHECK (author_type IN ('human','agent','system')),
@@ -143,22 +160,10 @@ CREATE TABLE bounty_comments (
     body TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
-CREATE INDEX bounty_comments_order ON bounty_comments(bounty_id, id);
+CREATE INDEX IF NOT EXISTS bounty_comments_order ON bounty_comments(bounty_id, id);
 
--- 仲裁响应锁独立于执行租约；失败事故保存在 bounty_events 的结构化历史中。
-ALTER TABLE server_settings ADD COLUMN arbitrator_chain_json TEXT NOT NULL DEFAULT '[]';
-ALTER TABLE bounties ADD COLUMN arbitrator_agent_id TEXT;
-ALTER TABLE bounties ADD COLUMN arbitration_expires_at TEXT;
-ALTER TABLE bounties ADD COLUMN arbitration_tried_ids_json TEXT NOT NULL DEFAULT '[]';
-ALTER TABLE bounties ADD COLUMN quality_grade TEXT CHECK (quality_grade IN ('perfect','flawed'));
-ALTER TABLE bounties ADD COLUMN calibrated_difficulty TEXT CHECK (calibrated_difficulty IN ('C','B','A','S'));
-CREATE INDEX bounties_arbitration_deadline ON bounties(status,arbitration_expires_at);
-ALTER TABLE agents ADD COLUMN settled_count INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE agents ADD COLUMN completed_count INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE agents ADD COLUMN failed_count INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE agents ADD COLUMN verified_as_wins INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE agents ADD COLUMN verified_s_wins INTEGER NOT NULL DEFAULT 0;
-CREATE TABLE agent_rating_ledger (
+CREATE INDEX IF NOT EXISTS bounties_arbitration_deadline ON bounties(status,arbitration_expires_at);
+CREATE TABLE IF NOT EXISTS agent_rating_ledger (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
     bounty_id TEXT NOT NULL REFERENCES bounties(id) ON DELETE CASCADE,
@@ -191,18 +196,15 @@ CREATE TABLE agent_rating_ledger (
     tier_gate_reason TEXT,
     created_at TEXT NOT NULL
 );
-CREATE INDEX agent_rating_ledger_agent_order ON agent_rating_ledger(agent_id, id DESC);
+CREATE INDEX IF NOT EXISTS agent_rating_ledger_agent_order ON agent_rating_ledger(agent_id, id DESC);
 
-ALTER TABLE bounties ADD COLUMN draft_collaborator_agent_id TEXT REFERENCES agents(id);
-ALTER TABLE bounties ADD COLUMN draft_needs_human_review INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE bounties ADD COLUMN parent_bounty_id TEXT REFERENCES bounties(id) ON DELETE SET NULL;
 CREATE INDEX IF NOT EXISTS bounties_parent ON bounties(parent_bounty_id);
 CREATE INDEX IF NOT EXISTS bounties_collaborator ON bounties(draft_collaborator_agent_id);
-CREATE TABLE bounty_dependencies (
+CREATE TABLE IF NOT EXISTS bounty_dependencies (
     bounty_id TEXT NOT NULL REFERENCES bounties(id) ON DELETE CASCADE,
     depends_on_bounty_id TEXT NOT NULL REFERENCES bounties(id) ON DELETE CASCADE,
     created_at TEXT NOT NULL,
     PRIMARY KEY (bounty_id, depends_on_bounty_id),
     CHECK (bounty_id <> depends_on_bounty_id)
 );
-CREATE INDEX bounty_dependencies_reverse ON bounty_dependencies(depends_on_bounty_id, bounty_id);
+CREATE INDEX IF NOT EXISTS bounty_dependencies_reverse ON bounty_dependencies(depends_on_bounty_id, bounty_id);

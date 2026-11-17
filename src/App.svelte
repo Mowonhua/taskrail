@@ -245,11 +245,7 @@
         ? selectedBountyProject.icon
         : preferences.defaultProjectIcon,
   );
-  const sidebarCollapsed = $derived(
-    preferences.sidebarOpen !== undefined
-      ? !preferences.sidebarOpen
-      : Boolean(preferences.sidebarCollapsed),
-  );
+  const sidebarCollapsed = $derived(!preferences.sidebarOpen);
 
   const visibleInboxBounties = $derived(
     actionableBounties.filter(item =>
@@ -1793,13 +1789,8 @@
     }
     if (preferences.fontFamily) root.style.setProperty('--user-font-body', preferences.fontFamily);
     else root.style.removeProperty('--user-font-body');
-    const widthPx = preferences.contentWidth ?? preferences.lineWidth ?? defaultPreferences.contentWidth;
-    const indentChars =
-      typeof preferences.paragraphIndent === 'number'
-        ? preferences.paragraphIndent
-        : preferences.paragraphIndent
-          ? 2
-          : 0;
+    const widthPx = preferences.contentWidth;
+    const indentChars = preferences.paragraphIndent;
     root.style.setProperty('--font-size', `${preferences.fontSize}px`);
     root.style.setProperty('--content-width', `${widthPx}px`);
     root.style.setProperty('--line-width', `${widthPx}px`);
@@ -1828,7 +1819,6 @@
     const _fontFamily = preferences.fontFamily;
     const _fontSize = preferences.fontSize;
     const _contentWidth = preferences.contentWidth;
-    const _lineWidth = preferences.lineWidth;
     const _indent = preferences.paragraphIndent;
     if (!_resolved) return;
     void applyVisualPreferences();
@@ -1861,20 +1851,6 @@
       config.activeProjectId ?? (config.projects.length > 0 ? config.projects[0].id : null);
     customThemes = config.customThemes ?? [];
     const mergedPrefs = { ...defaultPreferences, ...config.preferences };
-    const resolvedLocale = mergedPrefs.locale ?? mergedPrefs.language ?? 'zh-CN';
-    const resolvedWidth = mergedPrefs.contentWidth ?? mergedPrefs.lineWidth ?? defaultPreferences.contentWidth;
-    const resolvedIndent =
-      typeof mergedPrefs.paragraphIndent === 'number'
-        ? mergedPrefs.paragraphIndent
-        : mergedPrefs.paragraphIndent
-          ? 2
-          : 0;
-    const resolvedSidebarOpen =
-      mergedPrefs.sidebarOpen !== undefined
-        ? mergedPrefs.sidebarOpen
-        : mergedPrefs.sidebarCollapsed !== undefined
-          ? !mergedPrefs.sidebarCollapsed
-          : true;
     let resolvedDefaultIcon = mergedPrefs.defaultProjectIcon;
     if (resolvedDefaultIcon) {
       const parsed = parseProjectIcon(resolvedDefaultIcon);
@@ -1882,18 +1858,11 @@
     }
     preferences = {
       ...mergedPrefs,
-      locale: resolvedLocale,
-      language: resolvedLocale,
-      contentWidth: resolvedWidth,
-      lineWidth: resolvedWidth,
-      paragraphIndent: resolvedIndent,
-      sidebarOpen: resolvedSidebarOpen,
-      sidebarCollapsed: !resolvedSidebarOpen,
       ...(resolvedDefaultIcon !== undefined ? { defaultProjectIcon: resolvedDefaultIcon } : {}),
     };
     windowPlacement = config.window ? { ...config.window } : undefined;
     activeSection = preferences.workspaceSection ?? 'bounties';
-    setLocalePreference(resolvedLocale);
+    setLocalePreference(preferences.locale);
   }
 
   async function retryLoadConfig(): Promise<void> {
@@ -1936,7 +1905,7 @@
   }
 
   function toggleSidebar(collapsed: boolean): void {
-    preferences = { ...preferences, sidebarOpen: !collapsed, sidebarCollapsed: collapsed };
+    preferences = { ...preferences, sidebarOpen: !collapsed };
     if (!collapsed && files.isMobile) mobileSidebarOpen = true;
     else if (collapsed && files.isMobile) mobileSidebarOpen = false;
     void persistConfig();
@@ -1944,7 +1913,7 @@
 
   function handleSelectLanguage(language: LocalePreference): void {
     setLocalePreference(language);
-    preferences = { ...preferences, locale: language, language };
+    preferences = { ...preferences, locale: language };
     void persistConfig();
   }
 
@@ -1976,7 +1945,7 @@
 
   function handleChangeLineWidth(lineWidth: number): void {
     const clamped = Math.min(900, Math.max(600, lineWidth));
-    preferences = { ...preferences, contentWidth: clamped, lineWidth: clamped };
+    preferences = { ...preferences, contentWidth: clamped };
     void persistConfig();
   }
 
@@ -2145,7 +2114,7 @@
             activeDetail !== null,
           setOpen: open => {
             mobileSidebarOpen = open;
-            preferences = { ...preferences, sidebarOpen: open, sidebarCollapsed: !open };
+            preferences = { ...preferences, sidebarOpen: open };
           },
         }),
       );

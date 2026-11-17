@@ -483,7 +483,7 @@
         inline
         label={$t('语言')}
         options={languageOptions}
-        bind:value={() => preferences.locale ?? preferences.language ?? 'zh-CN', value => onSelectLanguage(value as LocalePreference)}
+        bind:value={() => preferences.locale, value => onSelectLanguage(value as LocalePreference)}
       />
     </div>
 

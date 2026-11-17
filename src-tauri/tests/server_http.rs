@@ -316,7 +316,15 @@ async fn http_project_crud_and_bounty_lifecycle() {
         None,
     )
     .await;
-    repo.try_claim_bounty(bid, "agent").unwrap();
+    repo.onboarding(Some(server::models::UpdateOnboarding {
+        lan_open_registration: true,
+    }))
+    .unwrap();
+    let agent = repo
+        .register_agent(serde_json::from_value(json!({"name":"agent"})).unwrap())
+        .unwrap()
+        .agent;
+    repo.agent_claim_bounty(bid, &agent.id).unwrap();
     let (status, error) = request(
         &client,
         base,

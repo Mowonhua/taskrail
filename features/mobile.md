@@ -53,6 +53,6 @@
 | S-04 | 正常 | 未授权安装时打开系统授权页，返回应用后可重试；系统安装器接管后解除保存锁并保留候选 | src/lib/updater/android.test.ts::未知来源授权不足时保留候选允许重试\，系统安装器接管后应用继续运行, src/lib/updater/update-coordinator.test.ts::更新检查与后台下载 > 系统安装器接管后解除保存锁并保留安装包\，取消安装后可重新发起 |
 | S-05 | 异常 | 配置保存失败时不调用系统安装器 | src/lib/updater/update-coordinator.test.ts::安装前保存与失败恢复 > 保存未成功时保留安装包并禁止原生安装：refused |
 | S-06 | 正常 | 没有可安装的新版本时结束检查且不创建候选 | src/lib/updater/android.test.ts::原生没有新版本时不创建下载会话 |
-| S-07 | 约束 | v0.7.1 起标签发布必须包含同版本签名 arm64 APK，缺失或摘要不符时禁止公开版本；重跑不覆盖已公开资源 | scripts/release.test.mjs::<module>, scripts/release-policy.test.mjs::<module>, scripts/release-github.test.mjs::<module> |
+| S-07 | 约束 | 标签发布必须包含同版本签名 arm64 APK，缺失或摘要不符时禁止公开版本；重跑不覆盖已公开资源 | scripts/release.test.mjs::<module>, scripts/release-policy.test.mjs::<module>, scripts/release-github.test.mjs::<module> |
 | S-08 | 异常 | 传输连接中断时重新建立连接并从已写入字节续传；服务端忽略范围请求或资源变化时从头重写 | - |
 | S-09 | 异常 | 重试耗尽后界面显示统一的网络中断提示，不暴露平台英文异常 | src/lib/updater/android.test.ts::传输中断的原始英文异常被替换为可重试的网络提示 |

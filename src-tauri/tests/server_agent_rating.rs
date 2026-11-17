@@ -616,7 +616,7 @@ fn rejected_then_abandon_and_timeout_keep_declared_cost_in_ledger_and_clear_boun
 }
 
 #[test]
-fn admin_release_never_rates_or_records_incidents_and_legacy_leases_skip_rating() {
+fn admin_release_never_rates_or_records_incidents() {
     let k = Kernel::new();
     for state in ["IN_PROGRESS", "WAITING_INFO", "PENDING_ARBITRATION"] {
         let b = k.claim(Tier::S, true, false);
@@ -643,13 +643,35 @@ fn admin_release_never_rates_or_records_incidents_and_legacy_leases_skip_rating(
             0
         );
     }
-    for owner in [Some("legacy-agent"), None] {
-        let b = k.claim(Tier::C, false, false);
-        k.conn().execute("UPDATE bounties SET lease_agent_id=?2,lease_expires_at='2000-01-01T00:00:00.000Z' WHERE id=?1",params![b.id,owner]).unwrap();
-        k.repo.sweep_leases().unwrap();
+}
+
+#[test]
+fn missing_executor_aborts_settlement_and_rolls_back_state() {
+    let k = Kernel::new();
+    for owner in [Some("missing-agent"), None] {
+        let b = k.claim(Tier::C, true, false);
+        k.conn()
+            .execute(
+                "UPDATE bounties SET status='PENDING_ARBITRATION',lease_agent_id=?2 WHERE id=?1",
+                params![b.id, owner],
+            )
+            .unwrap();
+        let before = serde_json::to_value(k.repo.get_bounty_detail(&b.id).unwrap()).unwrap();
+        let error = k
+            .repo
+            .approve_arbitration(
+                &b.id,
+                None,
+                ApproveArbitrationInput {
+                    comment: Some("approved".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+        assert_eq!(error.code, "INTERNAL_ERROR");
         assert_eq!(
-            k.repo.get_bounty_detail(&b.id).unwrap().bounty.status,
-            BountyStatus::Open
+            serde_json::to_value(k.repo.get_bounty_detail(&b.id).unwrap()).unwrap(),
+            before
         );
         assert!(k.detail().ledger.is_empty());
     }
@@ -856,100 +878,6 @@ async fn http_detail_requires_admin_while_all_public_dtos_and_events_hide_rating
     assert!(!skill.contains("raw_delta"));
     assert!(!skill.contains(&format!("mmr: {}", detail.mmr)));
     server.shutdown().await.unwrap();
-}
-
-fn legacy_v7(path: &std::path::Path) -> Connection {
-    let conn = Connection::open(path).unwrap();
-    conn.execute_batch(include_str!("fixtures/server_v1.sql"))
-        .unwrap();
-    for schema in [
-        include_str!("../src/server/schema_v2.sql"),
-        include_str!("../src/server/schema_v3.sql"),
-        include_str!("../src/server/schema_v4.sql"),
-        include_str!("../src/server/schema_v5.sql"),
-        include_str!("../src/server/schema_v6.sql"),
-        include_str!("../src/server/schema_v7.sql"),
-    ] {
-        conn.execute_batch(schema).unwrap();
-    }
-    conn.execute_batch("CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY,applied_at TEXT NOT NULL); INSERT INTO schema_migrations VALUES(7,'old'); INSERT INTO projects(id,name,created_at,updated_at) VALUES('p','legacy','old','old'); INSERT INTO agents(id,name,api_key_hash,api_key_prefix,mmr,tier,created_at,updated_at) VALUES('a','legacy','hash','prefix',1612.5,'A','old','old'); INSERT INTO bounties(id,project_id,title,difficulty,assignee_mode,status,lease_id,lease_agent_id,created_at,updated_at) VALUES('b','p','legacy task','A','any','IN_PROGRESS',42,'a','old','old'); INSERT INTO bounty_events(bounty_id,event_type,actor,to_status,created_at) VALUES('b','created','human','IN_PROGRESS','old');").unwrap();
-    conn
-}
-
-fn schema(conn: &Connection) -> Vec<(String, Option<String>)> {
-    let mut stmt = conn
-        .prepare("SELECT name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY name")
-        .unwrap();
-    stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
-        .unwrap()
-        .collect::<rusqlite::Result<_>>()
-        .unwrap()
-}
-
-#[test]
-fn v7_to_v8_is_atomic_idempotent_and_preserves_existing_rating_and_tasks() {
-    for failure in ["none", "table", "index", "version"] {
-        let file = tempfile::NamedTempFile::new().unwrap();
-        let conn = legacy_v7(file.path());
-        match failure {
-            "table" => conn.execute_batch("CREATE TABLE agent_rating_ledger(conflict TEXT);").unwrap(),
-            "index" => conn.execute_batch("CREATE TABLE agent_rating_ledger_agent_order(conflict TEXT);").unwrap(),
-            "version" => conn.execute_batch("CREATE TRIGGER fail_version BEFORE INSERT ON schema_migrations WHEN NEW.version=8 BEGIN SELECT RAISE(ABORT,'version'); END;").unwrap(),
-            _ => {}
-        }
-        let before = schema(&conn);
-        if failure != "none" {
-            assert!(Repository::open(file.path()).is_err());
-            assert_eq!(schema(&conn), before);
-            assert_eq!(
-                conn.query_row("SELECT MAX(version) FROM schema_migrations", [], |r| r
-                    .get::<_, i64>(0))
-                    .unwrap(),
-                7
-            );
-            assert_eq!(conn.query_row("SELECT COUNT(*) FROM pragma_table_info('agents') WHERE name IN ('settled_count','completed_count','failed_count','verified_as_wins','verified_s_wins')",[],|r|r.get::<_,i64>(0)).unwrap(),0);
-            conn.execute_batch(match failure {
-                "table" => "DROP TABLE agent_rating_ledger;",
-                "index" => "DROP TABLE agent_rating_ledger_agent_order;",
-                _ => "DROP TRIGGER fail_version;",
-            })
-            .unwrap();
-        }
-        let repo = Repository::open(file.path()).unwrap();
-        assert_eq!(
-            conn.query_row("SELECT MAX(version) FROM schema_migrations", [], |r| r
-                .get::<_, i64>(0))
-                .unwrap(),
-            9
-        );
-        let d = repo.get_agent_detail("a").unwrap();
-        near(d.mmr, 1612.5);
-        assert_eq!(d.agent.tier, AgentTier::A);
-        assert_eq!(d.placement_count, 0);
-        assert_eq!(d.completed_count, 0);
-        assert_eq!(d.failed_count, 0);
-        assert_eq!(d.verified_as_wins, 0);
-        assert_eq!(d.verified_s_wins, 0);
-        assert!(d.ledger.is_empty());
-        let task = repo.get_bounty_detail("b").unwrap();
-        assert_eq!(task.bounty.title, "legacy task");
-        assert_eq!(task.bounty.lease_id, 42);
-        assert_eq!(task.events.len(), 1);
-        let after = schema(&conn);
-        let reopened = Repository::open(file.path()).unwrap();
-        assert_eq!(schema(&conn), after);
-        near(reopened.get_agent_detail("a").unwrap().mmr, 1612.5);
-        assert_eq!(
-            conn.query_row(
-                "SELECT COUNT(*) FROM schema_migrations WHERE version=8",
-                [],
-                |r| r.get::<_, i64>(0)
-            )
-            .unwrap(),
-            1
-        );
-        assert_eq!(conn.query_row("SELECT COUNT(*) FROM pragma_index_info('agent_rating_ledger_agent_order') WHERE name IN ('agent_id','id')",[],|r|r.get::<_,i64>(0)).unwrap(),2);
-    }
 }
 
 fn snapshot(conn: &Connection) -> Vec<Vec<Vec<rusqlite::types::Value>>> {

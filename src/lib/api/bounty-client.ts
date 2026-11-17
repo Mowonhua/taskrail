@@ -224,7 +224,6 @@ export interface MemoryBountyClient extends BountyApiPort {
   updateArbitrationConfig(input: ArbitrationConfig): Promise<ArbitrationConfig>;
   approveArbitration(id: string, input?: ApproveArbitrationInput): Promise<BountyTask>;
   rejectArbitration(id: string, input: RejectArbitrationInput): Promise<BountyTask>;
-  simulateClaim(id: string, agentId: string): Promise<BountyTask>;
   registerAgent(
     input: RegisterAgentInput,
     options?: { bearerInviteToken?: string },
@@ -1561,16 +1560,20 @@ export function createMemoryBountyClient(seed?: {
     };
   }
 
+  // 停用与吊销不免除已持有租约的结算责任，结算只要求身份记录存在。
+  function requireRatingAgent(bounty: BountyTask): StoredAgent {
+    const agent = bounty.lease_agent_id ? agentsById.get(bounty.lease_agent_id) : undefined;
+    if (!agent) throw new ServiceApiError('INTERNAL_ERROR', 500, '执行租约缺少有效的 Agent 身份');
+    return agent;
+  }
+
   function settleRating(
     bounty: BountyTask,
+    agent: StoredAgent,
     outcome: RatingOutcome,
     arbitrated: boolean,
     timestamp: string,
   ): void {
-    const agentId = bounty.lease_agent_id;
-    if (!agentId) return;
-    const agent = agentsById.get(agentId);
-    if (!agent) return;
     const entry = calculateRating(bounty, agent, outcome, arbitrated, timestamp);
     const completed = outcome === 'completed';
     const verified = completed && arbitrated;
@@ -2468,6 +2471,7 @@ export function createMemoryBountyClient(seed?: {
       authorName = entry.summary.name;
     }
 
+    const executor = requireRatingAgent(existing);
     const timestamp = nowIso();
     let commentId: number | null = null;
     if (parsed.comment !== null) {
@@ -2498,7 +2502,7 @@ export function createMemoryBountyClient(seed?: {
       updated_at: timestamp,
     };
     bounties.set(id, updated);
-    settleRating(updated, 'completed', true, timestamp);
+    settleRating(updated, executor, 'completed', true, timestamp);
     const hydrated = hydrateBounty(updated);
     const detail = {
       lease_id: existing.lease_id,
@@ -2551,6 +2555,7 @@ export function createMemoryBountyClient(seed?: {
       throw new ServiceApiError('VALIDATION_ERROR', 400, '打回评论不能为空');
     }
 
+    const executor = requireRatingAgent(existing);
     const timestamp = nowIso();
     const comment: BountyComment = {
       id: nextCommentId++,
@@ -2618,7 +2623,7 @@ export function createMemoryBountyClient(seed?: {
     }
 
     if (failed) {
-      settleRating({ ...clone(existing), rejection_count: next }, 'arbitration_failed', true, timestamp);
+      settleRating({ ...clone(existing), rejection_count: next }, executor, 'arbitration_failed', true, timestamp);
     }
 
     bounties.set(id, updated);
@@ -3181,51 +3186,6 @@ export function createMemoryBountyClient(seed?: {
 
     async rejectArbitration(id: string, input: RejectArbitrationInput): Promise<BountyTask> {
       return rejectArbitrationInternal(id, null, input);
-    },
-
-    async simulateClaim(id: string, agentId: string): Promise<BountyTask> {
-      if (typeof agentId !== 'string' || !agentId.trim()) {
-        throw new ServiceApiError('VALIDATION_ERROR', 400, 'agent_id 不能为空');
-      }
-      const existing = requireBounty(id);
-      if (existing.status === 'IN_PROGRESS' || existing.lease_agent_id !== null) {
-        throw new ServiceApiError('BOUNTY_ALREADY_CLAIMED', 409, '悬赏已被接取，不能撤回或重复接取');
-      }
-      if (existing.status !== 'OPEN') {
-        throw new ServiceApiError('INVALID_TRANSITION', 409, '当前状态不允许此操作');
-      }
-      if (hydrateBounty(existing).is_blocked) {
-        throw new ServiceApiError(
-          'BOUNTY_BLOCKED',
-          409,
-          '前置依赖任务尚未全部完成，暂不可抢单',
-        );
-      }
-      const timestamp = nowIso();
-      const updated: BountyTask = {
-        ...clone(existing),
-        status: 'IN_PROGRESS',
-        active_duration_ms: 0,
-        active_started_at: timestamp,
-        rejection_count: 0,
-        completion_note: null,
-        completion_cost: null,
-        arbitrator_agent_id: null,
-        arbitrator_agent_name: null,
-        arbitrator_agent_tier: null,
-        arbitration_expires_at: null,
-        lease_id: existing.lease_id + 1,
-        lease_agent_id: agentId,
-        lease_expires_at: deadlineIso(),
-        assignment_expires_at: null,
-        updated_at: timestamp,
-      };
-      bounties.set(id, updated);
-      leaseWarnedIdByBounty.set(id, 0);
-      arbitrationTriedIdsByBounty.set(id, []);
-      const hydrated = hydrateBounty(updated);
-      recordEvent(hydrated, 'claimed', `agent:${agentId}`, 'OPEN', leaseDetail(hydrated));
-      return hydrated;
     },
 
     async getOnboardingSettings(): Promise<OnboardingSettings> {
@@ -4269,6 +4229,7 @@ export function createMemoryBountyClient(seed?: {
           ...clone(existing),
           active_duration_ms: activeDurationMs,
         },
+        entry,
         'abandon',
         existing.require_arbitration,
         timestamp,
@@ -4336,7 +4297,7 @@ export function createMemoryBountyClient(seed?: {
       };
       bounties.set(id, updated);
       leaseWarnedIdByBounty.set(id, 0);
-      settleRating(updated, 'completed', false, timestamp);
+      settleRating(updated, entry, 'completed', false, timestamp);
       const hydrated = hydrateBounty(updated);
       recordEvent(hydrated, 'completed', `agent:${entry.summary.id}`, existing.status, {
         lease_id: hydrated.lease_id,
@@ -4500,6 +4461,7 @@ export function createMemoryBountyClient(seed?: {
           bounty.lease_expires_at !== null &&
           Date.parse(bounty.lease_expires_at) <= nowMs
         ) {
+          const holder = requireRatingAgent(bounty);
           const oldLease = hydrateBounty(bounty);
           const activeDurationMs = settleActive(bounty, timestamp);
           settleRating(
@@ -4507,18 +4469,14 @@ export function createMemoryBountyClient(seed?: {
               ...clone(bounty),
               active_duration_ms: activeDurationMs,
             },
+            holder,
             'timeout',
             bounty.require_arbitration,
             timestamp,
           );
           const updated = reopenFromLease(bounty, timestamp);
-          if (oldLease.lease_agent_id) {
-            const holder = agentsById.get(oldLease.lease_agent_id);
-            if (holder) {
-              holder.summary.timeout_count += 1;
-              holder.summary.updated_at = timestamp;
-            }
-          }
+          holder.summary.timeout_count += 1;
+          holder.summary.updated_at = timestamp;
           const detail = {
             ...leaseDetail(oldLease),
             active_duration_ms: activeDurationMs,

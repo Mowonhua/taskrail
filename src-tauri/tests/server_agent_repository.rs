@@ -1,5 +1,5 @@
 #![cfg(not(target_os = "android"))]
-//! 文件职责：验证 v1 迁移、凭证只存摘要及邀请次数的跨连接原子性。
+//! 文件职责：验证凭证只存摘要及邀请次数的跨连接原子性。
 use rusqlite::Connection;
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -8,93 +8,6 @@ use taskrail_lib::server::{db::Repository, models::*};
 fn register(name: &str, token: Option<&str>) -> RegisterAgent {
     serde_json::from_value(json!({"name":name,"invite_token":token})).unwrap()
 }
-fn create_v1(path: &std::path::Path) -> Connection {
-    let conn = Connection::open(path).unwrap();
-    conn.execute_batch(include_str!("fixtures/server_v1.sql"))
-        .unwrap();
-    conn.execute_batch("CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY,applied_at TEXT NOT NULL); INSERT INTO schema_migrations VALUES(1,'v1'); INSERT INTO projects(id,name,created_at,updated_at) VALUES('project','existing','old','old'); INSERT INTO bounties(id,project_id,title,difficulty,assignee_mode,status,created_at,updated_at) VALUES('bounty','project','keep me','C','any','DRAFT','old','old'); INSERT INTO bounty_events(bounty_id,event_type,actor,to_status,created_at) VALUES('bounty','created','human','DRAFT','old');").unwrap();
-    conn
-}
-
-#[test]
-fn v1_upgrade_preserves_projects_bounties_and_events_and_rolls_back_failure() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("v1.db");
-    let conn = create_v1(&path);
-    let repo = Repository::open(&path).unwrap();
-    assert_eq!(repo.get_project("project").unwrap().name, "existing");
-    let detail = repo.get_bounty_detail("bounty").unwrap();
-    assert_eq!(detail.bounty.title, "keep me");
-    assert_eq!(detail.events.len(), 1);
-    let fresh = Connection::open(dir.path().join("fresh.db")).unwrap();
-    // 对比实际新建与升级后的表、索引定义，防止两条迁移路径随维护发生漂移。
-    drop(Repository::open(dir.path().join("fresh.db")).unwrap());
-    let schema = |conn: &Connection| {
-        let mut stmt = conn.prepare("SELECT name,sql FROM sqlite_master WHERE type IN ('table','index') AND name NOT LIKE 'sqlite_%' ORDER BY name").unwrap();
-        stmt.query_map([], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
-        })
-        .unwrap()
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .unwrap()
-    };
-    // schema_migrations 的定义由既有 v1 建库决定，只比较业务对象。
-    let business = |conn: &Connection| {
-        schema(conn)
-            .into_iter()
-            .filter(|(name, _)| name != "schema_migrations")
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(business(&fresh), business(&conn));
-    fresh.close().unwrap();
-    assert!(!repo.onboarding(None).unwrap().lan_open_registration);
-    assert_eq!(
-        conn.query_row(
-            "SELECT group_concat(version) FROM schema_migrations",
-            [],
-            |r| r.get::<_, String>(0)
-        )
-        .unwrap(),
-        "1,2,3,4,5,6,7,8,9"
-    );
-    repo.onboarding(Some(UpdateOnboarding {
-        lan_open_registration: true,
-    }))
-    .unwrap();
-    let repo = Repository::open(&path).unwrap();
-    assert!(repo.onboarding(None).unwrap().lan_open_registration);
-
-    let broken_path = dir.path().join("conflict.db");
-    let broken = create_v1(&broken_path);
-    broken
-        .execute("CREATE TABLE agents(conflict TEXT)", [])
-        .unwrap();
-    assert!(Repository::open(&broken_path).is_err());
-    assert_eq!(
-        broken
-            .query_row("SELECT MAX(version) FROM schema_migrations", [], |r| r
-                .get::<_, i64>(0))
-            .unwrap(),
-        1
-    );
-    assert_eq!(
-        broken
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE name='server_settings'",
-                [],
-                |r| r.get::<_, i64>(0)
-            )
-            .unwrap(),
-        0
-    );
-    assert_eq!(
-        broken
-            .query_row("SELECT title FROM bounties", [], |r| r.get::<_, String>(0))
-            .unwrap(),
-        "keep me"
-    );
-}
-
 #[test]
 fn registration_persists_only_hashes_and_failed_registration_does_not_consume_invites() {
     let dir = tempfile::tempdir().unwrap();

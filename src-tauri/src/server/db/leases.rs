@@ -231,10 +231,9 @@ fn claimable(bounty: &Bounty) -> Result<()> {
     Ok(())
 }
 
-/// 旧仓储入口允许未注册身份；HTTP 入口必须先在同一事务内完成 active_agent 与准入检查。
-/// 新认领独立计算打回预算，并清除旧交付与仲裁状态，兼容旧数据中尚未清理的重开任务。
-pub(super) fn claim(tx: &Transaction<'_>, bounty: &Bounty, agent_id: &str) -> Result<Bounty> {
-    claimable(bounty)?;
+/// 调用方须在同一写事务内完成身份、可接取状态、准入和仲裁回避检查。
+/// 每轮认领独立计时并计算打回预算，清除上一轮交付与仲裁状态。
+fn claim(tx: &Transaction<'_>, bounty: &Bounty, agent_id: &str) -> Result<Bounty> {
     let timestamp = now();
     let changed = tx.execute("UPDATE bounties SET status='IN_PROGRESS',active_duration_ms=0,active_started_at=?4,lease_id=lease_id+1,lease_agent_id=?2,lease_expires_at=?3,lease_warned_id=0,assignment_expires_at=NULL,rejection_count=0,completion_note=NULL,completion_cost=NULL,arbitrator_agent_id=NULL,arbitration_expires_at=NULL,arbitration_tried_ids_json='[]',updated_at=?4 WHERE id=?1 AND status='OPEN' AND lease_agent_id IS NULL AND lease_id=?5", params![bounty.id,agent_id,deadline(),timestamp,bounty.lease_id])?;
     if changed != 1 {
@@ -315,22 +314,20 @@ fn reopen(tx: &Transaction<'_>, bounty: &Bounty, timestamp: &str) -> Result<Boun
 }
 
 fn incident(tx: &Transaction<'_>, bounty: &Bounty, kind: &str, timestamp: &str) -> Result<()> {
-    // 兼容旧仓储接口签发给未注册身份的租约；实际 Agent 租约始终存在对应名录记录。
-    let Some(agent_id) = bounty.lease_agent_id.as_deref() else {
-        return Ok(());
-    };
+    let agent_id = bounty
+        .lease_agent_id
+        .as_deref()
+        .ok_or_else(|| ApiError::internal("执行租约缺少 Agent 身份"))?;
     let column = if kind == "timeout" {
         "timeout_count"
     } else {
         "abandon_count"
     };
-    let changed = tx.execute(
+    tx.execute(
         &format!("UPDATE agents SET {column}={column}+1,updated_at=?2 WHERE id=?1"),
         params![agent_id, timestamp],
     )?;
-    if changed == 1 {
-        tx.execute("INSERT INTO lease_incidents(bounty_id,agent_id,lease_id,kind,created_at) VALUES(?1,?2,?3,?4,?5)", params![bounty.id,agent_id,bounty.lease_id,kind,timestamp])?;
-    }
+    tx.execute("INSERT INTO lease_incidents(bounty_id,agent_id,lease_id,kind,created_at) VALUES(?1,?2,?3,?4,?5)", params![bounty.id,agent_id,bounty.lease_id,kind,timestamp])?;
     Ok(())
 }
 

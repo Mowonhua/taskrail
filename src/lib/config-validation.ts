@@ -83,12 +83,14 @@ function validateCustomThemes(value: unknown): ThemeDefinition[] {
   });
 }
 
+// 旧布尔缩进只在配置加载边界转换为字符数。
 function validateParagraphIndent(value: unknown, fallback: number): number {
   if (value === undefined) return fallback;
   if (typeof value === 'boolean') return value ? 2 : 0;
   return finiteNumberInRange(value, 0, 4, fallback);
 }
 
+// 同一偏好含两种字段时优先保留非默认值，转换结果只保留规范字段。
 function validateLocalePreference(value: Record<string, unknown>): LocalePreference {
   const hasLocale = value.locale !== undefined;
   const hasLanguage = value.language !== undefined;
@@ -100,7 +102,7 @@ function validateLocalePreference(value: Record<string, unknown>): LocalePrefere
   }
   const localeVal = value.locale as LocalePreference | undefined;
   const languageVal = value.language as LocalePreference | undefined;
-  const fallback = defaultPreferences.locale ?? 'zh-CN';
+  const fallback = defaultPreferences.locale;
   if (localeVal !== undefined && languageVal !== undefined) {
     if (localeVal !== fallback) return localeVal;
     if (languageVal !== fallback) return languageVal;
@@ -138,7 +140,7 @@ function validateSidebarOpen(value: Record<string, unknown>): boolean {
   }
   if (openVal !== undefined) return openVal;
   if (collapsedVal !== undefined) return !collapsedVal;
-  return defaultPreferences.sidebarOpen ?? true;
+  return defaultPreferences.sidebarOpen;
 }
 
 export function validatePreferences(value: unknown, customThemes: ThemeDefinition[] = []): Preferences {
@@ -202,7 +204,6 @@ export function validatePreferences(value: unknown, customThemes: ThemeDefinitio
 
   return {
     locale,
-    language: locale,
     theme: theme as ThemeMode,
     themeId,
     keepTransparentOnBlur: booleanOrDefault(
@@ -212,10 +213,8 @@ export function validatePreferences(value: unknown, customThemes: ThemeDefinitio
     fontFamily: validateFontFamily(value.fontFamily),
     fontSize: finiteNumberInRange(value.fontSize, 13, 22, defaultPreferences.fontSize),
     contentWidth,
-    lineWidth: contentWidth,
     paragraphIndent,
     sidebarOpen,
-    sidebarCollapsed: !sidebarOpen,
     workspaceSection: workspaceSectionValue as WorkspaceSection,
     ...(defaultProjectIcon !== undefined ? { defaultProjectIcon } : {}),
     serviceMode: serviceModeValue as ServiceMode,

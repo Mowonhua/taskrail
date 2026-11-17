@@ -61,15 +61,14 @@ export function compareVersions(left, right) {
 
 /**
  * 函数职责：确定一个版本必须发布的产物名称与资源集合。
- * 输出说明：旧版本不含 APK；v0.7.1（含预发布）起必须提供 arm64 APK，非法 SemVer 抛错。names 仅列出参与摘要计算的文件，不包含 SHA256SUMS 本身。
- * 实现思路：保留旧标签重建能力；资源准备与校验必须采用同一兼容边界。
+ * 输出说明：必须提供同版本 arm64 APK，非法 SemVer 抛错。names 仅列出参与摘要计算的文件，不包含 SHA256SUMS 本身。
  */
 export function releaseArtifacts(version) {
   parseVersion(version);
   const installerName = `Taskrail_${version}_x64-setup.exe`;
   const signatureName = `${installerName}.sig`;
-  const apkName = compareVersions(version, '0.7.1-0') >= 0 ? `Taskrail-${version}-arm64.apk` : null;
-  return { installerName, signatureName, apkName, names: [installerName, signatureName, 'latest.json', ...(apkName ? [apkName] : [])] };
+  const apkName = `Taskrail-${version}-arm64.apk`;
+  return { installerName, signatureName, apkName, names: [installerName, signatureName, 'latest.json', apkName] };
 }
 
 /**
@@ -98,7 +97,7 @@ export function createUpdateManifest({ repository, version, installerName, signa
 
 /**
  * 函数职责：验证下载到的发布资源能组成完整且一致的更新包。
- * 输入说明：files 为资源名到 Buffer 的映射，必须包含 Windows 安装包、签名、latest.json 和 SHA256SUMS；v0.7.1（含预发布）起还必须包含同版本 arm64 APK。
+ * 输入说明：files 为资源名到 Buffer 的映射，必须包含 Windows 安装包、签名、同版本 arm64 APK、latest.json 和 SHA256SUMS。
  * 输出说明：返回已验证清单；缺失、重名、摘要不符或清单指向其他版本时抛错。
  */
 export function verifyReleaseFiles(files, repository, version) {

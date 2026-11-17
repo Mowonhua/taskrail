@@ -148,7 +148,7 @@ fn calculate(
 
 /// 函数职责：在调用方状态流转的写事务内更新隐藏分、段位、统计并插入单场流水。
 /// 输入说明：bounty 必须保留本轮执行者、令牌及最终计时/成本/验收快照；失败回收清空前调用。
-/// 约束条件：调用方先校验状态和 fencing，确保每轮只结算一次；不存在的历史执行者直接跳过。
+/// 约束条件：调用方先校验状态和 fencing，确保每轮只结算一次；执行者必须存在于名录。
 /// 输出说明：不产生公开事件；任一步失败由外层事务连同任务状态一起回滚。
 pub(super) fn settle(
     tx: &Transaction<'_>,
@@ -157,17 +157,23 @@ pub(super) fn settle(
     arbitrated: bool,
     timestamp: &str,
 ) -> Result<()> {
-    let Some(agent_id) = bounty.lease_agent_id.as_deref() else {
-        return Ok(());
-    };
+    let agent_id = bounty
+        .lease_agent_id
+        .as_deref()
+        .ok_or_else(|| ApiError::internal("执行租约缺少 Agent 身份"))?;
     let state = tx.query_row(
         "SELECT mmr,tier,settled_count,verified_as_wins,verified_s_wins FROM agents WHERE id=?1",
         [agent_id],
-        |r| Ok(RatingState { mmr: r.get(0)?, tier: enum_value(r, 1)?, settled_count: r.get(2)?, verified_as_wins: r.get(3)?, verified_s_wins: r.get(4)? }),
-    ).optional()?;
-    let Some(state) = state else {
-        return Ok(());
-    };
+        |r| {
+            Ok(RatingState {
+                mmr: r.get(0)?,
+                tier: enum_value(r, 1)?,
+                settled_count: r.get(2)?,
+                verified_as_wins: r.get(3)?,
+                verified_s_wins: r.get(4)?,
+            })
+        },
+    )?;
     let entry = calculate(bounty, agent_id, &state, outcome, arbitrated, timestamp);
     let completed = outcome == RatingOutcome::Completed;
     let verified = completed && arbitrated;

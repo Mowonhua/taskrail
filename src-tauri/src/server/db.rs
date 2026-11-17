@@ -1,4 +1,4 @@
-//! 文件职责：SQLite 迁移、项目存储与悬赏状态机；所有写入由仓储维护不变量。
+//! 文件职责：SQLite 初始化、项目存储与悬赏状态机；所有写入由仓储维护不变量。
 use super::{
     error::{ApiError, Result},
     models::*,
@@ -36,7 +36,7 @@ const BOUNTY_COLUMNS: &str = "b.id,b.project_id,b.title,b.description,b.acceptan
 const BOUNTY_SOURCE: &str = "bounties b LEFT JOIN agents a ON a.id=b.created_by_agent_id LEFT JOIN agents la ON la.id=b.lease_agent_id LEFT JOIN agents aa ON aa.id=b.assignee_agent_id LEFT JOIN agents ar ON ar.id=b.arbitrator_agent_id LEFT JOIN agents dc ON dc.id=b.draft_collaborator_agent_id";
 
 impl Repository {
-    /// 函数职责：初始化文件、连接参数和版本化迁移；重复打开不重置数据。
+    /// 函数职责：原子初始化当前表、索引与默认配置；重复打开不覆盖已有数据与配置。
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         if path.as_os_str().is_empty() || path == Path::new(":memory:") {
@@ -53,53 +53,7 @@ impl Repository {
         let mut conn = repo.connect()?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        tx.execute_batch("CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);")?;
-        let version: i64 = tx.query_row(
-            "SELECT COALESCE(MAX(version),0) FROM schema_migrations",
-            [],
-            |r| r.get(0),
-        )?;
-        if version > 9 {
-            return Err(ApiError::internal("数据库版本高于当前服务支持版本"));
-        }
-        if version == 0 {
-            tx.execute_batch(include_str!("schema.sql"))?;
-            tx.execute(
-                "INSERT INTO schema_migrations(version,applied_at) VALUES(9,?1)",
-                [now()],
-            )?;
-        } else {
-            // 所有补齐步骤与版本记录共用一个写事务，后续步骤失败也回滚先前迁移。
-            for (target, schema) in [
-                (2, include_str!("schema_v2.sql")),
-                (3, include_str!("schema_v3.sql")),
-                (4, include_str!("schema_v4.sql")),
-                (5, include_str!("schema_v5.sql")),
-                (6, include_str!("schema_v6.sql")),
-                (7, include_str!("schema_v7.sql")),
-                (8, include_str!("schema_v8.sql")),
-                (9, include_str!("schema_v9.sql")),
-            ] {
-                if version < target {
-                    tx.execute_batch(schema)?;
-                    if target == 5 {
-                        // 旧库的待接定向任务从升级时起获得完整响应窗口；复用租约格式，保证回收查询可按字符串比较时间。
-                        tx.execute(
-                            "UPDATE bounties SET assignment_expires_at=?1 WHERE status='OPEN' AND assignee_mode='specific' AND assignment_expires_at IS NULL",
-                            [leases::deadline()],
-                        )?;
-                    }
-                    if target == 6 {
-                        // 旧版没有分段起点，从迁移时开始计时，避免把历史等待时间计为执行耗时。
-                        tx.execute("UPDATE bounties SET active_started_at=?1 WHERE status='IN_PROGRESS' AND active_started_at IS NULL", [now()])?;
-                    }
-                    tx.execute(
-                        "INSERT INTO schema_migrations(version,applied_at) VALUES(?1,?2)",
-                        params![target, now()],
-                    )?;
-                }
-            }
-        }
+        tx.execute_batch(include_str!("schema.sql"))?;
         tx.commit()?;
         Ok(repo)
     }
@@ -301,15 +255,6 @@ impl Repository {
     pub fn cancel_bounty(&self, id: &str, actor: &str) -> Result<Bounty> {
         self.transition(id, actor, Transition::Cancel)
     }
-    /// 函数职责：原子接取 OPEN 悬赏并签发递增令牌和十五分钟租约。
-    /// 约束条件：兼容允许未注册身份的仓储调用；HTTP 必须使用复核身份及准入的 agent_claim_bounty。
-    pub fn try_claim_bounty(&self, id: &str, agent_id: &str) -> Result<Bounty> {
-        if agent_id.trim().is_empty() {
-            return Err(ApiError::invalid("agent_id 不能为空"));
-        }
-        self.write(|tx| leases::claim(tx, &find_bounty(tx, id)?, agent_id))
-    }
-
     fn transition(&self, id: &str, actor: &str, action: Transition) -> Result<Bounty> {
         self.write(|tx| {
             let b = find_bounty(tx,id)?;
@@ -639,131 +584,28 @@ mod tests {
     }
 
     #[test]
-    fn future_schema_is_rejected_without_modification() {
+    fn initialization_failure_rolls_back_schema() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("taskrail.db");
-        Repository::open(&path).unwrap();
+        let path = dir.path().join("conflict.db");
         let conn = Connection::open(&path).unwrap();
-        conn.execute(
-            "INSERT INTO schema_migrations(version,applied_at) VALUES(10,'future')",
-            [],
-        )
-        .unwrap();
-        assert_eq!(Repository::open(&path).unwrap_err().code, "INTERNAL_ERROR");
-        assert_eq!(
-            conn.query_row("SELECT MAX(version) FROM schema_migrations", [], |r| r
-                .get::<_, i64>(0))
-                .unwrap(),
-            10
-        );
-    }
-
-    fn legacy_v5(path: &Path) -> Connection {
-        let conn = Connection::open(path).unwrap();
-        conn.execute_batch(include_str!("../../tests/fixtures/server_v1.sql"))
-            .unwrap();
-        for schema in [
-            include_str!("schema_v2.sql"),
-            include_str!("schema_v3.sql"),
-            include_str!("schema_v4.sql"),
-            include_str!("schema_v5.sql"),
-        ] {
-            conn.execute_batch(schema).unwrap();
-        }
-        conn.execute_batch("CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY,applied_at TEXT NOT NULL); INSERT INTO schema_migrations VALUES(5,'old'); INSERT INTO projects(id,name,created_at,updated_at) VALUES('p','project','old','old'); INSERT INTO bounties(id,project_id,title,difficulty,assignee_mode,status,created_at,updated_at,published_at,lease_id,lease_agent_id) VALUES('b','p','legacy','C','any','IN_PROGRESS','old','old','old',42,'legacy-worker'); INSERT INTO bounty_events(bounty_id,event_type,actor,to_status,created_at) VALUES('b','created','human','IN_PROGRESS','old');").unwrap();
-        conn
-    }
-
-    #[test]
-    fn v5_to_v6_migration_initializes_timer_and_comments_and_is_idempotent() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("v5.db");
-        let conn = legacy_v5(&path);
-        let before = Utc::now();
-        let repo = Repository::open(&path).unwrap();
-        let detail = repo.get_bounty_detail("b").unwrap();
-        assert_eq!(detail.bounty.title, "legacy");
-        assert_eq!(detail.bounty.lease_id, 42);
-        assert_eq!(detail.bounty.active_duration_ms, 0);
-        assert_eq!(detail.bounty.comment_count, 0);
-        let start = chrono::DateTime::parse_from_rfc3339(
-            detail.bounty.active_started_at.as_deref().unwrap(),
-        )
-        .unwrap()
-        .with_timezone(&Utc);
-        assert!(start.timestamp_millis() >= before.timestamp_millis());
-        assert!(start <= Utc::now());
-        assert_eq!(detail.events.len(), 1);
-        assert!(detail.comments.is_empty());
-        assert_eq!(
-            conn.query_row("SELECT MAX(version) FROM schema_migrations", [], |r| r
-                .get::<_, i64>(0))
-                .unwrap(),
-            9
-        );
-        repo.create_bounty_comment(
-            "b",
-            CreateBountyComment {
-                body: "keep comment".into(),
-            },
-        )
-        .unwrap();
-        let reopened = Repository::open(&path)
-            .unwrap()
-            .get_bounty_detail("b")
-            .unwrap();
-        assert_eq!(
-            reopened.bounty.active_started_at,
-            detail.bounty.active_started_at
-        );
-        assert_eq!(reopened.comments.len(), 1);
-        assert_eq!(conn.query_row("SELECT COUNT(*) FROM pragma_index_info('bounty_comments_order') WHERE name IN ('bounty_id','id')",[],|r|r.get::<_,i64>(0)).unwrap(),2);
-        conn.pragma_update(None, "foreign_keys", "ON").unwrap();
-        for sql in [
-            "INSERT INTO bounty_comments(bounty_id,author_type,author_name,kind,body,created_at) VALUES('b','invalid','x','comment','x','now')",
-            "INSERT INTO bounty_comments(bounty_id,author_type,author_name,kind,body,created_at) VALUES('b','human','x','invalid','x','now')",
-            "INSERT INTO bounty_comments(bounty_id,author_type,author_name,kind,body,created_at) VALUES('missing','human','x','comment','x','now')",
-        ] { assert!(conn.execute(sql,[]).is_err()); }
-        conn.execute("DELETE FROM bounties WHERE id='b'", [])
-            .unwrap();
-        assert_eq!(
-            conn.query_row("SELECT COUNT(*) FROM bounty_comments", [], |r| r
-                .get::<_, i64>(0))
-                .unwrap(),
-            0
-        );
-    }
-
-    #[test]
-    fn v6_failure_rolls_back_ddl_timer_and_version_record() {
-        for failure in ["index", "timer", "version"] {
-            let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("broken.db");
-            let conn = legacy_v5(&path);
-            conn.execute_batch(match failure {
-                "index" => "CREATE TABLE bounty_comments_order(conflict TEXT);",
-                "timer" => "CREATE TRIGGER fail_timer BEFORE UPDATE ON bounties BEGIN SELECT RAISE(ABORT,'timer'); END;",
-                _ => "CREATE TRIGGER fail_version BEFORE INSERT ON schema_migrations WHEN NEW.version=6 BEGIN SELECT RAISE(ABORT,'version'); END;",
-            }).unwrap();
-            let snapshot = || {
-                conn.query_row("SELECT group_concat(sql,';') FROM (SELECT sql FROM sqlite_master ORDER BY name)",[],|r|r.get::<_,String>(0)).unwrap()
-            };
-            let before = snapshot();
+        // 让建库后段的索引引用缺失列，验证前面创建的表和默认配置也会整体回滚。
+        conn.execute_batch("CREATE TABLE bounty_dependencies(keep TEXT); INSERT INTO bounty_dependencies VALUES('preserved');").unwrap();
+        for _ in 0..2 {
             assert!(Repository::open(&path).is_err());
-            assert_eq!(snapshot(), before);
             assert_eq!(
-                conn.query_row("SELECT MAX(version) FROM schema_migrations", [], |r| r
-                    .get::<_, i64>(0))
-                    .unwrap(),
-                5
-            );
-            assert_eq!(conn.query_row("SELECT COUNT(*) FROM pragma_table_info('bounties') WHERE name IN ('active_duration_ms','active_started_at')",[],|r|r.get::<_,i64>(0)).unwrap(),0);
-            assert_eq!(
-                conn.query_row("SELECT updated_at FROM bounties WHERE id='b'", [], |r| {
-                    r.get::<_, String>(0)
-                })
+                conn.query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
                 .unwrap(),
-                "old"
+                1
+            );
+            assert_eq!(
+                conn.query_row("SELECT keep FROM bounty_dependencies", [], |r| r
+                    .get::<_, String>(0))
+                    .unwrap(),
+                "preserved"
             );
         }
     }

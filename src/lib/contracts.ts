@@ -18,12 +18,13 @@ export interface Project {
   archived?: boolean;
 }
 
-/** 结构职责：保存用户界面、主题、窗口材质与阅读排版偏好。 */
+/**
+ * 结构职责：保存用户界面、主题、窗口材质与阅读排版偏好。
+ * 约束条件：加载器负责转换旧字段，运行时与持久化只使用规范字段。
+ */
 export interface Preferences {
   /** 缺省保持简体中文；system 在启动与系统语言变化时解析为受支持语言。 */
-  locale?: LocalePreference;
-  /** 兼容旧版或别名持久化字段。 */
-  language?: LocalePreference;
+  locale: LocalePreference;
   theme: ThemeMode;
   themeId?: string;
   /** 仅桌面玻璃材质主题使用；缺省为 false，保留 Windows 失焦回落实色的默认行为。 */
@@ -31,13 +32,9 @@ export interface Preferences {
   fontFamily: string;
   fontSize: number;
   contentWidth: number;
-  /** 兼容读取/写回行宽别名字段。 */
-  lineWidth?: number;
-  /** 段首缩进字符数（0–4，0 表示关闭；兼容旧版布尔值）。 */
+  /** 段首缩进字符数（0–4，0 表示关闭）。 */
   paragraphIndent: number;
-  sidebarOpen?: boolean;
-  /** 兼容读取/写回侧栏折叠别名字段。 */
-  sidebarCollapsed?: boolean;
+  sidebarOpen: boolean;
   /** 启动或切换时激活的顶层工作台分区，缺省为悬赏板（bounties）。 */
   workspaceSection?: WorkspaceSection;
   /** 无关联项目时使用的默认项目图标（格式同 Project.icon）。 */

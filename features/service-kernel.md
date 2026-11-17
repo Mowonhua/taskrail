@@ -4,7 +4,7 @@
 
 ## F-SRV-001 同构服务内核与运行模式
 
-桌面应用启动回环临时端口的 `embedded` 内嵌服务并向前端提供会话随机密钥与连接信息；无头二进制 `taskrail-server` 通过命令行参数或环境变量以 `standalone` 模式运行同一内核。数据库启用版本迁移、WAL、外键与等待超时；除公开健康检查外，管理接口均校验管理员 Bearer token 并支持跨域预检。前端通过 `HttpBountyClient` 对接服务，在「设置 → 本地服务与连接」支持个人内嵌模式与团队远端模式的测试连接、配置持久化及运行时切换。
+桌面应用启动回环临时端口的 `embedded` 内嵌服务并向前端提供会话随机密钥与连接信息；无头二进制 `taskrail-server` 通过命令行参数或环境变量以 `standalone` 模式运行同一内核。数据库按当前结构初始化并启用 WAL、外键与等待超时；除公开健康检查外，管理接口均校验管理员 Bearer token 并支持跨域预检。前端通过 `HttpBountyClient` 对接服务，在「设置 → 本地服务与连接」支持个人内嵌模式与团队远端模式的测试连接、配置持久化及运行时切换。
 
 创建提交：fdaa8f2
 
@@ -21,13 +21,7 @@
 | 关键实现 | src-tauri/src/server/mod.rs::RunningServer |
 | 关键实现 | src-tauri/src/server/config.rs::parse_config |
 | 关键实现 | src-tauri/src/server/db.rs::Repository::open |
-| 关键实现 | src-tauri/src/server/schema_v3.sql::<module> |
-| 关键实现 | src-tauri/src/server/schema_v4.sql::<module> |
-| 关键实现 | src-tauri/src/server/schema_v5.sql::<module> |
-| 关键实现 | src-tauri/src/server/schema_v6.sql::<module> |
-| 关键实现 | src-tauri/src/server/schema_v7.sql::<module> |
-| 关键实现 | src-tauri/src/server/schema_v8.sql::<module> |
-| 关键实现 | src-tauri/src/server/schema_v9.sql::<module> |
+| 关键实现 | src-tauri/src/server/schema.sql::<module> |
 | 关键实现 | src-tauri/src/server/routes.rs::router |
 | 关键实现 | src-tauri/src/server/routes.rs::authorize |
 | 关键实现 | src-tauri/src/server/routes.rs::health |
@@ -44,10 +38,10 @@
 
 | 编号 | 类型 | 场景与预期 | 测试 |
 |---|---|---|---|
-| S-01 | 正常 | 首次打开数据库执行迁移，已有 v1/v2/v3/v4/v5/v6/v7/v8 库可原子升级至 v9（补充 `bounty_dependencies` 依赖表、草稿协作者/待人工审核/父单列及相关索引）并保留项目、悬赏、Agent 与事件历史（迁移失败完整回滚列、表、索引与版本号），重复打开保留已有数据；连接启用 WAL、外键约束和 5000ms busy timeout | src-tauri/tests/server_repository.rs::migrations_persist_and_project_crud_enforces_archive_and_references, src-tauri/tests/server_agent_repository.rs::v1_upgrade_preserves_projects_bounties_and_events_and_rolls_back_failure, src-tauri/tests/server_agent_events.rs::v2_migration_preserves_all_existing_tables_and_is_idempotent, src-tauri/tests/server_agent_events.rs::v3_migration_failure_rolls_back_columns_and_version, src-tauri/tests/server_agent_publishing.rs::v3_upgrade_preserves_data_identity_defaults_foreign_key_and_index, src-tauri/tests/server_agent_publishing.rs::v4_failure_rolls_back_all_prior_migrations_and_future_schema_is_untouched, src-tauri/tests/server_agent_leases.rs::v5_upgrade_preserves_v4_data_and_rolls_back_earlier_steps_on_failure, src-tauri/tests/server_agent_leases.rs::v4_open_specific_assignments_gain_deadlines_and_expire_after_upgrade, src-tauri/src/server/db.rs::tests::v5_to_v6_migration_initializes_timer_and_comments_and_is_idempotent, src-tauri/src/server/db.rs::tests::v6_failure_rolls_back_ddl_timer_and_version_record, src-tauri/tests/server_agent_arbitration.rs::v6_migration_is_atomic_and_preserves_history, src-tauri/tests/server_agent_rating.rs::v7_to_v8_is_atomic_idempotent_and_preserves_existing_rating_and_tasks, src-tauri/tests/server_agent_dependencies.rs::v8_to_v9_preserves_data_is_idempotent_and_rolls_back_ddl_and_version_on_failure, src-tauri/src/server/db.rs::tests::connections_enable_foreign_keys_wal_and_busy_timeout |
-| S-02 | 约束 | 高于当前内核支持版本的数据库拒绝打开，迁移版本号保持原值不被修改 | src-tauri/src/server/db.rs::tests::future_schema_is_rejected_without_modification, src-tauri/tests/server_agent_publishing.rs::v4_failure_rolls_back_all_prior_migrations_and_future_schema_is_untouched |
+| S-01 | 正常 | 空库通过 `schema.sql` 在同一事务内初始化完整结构和默认配置，失败时整体回滚；重复打开数据库保留项目、悬赏、Agent、配置与事件历史，不创建版本记录表；连接启用 WAL、外键约束和 5000ms busy timeout | src-tauri/tests/server_repository.rs::initialization_persists_and_project_crud_enforces_archive_and_references, src-tauri/tests/server_repository.rs::current_schema_enforces_comment_incident_arbitration_and_dependency_constraints, src-tauri/tests/server_agent_events.rs::event_storage_preserves_data_on_reopen_and_never_reuses_ids, src-tauri/tests/server_agent_publishing.rs::publisher_identity_defaults_and_references_survive_reopen, src-tauri/src/server/db.rs::tests::initialization_failure_rolls_back_schema, src-tauri/src/server/db.rs::tests::connections_enable_foreign_keys_wal_and_busy_timeout |
 | S-03 | 正常 | 无头入口支持 `--help`、缺少密钥以非零退出码结束；CLI 参数覆盖环境变量，缺省使用默认地址与数据库文件；重启保留数据并更换密钥后旧密钥失效 | src-tauri/tests/server_config.rs::cli_overrides_environment_and_preserves_paths, src-tauri/tests/server_config.rs::env_fallbacks_and_defaults_are_deterministic, src-tauri/tests/server_config.rs::invalid_or_ambiguous_config_is_rejected, src-tauri/tests/server_config.rs::binary_help_and_missing_token_exit_codes, src-tauri/tests/server_config.rs::binary_starts_with_environment_and_exposes_shared_kernel, src-tauri/tests/server_http.rs::server_restart_preserves_data_changes_token_and_releases_port |
 | S-04 | 约束 | `/api/v1/health` 公开访问；管理接口缺少或携带错误凭证返回 401 `UNAUTHORIZED`；跨域预检与 401 均携带 CORS 头；非法 JSON/参数返回 400 信封，存储失败返回 500 而不泄露 SQL 细节 | src-tauri/tests/server_http.rs::http_auth_cors_health_and_validation, src-tauri/tests/server_http.rs::server_restart_preserves_data_changes_token_and_releases_port |
 | S-05 | 正常 | 前端 `HttpBountyClient` 规范化 `http://`/`https://` 服务根地址、对健康检查省略鉴权头、为管理请求注入 Bearer token 并将错误信封解析为 `ServiceApiError`；可通过 `get_embedded_server_info` 获取内嵌连接信息 | src/lib/api/bounty-client.test.ts::normalizeServerUrl & fetchEmbeddedServerInfo > 校验并规范化 http/https 服务根地址\，去除首尾空白与末尾斜杠, src/lib/api/bounty-client.test.ts::normalizeServerUrl & fetchEmbeddedServerInfo > 通过 Tauri invoke 读取内嵌服务连接信息, src/lib/api/bounty-client.test.ts::HttpBountyClient > 规范化 baseUrl\，对健康检查省略 Bearer 头\，对其余路由注入 Bearer 头并编码查询参数, src/lib/api/bounty-client.test.ts::HttpBountyClient > 将服务错误信封解析为 ServiceApiError（401、409 抢单冲突与项目删除保护） |
 | S-06 | 正常 | 应用配置校验与持久化保留 `serviceMode`（`embedded`/`remote`）、规范化 `remoteServerUrl` 与 `remoteAdminToken`，并拒绝非 `http`/`https` 协议或非法模式值 | src/lib/config-validation.test.ts::应用配置校验 > 校验悬赏服务连接模式、远程服务地址与管理员令牌 |
 | S-07 | 正常 | 设置页切换团队远端模式可测试连接、保存并重连且重载远端项目与悬赏，也可切回个人内嵌模式；配置持久化失败时回滚配置并阻止重连；初始连接失败时不阻塞窗口就绪并展示可重试横幅 | src/lib/session/app-integration.test.ts::悬赏板工作台外壳集成测试 > 支持切换团队远端模式、测试连接、持久化远端配置并从远端服务重载项目与悬赏, src/lib/session/app-integration.test.ts::悬赏板工作台外壳集成测试 > 初始服务连接失败时不阻塞窗口就绪（onready）\，并展示可重试的非阻塞连接错误横幅, src/lib/session/app-integration.test.ts::悬赏板工作台外壳集成测试 > 配置保存失败时不连接远端服务、回滚配置变更并展示错误反馈\，绝不显示成功提示, src/lib/session/app-integration.test.ts::悬赏板工作台外壳集成测试 > 保存远端配置挂起期间并发导航保存不会将未确认的 remote 配置写入磁盘, src/lib/session/app-integration.test.ts::悬赏板工作台外壳集成测试 > 跨刷新请求乱序完成时保持最新连接状态\，慢速工作区刷新不覆盖搜索结果与错误横幅 |
+| S-08 | 约束 | 配置加载时将 `language`、`lineWidth`、`sidebarCollapsed` 转换为 `locale`、`contentWidth`、`sidebarOpen`；运行时、默认值和保存结果仅使用规范字段，旧布尔缩进在加载时转换为字符数，保存重载保持偏好 | src/lib/config-validation.test.ts::应用配置校验 > 加载旧别名后仅输出规范字段并可直接保存重载, src/lib/session/app-integration.test.ts::悬赏板工作台外壳集成测试 > 支持中英文语言切换与项目图标选择器交互 |

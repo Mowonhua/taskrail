@@ -302,7 +302,10 @@ describe('createMemoryBountyClient', () => {
       created_at: '2026-11-16T10:00:00.000Z',
       updated_at: '2026-11-16T10:00:00.000Z',
     };
-    const client = createMemoryBountyClient({ projects: [seedProject] });
+    const client = createMemoryBountyClient({ projects: [seedProject], lan_open_registration: true });
+
+    const worker = await client.registerAgent({ name: 'worker' });
+    const other = await client.registerAgent({ name: 'other' });
 
     const draft = await client.createBounty({
       project_id: 'proj-seed',
@@ -333,7 +336,7 @@ describe('createMemoryBountyClient', () => {
       client.updateBounty(draft.id, {
         title: 'Should Rollback',
         assignee_mode: 'specific',
-        assignee_agent_id: 'agent-7',
+        assignee_agent_id: worker.agent.id,
         // 未清空 assignee_min_tier 导致冲突
       }),
     ).rejects.toMatchObject({ code: 'VALIDATION_ERROR', status: 400 });
@@ -343,12 +346,12 @@ describe('createMemoryBountyClient', () => {
       title: 'Edited Draft',
       assignee_mode: 'specific',
       assignee_min_tier: null,
-      assignee_agent_id: 'agent-7',
+      assignee_agent_id: worker.agent.id,
       require_arbitration: true,
     });
     expect(edited.assignee_mode).toBe('specific');
     expect(edited.assignee_min_tier).toBeNull();
-    expect(edited.assignee_agent_id).toBe('agent-7');
+    expect(edited.assignee_agent_id).toBe(worker.agent.id);
     expect(edited.require_arbitration).toBe(true);
 
     const published = await client.publishBounty(draft.id);
@@ -367,10 +370,10 @@ describe('createMemoryBountyClient', () => {
     expect(withdrawn.published_at).toBe(published.published_at);
 
     await client.publishBounty(draft.id);
-    const claimed = await client.simulateClaim(draft.id, 'agent-7');
+    const claimed = await client.agentClaimBounty(worker.api_key, draft.id);
     expect(claimed.status).toBe('IN_PROGRESS');
     expect(claimed.lease_id).toBe(1);
-    expect(claimed.lease_agent_id).toBe('agent-7');
+    expect(claimed.lease_agent_id).toBe(worker.agent.id);
     expect(claimed.lease_expires_at).not.toBeNull();
 
     // 抢单成功后撤回或重复抢单必须拒绝
@@ -378,7 +381,7 @@ describe('createMemoryBountyClient', () => {
       code: 'BOUNTY_ALREADY_CLAIMED',
       status: 409,
     });
-    await expect(client.simulateClaim(draft.id, 'agent-8')).rejects.toMatchObject({
+    await expect(client.agentClaimBounty(other.api_key, draft.id)).rejects.toMatchObject({
       code: 'BOUNTY_ALREADY_CLAIMED',
       status: 409,
     });
@@ -390,7 +393,7 @@ describe('createMemoryBountyClient', () => {
       'published:human:DRAFT->OPEN',
       'withdrawn:human:OPEN->DRAFT',
       'published:human:DRAFT->OPEN',
-      'claimed:agent:agent-7:OPEN->IN_PROGRESS',
+      `claimed:agent:${worker.agent.id}:OPEN->IN_PROGRESS`,
     ]);
   });
 
@@ -718,7 +721,7 @@ describe('createMemoryBountyClient (Issue 03 Agent 准入、订阅与隔离)', (
     expect(listedProjects.map(p => p.id)).toEqual([p1.id, p2.id]);
     expect(listedProjects.map(p => p.name)).toEqual(['P1', 'P2']);
 
-    // 模拟持有租约使名录识别为 busy
+    // 领取任务后名录将持有租约的 Agent 识别为 busy
     const openBounty = await client.createBounty({
       project_id: p1.id,
       title: 'Claimable',
@@ -726,7 +729,7 @@ describe('createMemoryBountyClient (Issue 03 Agent 准入、订阅与隔离)', (
       assignee_mode: 'any',
       status: 'OPEN',
     });
-    await client.simulateClaim(openBounty.id, agent.id);
+    await client.agentClaimBounty(apiKey, openBounty.id);
     expect((await client.listAgents({ activity: 'busy' })).map(a => a.id)).toEqual([agent.id]);
     expect(await client.listAgents({ activity: 'idle' })).toEqual([]);
 
@@ -3233,62 +3236,57 @@ describe('Issue 08 仲裁顺位配置、裁判回避与仲裁验收闭环', () =
       expect(firstRejectExpiryB.status).toBe('IN_PROGRESS');
       expect(firstRejectExpiryB.rejection_count).toBe(1);
 
-      // 场景 3：A 被打回 3 次并携带新交付说明/成本提交后，管理员释放租约，B 通过 simulateClaim 与 agentClaimBounty 接单均不继承旧交付信息与计数
-      for (const claimMode of ['agent', 'simulate'] as const) {
-        const releasedTask = await client.createBounty({
-          project_id: project.id,
-          title: `管理员释放清零交付字段-${claimMode}`,
-          difficulty: 'B',
-          require_arbitration: true,
-          assignee_mode: 'any',
-          status: 'OPEN',
-        });
-        let claimA = await client.agentClaimBounty(workerA.api_key, releasedTask.id);
-        for (let round = 1; round <= 3; round += 1) {
-          await client.agentSubmitArbitration(workerA.api_key, releasedTask.id, {
-            lease_id: claimA.lease_id,
-            completion_note: `Round ${round}`,
-            completion_cost: round,
-          });
-          claimA = await client.agentRejectArbitration(judge1.api_key, releasedTask.id, {
-            comment: `Reject ${round}`,
-          });
-        }
+      // 场景 3：A 被打回 3 次并携带新交付说明/成本提交后，管理员释放租约，B 重新接单后不继承旧交付信息与计数
+      const releasedTask = await client.createBounty({
+        project_id: project.id,
+        title: '管理员释放清零交付字段',
+        difficulty: 'B',
+        require_arbitration: true,
+        assignee_mode: 'any',
+        status: 'OPEN',
+      });
+      let claimA = await client.agentClaimBounty(workerA.api_key, releasedTask.id);
+      for (let round = 1; round <= 3; round += 1) {
         await client.agentSubmitArbitration(workerA.api_key, releasedTask.id, {
           lease_id: claimA.lease_id,
-          completion_note: 'DELIVERY_FROM_A',
-          completion_cost: 42,
+          completion_note: `Round ${round}`,
+          completion_cost: round,
         });
-
-        const released = await client.releaseLease(releasedTask.id);
-        expect(released.status).toBe('OPEN');
-        expect(released.rejection_count).toBe(0);
-        expect(released.completion_note).toBeNull();
-        expect(released.completion_cost).toBeNull();
-        expect(released.arbitrator_agent_id).toBeNull();
-        expect(released.arbitration_expires_at).toBeNull();
-
-        const claimedB =
-          claimMode === 'agent'
-            ? await client.agentClaimBounty(workerB.api_key, releasedTask.id)
-            : await client.simulateClaim(releasedTask.id, workerB.agent.id);
-        expect(claimedB.status).toBe('IN_PROGRESS');
-        expect(claimedB.rejection_count).toBe(0);
-        expect(claimedB.completion_note).toBeNull();
-        expect(claimedB.completion_cost).toBeNull();
-        expect(claimedB.arbitrator_agent_id).toBeNull();
-
-        await client.agentSubmitArbitration(workerB.api_key, releasedTask.id, {
-          lease_id: claimedB.lease_id,
-          completion_note: 'DELIVERY_FROM_B',
-          completion_cost: 7,
+        claimA = await client.agentRejectArbitration(judge1.api_key, releasedTask.id, {
+          comment: `Reject ${round}`,
         });
-        const firstRejectB = await client.agentRejectArbitration(judge1.api_key, releasedTask.id, {
-          comment: 'B 释放后首次打回',
-        });
-        expect(firstRejectB.status).toBe('IN_PROGRESS');
-        expect(firstRejectB.rejection_count).toBe(1);
       }
+      await client.agentSubmitArbitration(workerA.api_key, releasedTask.id, {
+        lease_id: claimA.lease_id,
+        completion_note: 'DELIVERY_FROM_A',
+        completion_cost: 42,
+      });
+
+      const released = await client.releaseLease(releasedTask.id);
+      expect(released.status).toBe('OPEN');
+      expect(released.rejection_count).toBe(0);
+      expect(released.completion_note).toBeNull();
+      expect(released.completion_cost).toBeNull();
+      expect(released.arbitrator_agent_id).toBeNull();
+      expect(released.arbitration_expires_at).toBeNull();
+
+      const claimedB = await client.agentClaimBounty(workerB.api_key, releasedTask.id);
+      expect(claimedB.status).toBe('IN_PROGRESS');
+      expect(claimedB.rejection_count).toBe(0);
+      expect(claimedB.completion_note).toBeNull();
+      expect(claimedB.completion_cost).toBeNull();
+      expect(claimedB.arbitrator_agent_id).toBeNull();
+
+      await client.agentSubmitArbitration(workerB.api_key, releasedTask.id, {
+        lease_id: claimedB.lease_id,
+        completion_note: 'DELIVERY_FROM_B',
+        completion_cost: 7,
+      });
+      const firstRejectB = await client.agentRejectArbitration(judge1.api_key, releasedTask.id, {
+        comment: 'B 释放后首次打回',
+      });
+      expect(firstRejectB.status).toBe('IN_PROGRESS');
+      expect(firstRejectB.rejection_count).toBe(1);
     } finally {
       vi.useRealTimers();
     }
@@ -4502,5 +4500,20 @@ describe('Issue 10 草稿受邀共创拆单与前置依赖自动解锁', () => {
     expect(JSON.parse(bodies[1])).toEqual({
       items: [{ title: 'Step', difficulty: 'C', assignee_mode: 'any' }],
     });
+  });
+});
+
+
+describe('评级执行者不变量', () => {
+  it('执行者缺失时拒绝仲裁结算并保留任务和评论', async () => {
+    const source = createMemoryBountyClient();
+    const project = await source.createProject({ name: 'rating' });
+    const bounty = await source.createBounty({ project_id: project.id, title: 'task', difficulty: 'C', assignee_mode: 'any', status: 'OPEN', require_arbitration: true });
+    for (const owner of [null, 'missing-agent']) {
+      const client = createMemoryBountyClient({ projects: [project], bounties: [{ ...bounty, status: 'PENDING_ARBITRATION', lease_id: 1, lease_agent_id: owner }] });
+      const before = await client.getBountyDetail(bounty.id);
+      await expect(client.approveArbitration(bounty.id, { comment: 'approved' })).rejects.toMatchObject({ code: 'INTERNAL_ERROR', status: 500 });
+      expect(await client.getBountyDetail(bounty.id)).toEqual(before);
+    }
   });
 });

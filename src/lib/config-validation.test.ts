@@ -5,6 +5,19 @@ import { validateAppConfig } from './config-validation';
 const validProject = { id: 'p1', name: '工作', path: 'D:/work.md' };
 
 describe('应用配置校验', () => {
+  it('加载旧别名后仅输出规范字段并可直接保存重载', () => {
+    const config = validateAppConfig({ projects: [], preferences: {
+      language: 'en', lineWidth: 680, sidebarCollapsed: true, paragraphIndent: true,
+    } });
+    expect(config?.preferences).toMatchObject({
+      locale: 'en', contentWidth: 680, sidebarOpen: false, paragraphIndent: 2,
+    });
+    for (const alias of ['language', 'lineWidth', 'sidebarCollapsed']) {
+      expect(config?.preferences).not.toHaveProperty(alias);
+    }
+    expect(validateAppConfig(JSON.parse(JSON.stringify(config)))).toEqual(config);
+  });
+
   it('空值保持未初始化状态，最小合法配置补齐默认偏好', () => {
     expect(validateAppConfig(null)).toBeNull();
     expect(validateAppConfig({ projects: [validProject], activeProjectId: 'p1' })).toEqual({
@@ -68,7 +81,7 @@ describe('应用配置校验', () => {
         projects: [],
         preferences: { keepTransparentOnBlur: true, language: 'en' },
       })?.preferences,
-    ).toMatchObject({ keepTransparentOnBlur: true, language: 'en' });
+    ).toMatchObject({ keepTransparentOnBlur: true, locale: 'en' });
     for (const keepTransparentOnBlur of ['true', 1, null, []]) {
       expect(() =>
         validateAppConfig({ projects: [], preferences: { keepTransparentOnBlur } }),
@@ -95,7 +108,7 @@ describe('应用配置校验', () => {
     }
   });
 
-  it('兼容旧版本 HEAD 的持久化字段（locale/contentWidth/paragraphIndent/sidebarOpen 与遗留顶层字段）', () => {
+  it('加载规范字段与旧布尔缩进并忽略遗留顶层字段', () => {
     const legacyConfig = validateAppConfig({
       projects: [validProject],
       activeProjectId: 'p1',
@@ -118,13 +131,10 @@ describe('应用配置校验', () => {
     expect(legacyConfig).not.toBeNull();
     expect(legacyConfig?.preferences).toMatchObject({
       locale: 'en',
-      language: 'en',
       theme: 'dark',
       contentWidth: 680,
-      lineWidth: 680,
       paragraphIndent: 3,
       sidebarOpen: false,
-      sidebarCollapsed: true,
       defaultProjectIcon: 'lucide:rocket',
     });
     expect(legacyConfig?.window).toEqual({

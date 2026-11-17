@@ -553,7 +553,7 @@ async fn onboarding_validation_subscriptions_and_directory_filters() {
     assert_eq!(all["project_ids"], json!([]));
     assert_eq!(all["subscribe_all_projects"], true);
     let repo = server::db::Repository::open(&running.info.db_path).unwrap();
-    repo.try_claim_bounty(&public_ids[1], id).unwrap();
+    repo.agent_claim_bounty(&public_ids[1], id).unwrap();
     let (_, busy) = request(
         &client,
         base,

@@ -400,7 +400,7 @@ async fn dispatch_targets_match_subscriptions_tiers_and_specific_assignment() {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(detail["bounty"], bounty);
         assert_public(&detail);
-        let claimed = f.repo.try_claim_bounty(id, targets[0]).unwrap();
+        let claimed = f.repo.agent_claim_bounty(id, targets[0]).unwrap();
         assert_eq!(claimed.status, BountyStatus::InProgress);
         assert_eq!(
             claimed.created_by_agent_id.as_ref(),
@@ -684,41 +684,18 @@ fn count(conn: &Connection, table: &str) -> i64 {
         .unwrap()
 }
 
-fn legacy(path: &std::path::Path, version: i64) -> Connection {
+fn populated_database(path: &std::path::Path) -> Connection {
+    Repository::open(path).unwrap();
     let conn = Connection::open(path).unwrap();
-    conn.execute_batch(include_str!("fixtures/server_v1.sql"))
-        .unwrap();
-    if version >= 2 {
-        conn.execute_batch(include_str!("../src/server/schema_v2.sql"))
-            .unwrap();
-    }
-    if version >= 3 {
-        conn.execute_batch(include_str!("../src/server/schema_v3.sql"))
-            .unwrap();
-    }
-    conn.execute_batch(
-        "CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY,applied_at TEXT NOT NULL);",
-    )
-    .unwrap();
-    for v in 1..=version {
-        conn.execute("INSERT INTO schema_migrations VALUES(?1,'old')", [v])
-            .unwrap();
-    }
-    conn.execute_batch("INSERT INTO projects(id,name,created_at,updated_at) VALUES('p','existing','old','old'); INSERT INTO bounties(id,project_id,title,difficulty,assignee_mode,status,created_at,updated_at) VALUES('b','p','existing','C','any','OPEN','old','old'); INSERT INTO bounty_events(bounty_id,event_type,actor,to_status,created_at) VALUES('b','created','human','OPEN','old');").unwrap();
-    if version >= 2 {
-        conn.execute_batch("INSERT INTO invite_tokens(id,token_hash,token_prefix,use_count,created_at) VALUES('i','invite-hash','prefix',2,'old'); INSERT INTO agents(id,name,api_key_hash,api_key_prefix,invite_token_id,created_at,updated_at) VALUES('a','existing','agent-hash','ag','i','old','old'); INSERT INTO agent_subscriptions VALUES('a','p','old');").unwrap();
-    }
-    if version >= 3 {
-        conn.execute_batch("UPDATE agents SET webhook_url='http://localhost/events',webhook_secret='secret',acked_event_id=1; INSERT INTO agent_events(agent_id,bounty_id,event_type,payload_json,created_at) VALUES('a','b','task.published','{}','old'); INSERT INTO bounty_dispatches VALUES('b','a','old');").unwrap();
-    }
+    conn.execute_batch("INSERT INTO projects(id,name,created_at,updated_at) VALUES('p','existing','old','old'); INSERT INTO bounties(id,project_id,title,difficulty,assignee_mode,status,created_at,updated_at) VALUES('b','p','existing','C','any','OPEN','old','old'); INSERT INTO bounty_events(bounty_id,event_type,actor,to_status,created_at) VALUES('b','created','human','OPEN','old'); INSERT INTO invite_tokens(id,token_hash,token_prefix,use_count,created_at) VALUES('i','invite-hash','prefix',2,'old'); INSERT INTO agents(id,name,api_key_hash,api_key_prefix,invite_token_id,created_at,updated_at) VALUES('a','existing','agent-hash','ag','i','old','old'); INSERT INTO agent_subscriptions VALUES('a','p','old'); UPDATE agents SET webhook_url='http://localhost/events',webhook_secret='secret',acked_event_id=1; INSERT INTO agent_events(agent_id,bounty_id,event_type,payload_json,created_at) VALUES('a','b','task.published','{}','old'); INSERT INTO bounty_dispatches VALUES('b','a','old');").unwrap();
     conn
 }
 
 #[test]
-fn v3_upgrade_preserves_data_identity_defaults_foreign_key_and_index() {
+fn publisher_identity_defaults_and_references_survive_reopen() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("v3.db");
-    let conn = legacy(&path, 3);
+    let path = dir.path().join("publishing.db");
+    let conn = populated_database(&path);
     for _ in 0..2 {
         let repo = Repository::open(&path).unwrap();
         let detail = repo.get_bounty_detail("b").unwrap();
@@ -744,15 +721,6 @@ fn v3_upgrade_preserves_data_identity_defaults_foreign_key_and_index() {
     }
     assert_eq!(
         conn.query_row(
-            "SELECT group_concat(version) FROM schema_migrations",
-            [],
-            |r| r.get::<_, String>(0)
-        )
-        .unwrap(),
-        "1,2,3,4,5,6,7,8,9"
-    );
-    assert_eq!(
-        conn.query_row(
             "SELECT webhook_secret,acked_event_id FROM agents",
             [],
             |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
@@ -775,63 +743,6 @@ fn v3_upgrade_preserves_data_identity_defaults_foreign_key_and_index() {
         .bounty;
     assert_eq!(b.created_by_agent_name.as_deref(), Some("existing"));
     assert_public(&serde_json::to_value(b).unwrap());
-}
-
-#[test]
-fn v4_failure_rolls_back_all_prior_migrations_and_future_schema_is_untouched() {
-    let dir = tempfile::tempdir().unwrap();
-    for version in [1, 2, 3] {
-        let path = dir.path().join(format!("broken-{version}.db"));
-        let conn = legacy(&path, version);
-        // 索引名与表名冲突使 v4 在新增列后失败，检验 DDL 与全部版本记录整体回滚。
-        conn.execute_batch("CREATE TABLE bounties_publisher_agent(conflict TEXT);")
-            .unwrap();
-        let before = conn
-            .query_row(
-                "SELECT group_concat(sql,';') FROM (SELECT sql FROM sqlite_master ORDER BY name)",
-                [],
-                |r| r.get::<_, String>(0),
-            )
-            .unwrap();
-        assert_eq!(Repository::open(&path).unwrap_err().code, "INTERNAL_ERROR");
-        assert_eq!(
-            conn.query_row("SELECT MAX(version) FROM schema_migrations", [], |r| r
-                .get::<_, i64>(0))
-                .unwrap(),
-            version
-        );
-        let after = conn
-            .query_row(
-                "SELECT group_concat(sql,';') FROM (SELECT sql FROM sqlite_master ORDER BY name)",
-                [],
-                |r| r.get::<_, String>(0),
-            )
-            .unwrap();
-        assert_eq!(before, after);
-        assert_eq!(count(&conn, "bounties"), 1);
-        conn.execute_batch("DROP TABLE bounties_publisher_agent;")
-            .unwrap();
-        assert!(Repository::open(&path)
-            .unwrap()
-            .get_bounty_detail("b")
-            .unwrap()
-            .bounty
-            .created_by_agent_id
-            .is_none());
-    }
-    let path = dir.path().join("future.db");
-    Repository::open(&path).unwrap();
-    let conn = Connection::open(&path).unwrap();
-    conn.execute("INSERT INTO schema_migrations VALUES(10,'future')", [])
-        .unwrap();
-    assert_eq!(Repository::open(&path).unwrap_err().code, "INTERNAL_ERROR");
-    assert_eq!(
-        conn.query_row("SELECT MAX(version) FROM schema_migrations", [], |r| r
-            .get::<_, i64>(0))
-            .unwrap(),
-        10
-    );
-    assert_eq!(count(&conn, "schema_migrations"), 2);
 }
 
 #[tokio::test]

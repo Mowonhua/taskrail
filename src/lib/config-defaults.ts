@@ -10,17 +10,14 @@ export const defaultThemeId = builtInThemes[0].id;
 
 export const defaultPreferences: Preferences = {
   locale: 'zh-CN',
-  language: 'zh-CN',
   theme: 'system',
   themeId: defaultThemeId,
   keepTransparentOnBlur: false,
   fontFamily: DEFAULT_FONT_STACK,
   fontSize: 16,
   contentWidth: 800,
-  lineWidth: 800,
   paragraphIndent: 2,
   sidebarOpen: true,
-  sidebarCollapsed: false,
   workspaceSection: 'bounties',
   serviceMode: 'embedded',
   autoCheckUpdates: true,

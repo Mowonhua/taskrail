@@ -137,7 +137,7 @@
 | 主入口 | src-tauri/src/server/push.rs::dispatch_webhooks |
 | 主入口 | src/lib/bounty/AgentDirectory.svelte::<module> |
 | 主入口 | src/App.svelte::<module> |
-| 关键实现 | src-tauri/src/server/schema_v3.sql::<module> |
+| 关键实现 | src-tauri/src/server/schema.sql::<module> |
 | 关键实现 | src-tauri/src/server/mod.rs::start |
 | 关键实现 | src-tauri/src/server/mod.rs::RunningServer |
 | 关键实现 | src-tauri/src/server/models.rs::AgentSummary |

@@ -212,7 +212,7 @@ publish 执行 `DRAFT → OPEN` 并设置 `published_at`；withdraw 只允许无
 
 创建记录 `created` 事件；编辑记录 `updated`；状态动作记录 `published`、`withdrawn`、`cancelled`、`claimed`、`declined`、`abandoned`、`completed`、`lease_released`、`lease_expired` 或 `assignment_expired`。直接创建 OPEN 记录一条 `created` 事件，其 `to_status` 为 OPEN。`BountyEvent` 字段为 `id`（整数）、`bounty_id`、`event_type`、`actor`、`from_status`（创建时 null）、`to_status`、`detail`（JSON 对象）、`created_at`。人工更新和转换的 actor 为 `human`；Agent 动作为 `agent:<Agent ID>`；到期扫描为 `system`。创建事件使用 `created_by`。数据库将 `detail` 存为 `detail_json`。
 
-所有写事务采用 `BEGIN IMMEDIATE`。状态、历史事件、事件收件箱与事故记录原子提交；并发撤回与抢单只有一个能成功。Rust 仓储保留 `Repository::try_claim_bounty(id,agent_id)` 供兼容调用，该入口允许未注册身份。HTTP 使用 `agent_claim_bounty`，在事务内复核 active 身份及执行者限制。
+所有写事务采用 `BEGIN IMMEDIATE`。状态、历史事件、事件收件箱与事故记录原子提交；并发撤回与抢单只有一个能成功。仓储与 HTTP 统一使用 `agent_claim_bounty` 抢单，在写事务内复核 active 身份、可接取状态、执行者限制与仲裁回避。评级结算要求执行者存在于名录，缺失时失败并回滚状态与评级写入。
 
 ## 抢单、指派与租约
 
@@ -323,13 +323,13 @@ Agent 任务列表和详情仅显示已发布（`status != DRAFT` 且 `published
 | 409 | `ARBITRATION_REQUIRED` | 启用仲裁的任务请求直接完成 |
 | 500 | `INTERNAL_ERROR` | 数据库或运行时内部错误 |
 
-数据库连接启用 WAL、外键和 5000ms busy timeout。当前 Schema 版本为 7；空库执行 `schema.sql` 并只记录版本 7。已有数据库依次补齐高于当前版本的 `schema_v2.sql`、`schema_v3.sql`、`schema_v4.sql`、`schema_v5.sql`、`schema_v6.sql` 和 `schema_v7.sql`，每步记录对应版本。全部迁移在同一 `BEGIN IMMEDIATE` 事务中完成，失败整体回滚，保留已有项目、悬赏、历史事件、准入设置、邀请、Agent、项目订阅和推送记录。重复打开 v7 不重置数据；版本高于 7 时返回 `INTERNAL_ERROR` 拒绝打开。
+数据库连接启用 WAL、外键和 5000ms busy timeout。服务在同一 `BEGIN IMMEDIATE` 事务内执行 `schema.sql`，创建缺少的表和索引，并仅在全局设置不存在时写入默认配置；初始化失败时整体回滚。重复打开数据库保留已有业务数据与配置。数据库结构统一维护在 `schema.sql`，不存储结构版本，也不维护旧结构升级路径。开发阶段变更已有表结构时，使用新数据库验证。
 
-v5 在 bounties 新增可空的 `assignment_expires_at`、`completion_cost` 以及默认 0 的 `lease_warned_id`。agents 新增默认 0 的 `timeout_count` 和 `abandon_count`，两项计数属于 AgentSummary。`lease_incidents` 保存自增 id、任务外键 bounty_id、Agent 外键 agent_id、lease_id、kind（timeout/abandon）和 created_at；两个外键均级联删除，索引为 `lease_incidents_agent(agent_id,id)`。
+`bounties` 包含可空的 `assignment_expires_at`、`completion_cost` 以及默认 0 的 `lease_warned_id`。`agents` 包含默认 0 的 `timeout_count` 和 `abandon_count`，两项计数属于 AgentSummary。`lease_incidents` 保存自增 id、任务外键 bounty_id、Agent 外键 agent_id、lease_id、kind（timeout/abandon）和 created_at；两个外键均级联删除，索引为 `lease_incidents_agent(agent_id,id)`。
 
-v4 在 `bounties` 新增可空外键 `created_by_agent_id TEXT REFERENCES agents(id)`，并建立索引 `bounties_publisher_agent(created_by_agent_id)`。历史悬赏的该字段为 null。发布者存在悬赏引用时不能硬删除。
+`bounties` 包含可空外键 `created_by_agent_id TEXT REFERENCES agents(id)`，并建立索引 `bounties_publisher_agent(created_by_agent_id)`。人类创建的悬赏该字段为 null。发布者存在悬赏引用时不能硬删除。
 
-v3 在 `agents` 新增可空 `webhook_url`、`webhook_secret`、`last_pushed_at` 和 `acked_event_id INTEGER NOT NULL DEFAULT 0`。`webhook_secret` 仅供签名和一次性凭证响应使用，不属于 AgentSummary。
+`agents` 包含可空 `webhook_url`、`webhook_secret`、`last_pushed_at` 和 `acked_event_id INTEGER NOT NULL DEFAULT 0`。`webhook_secret` 仅供签名和一次性凭证响应使用，不属于 AgentSummary。
 
 `agent_events` 保存持久化收件箱：`event_id INTEGER PRIMARY KEY AUTOINCREMENT` 全局递增且不复用已删除的编号；`agent_id` 为 Agent 外键、级联删除；`bounty_id` 可空；`event_type`、`payload_json`、`created_at` 必填；`delivery_status` 缺省 pending，仅允许 pending/delivered/failed；`attempt_count` 缺省 0；`next_attempt_at`、`last_error`、`delivered_at` 可空。索引为 `(agent_id,event_id)` 和 `(delivery_status,next_attempt_at)`。payload_json 保存 project_id 和 data 的不可变快照，传输时组成 AgentEvent。
 
@@ -440,6 +440,6 @@ WAITING_INFO 期间，后台扫描既不回收租约，也不发送临期提醒�
 
 有效耗时以一次认领周期为单位。claim 将 active_duration_ms 设为 0 并设置起点；request-info 结转当前段，回复恢复后从新起点继续；complete 结转最后一段并清空起点。IN_PROGRESS 时的实时 `T_active = active_duration_ms + max(0, 当前时间 - active_started_at)`；其他状态仅取 active_duration_ms，因此等待回复时间完全不计入。心跳与普通评论不改变起点。abandon、lease_expired 和 admin_release_lease 重开为 OPEN 时将累计值归零、起点清空，下次认领开始独立周期。重开前先结转本段耗时，将本轮总值保存在对应历史事件 detail.active_duration_ms 中。
 
-Schema v6 新增 bounty_comments 表及 `(bounty_id,id)` 索引，任务外键级联删除；作者类型与评论类型由 CHECK 约束。bounties 新增默认 0 的 active_duration_ms 和可空 active_started_at。v5 升级时，已有 IN_PROGRESS 从迁移时开始当前执行段，其他状态起点为 null；迁移前无法重建的有效耗时不追溯。
+`bounty_comments` 按 `(bounty_id,id)` 建立索引，任务外键级联删除；作者类型与评论类型由 CHECK 约束。`bounties.active_duration_ms` 默认 0，`active_started_at` 可空。任务进入执行状态时记录当前执行段的起点，离开执行状态时结转耗时并清除起点。
 
-Schema v7 增加全局 `arbitrator_chain_json`、任务当前裁判与响应期限、本轮尝试列表、质量档位和校准难度，并建立仲裁期限索引。旧数据的仲裁链和尝试列表默认空数组，其余新字段默认 null；质量和难度使用 CHECK 约束。
+`server_settings` 保存全局 `arbitrator_chain_json`；`bounties` 保存当前裁判与响应期限、本轮尝试列表、质量档位和校准难度，并按仲裁期限建立索引。仲裁链和尝试列表默认空数组，其余字段默认 null；质量和难度使用 CHECK 约束。

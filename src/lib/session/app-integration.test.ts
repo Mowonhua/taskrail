@@ -168,14 +168,14 @@ describe('悬赏板工作台外壳集成测试', () => {
     collapseBtn!.click();
     await flush();
     expect(target.querySelector('.app-shell')?.classList.contains('sidebar-collapsed')).toBe(true);
-    expect(saved.at(-1)?.preferences.sidebarCollapsed).toBe(true);
+    expect(saved.at(-1)?.preferences.sidebarOpen).toBe(false);
 
     const expandBtn = target.querySelector<HTMLButtonElement>('.sidebar-expand-btn');
     expect(expandBtn).not.toBeNull();
     expandBtn!.click();
     await flush();
     expect(target.querySelector('.app-shell')?.classList.contains('sidebar-collapsed')).toBe(false);
-    expect(saved.at(-1)?.preferences.sidebarCollapsed).toBe(false);
+    expect(saved.at(-1)?.preferences.sidebarOpen).toBe(true);
   });
 
   it('保留 5 套内置主题、自定义主题导入/导出/移除、明暗模式、bootThemeKey 与桌面窗口材质控制', async () => {
@@ -286,7 +286,10 @@ describe('悬赏板工作台外壳集成测试', () => {
     await flush();
 
     await selectComboboxOption(target, 'language-select', 'en');
-    expect(saved.at(-1)?.preferences.language).toBe('en');
+    expect(saved.at(-1)?.preferences.locale).toBe('en');
+    for (const alias of ['language', 'lineWidth', 'sidebarCollapsed']) {
+      expect(saved.at(-1)?.preferences).not.toHaveProperty(alias);
+    }
     const labels = [...target.querySelectorAll('.workspace-nav .workspace-nav-item')].map(el =>
       el.textContent?.trim(),
     );
@@ -619,7 +622,9 @@ describe('悬赏板工作台外壳集成测试', () => {
     expect(drawer.dataset.bountyStatus).toBe('OPEN');
 
     // 模拟外部 Agent 抢单成功后，人类点击「撤回为草稿」触发 409 BOUNTY_ALREADY_CLAIMED
-    await bountyApi.simulateClaim(draft.id, 'agent-fast-1');
+    await bountyApi.updateOnboardingSettings({ lan_open_registration: true });
+    const worker = await bountyApi.registerAgent({ name: 'fast-worker' });
+    await bountyApi.agentClaimBounty(worker.api_key, draft.id);
     drawer.querySelector<HTMLButtonElement>('[data-action="withdraw-bounty"]')!.click();
     await flush();
 
@@ -628,7 +633,7 @@ describe('悬赏板工作台外壳集成测试', () => {
     expect(errorBanner!.textContent).toContain('已被 Agent 接取');
     // 抽屉与列表状态自动刷新为 IN_PROGRESS 并显示认领者
     expect(drawer.dataset.bountyStatus).toBe('IN_PROGRESS');
-    expect(drawer.textContent).toContain('agent-fast-1');
+    expect(drawer.textContent).toContain(worker.agent.name);
   });
 
   it('支持设置页项目管理（新建、编辑、归档恢复、关联悬赏删除保护）与默认验收规范生效', async () => {
@@ -1637,7 +1642,7 @@ describe('悬赏板工作台外壳集成测试', () => {
       project_ids: [projA.id, projB.id],
     });
     const agentIdle = registeredIdle.agent;
-    const { agent: agentBusy } = await bountyApi.registerAgent({
+    const { agent: agentBusy, api_key: busyApiKey } = await bountyApi.registerAgent({
       name: 'rust-worker',
       description: '专注 Rust 并发内核',
       capabilities: ['rust', 'sqlite'],
@@ -1650,7 +1655,7 @@ describe('悬赏板工作台外壳集成测试', () => {
       assignee_mode: 'any',
       status: 'OPEN',
     });
-    await bountyApi.simulateClaim(openTask.id, agentBusy.id);
+    await bountyApi.agentClaimBounty(busyApiKey, openTask.id);
 
     instance = mount(App, { target, props: { files: port, bountyApi } });
     await flush();
@@ -1771,7 +1776,7 @@ describe('悬赏板工作台外壳集成测试', () => {
       name: 'idle-agent',
       capabilities: ['ts'],
     });
-    const { agent: agentBusy } = await baseApi.registerAgent({
+    const { agent: agentBusy, api_key: busyApiKey } = await baseApi.registerAgent({
       name: 'busy-agent',
       capabilities: ['rust'],
     });
@@ -1782,7 +1787,7 @@ describe('悬赏板工作台外壳集成测试', () => {
       assignee_mode: 'any',
       status: 'OPEN',
     });
-    await baseApi.simulateClaim(task.id, agentBusy.id);
+    await baseApi.agentClaimBounty(busyApiKey, task.id);
 
     const pending: { resolveBusy?: () => void; rejectSkill?: (error: Error) => void } = {};
     const bountyApi = {

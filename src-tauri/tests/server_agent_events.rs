@@ -130,15 +130,12 @@ fn dispatch_subscription_tiers_assignment_withdrawal_and_ack() {
 }
 
 #[test]
-fn v2_migration_preserves_all_existing_tables_and_is_idempotent() {
+fn event_storage_preserves_data_on_reopen_and_never_reuses_ids() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("v2.db");
+    let path = dir.path().join("events.db");
     let conn = rusqlite::Connection::open(&path).unwrap();
-    conn.execute_batch(include_str!("fixtures/server_v1.sql"))
-        .unwrap();
-    conn.execute_batch(include_str!("../src/server/schema_v2.sql"))
-        .unwrap();
-    conn.execute_batch("CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY,applied_at TEXT NOT NULL); INSERT INTO schema_migrations VALUES(1,'old'),(2,'old'); UPDATE server_settings SET lan_open_registration=1; INSERT INTO projects(id,name,created_at,updated_at) VALUES('p','existing','old','old'); INSERT INTO bounties(id,project_id,title,difficulty,assignee_mode,status,created_at,updated_at) VALUES('b','p','existing','C','any','OPEN','old','old'); INSERT INTO bounty_events(bounty_id,event_type,actor,to_status,created_at) VALUES('b','created','human','OPEN','old'); INSERT INTO invite_tokens(id,token_hash,token_prefix,use_count,created_at) VALUES('i','hash','prefix',2,'old'); INSERT INTO agents(id,name,api_key_hash,api_key_prefix,invite_token_id,created_at,updated_at) VALUES('a','existing','agent-hash','ag','i','old','old'); INSERT INTO agent_subscriptions VALUES('a','p','old');").unwrap();
+    Repository::open(&path).unwrap();
+    conn.execute_batch("UPDATE server_settings SET lan_open_registration=1; INSERT INTO projects(id,name,created_at,updated_at) VALUES('p','existing','old','old'); INSERT INTO bounties(id,project_id,title,difficulty,assignee_mode,status,created_at,updated_at) VALUES('b','p','existing','C','any','OPEN','old','old'); INSERT INTO bounty_events(bounty_id,event_type,actor,to_status,created_at) VALUES('b','created','human','OPEN','old'); INSERT INTO invite_tokens(id,token_hash,token_prefix,use_count,created_at) VALUES('i','hash','prefix',2,'old'); INSERT INTO agents(id,name,api_key_hash,api_key_prefix,invite_token_id,created_at,updated_at) VALUES('a','existing','agent-hash','ag','i','old','old'); INSERT INTO agent_subscriptions VALUES('a','p','old');").unwrap();
     for _ in 0..2 {
         Repository::open(&path).unwrap();
     }
@@ -163,15 +160,6 @@ fn v2_migration_preserves_all_existing_tables_and_is_idempotent() {
     assert_eq!(
         repo.list_agents(AgentFilter::default()).unwrap()[0].project_ids,
         vec!["p"]
-    );
-    assert_eq!(
-        conn.query_row(
-            "SELECT group_concat(version) FROM schema_migrations",
-            [],
-            |r| r.get::<_, String>(0)
-        )
-        .unwrap(),
-        "1,2,3,4,5,6,7,8,9"
     );
     assert_eq!(
         conn.query_row("SELECT acked_event_id FROM agents", [], |r| r
@@ -1400,24 +1388,4 @@ async fn shutdown_cancels_inflight_webhook_and_restart_delivers_persistent_backl
     );
     server.shutdown().await.unwrap();
     task.abort();
-}
-
-#[test]
-fn v3_migration_failure_rolls_back_columns_and_version() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("broken-v2.db");
-    let conn = rusqlite::Connection::open(&path).unwrap();
-    conn.execute_batch(include_str!("fixtures/server_v1.sql"))
-        .unwrap();
-    conn.execute_batch(include_str!("../src/server/schema_v2.sql"))
-        .unwrap();
-    conn.execute_batch("CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY,applied_at TEXT NOT NULL);INSERT INTO schema_migrations VALUES(2,'old'); CREATE TABLE agent_events(conflict TEXT);").unwrap();
-    assert!(Repository::open(&path).is_err());
-    assert_eq!(
-        conn.query_row("SELECT MAX(version) FROM schema_migrations", [], |r| r
-            .get::<_, i64>(0))
-            .unwrap(),
-        2
-    );
-    assert_eq!(conn.query_row("SELECT COUNT(*) FROM pragma_table_info('agents') WHERE name IN ('webhook_url','webhook_secret','acked_event_id','last_pushed_at')",[],|r|r.get::<_,i64>(0)).unwrap(),0);
 }
