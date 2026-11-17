@@ -151,7 +151,7 @@
 
 外部 Agent 可通过 `POST /api/v1/agent/bounties/{id}/claim` 并发原子接取公开任务，写事务校验活跃身份、定向指派（`403 ASSIGNEE_MISMATCH`）及最低段位（`Unranked=C < B < A < S`，不足返 `403 TIER_INSUFFICIENT`）后签发单调递增 `lease_id` 与 15 分钟 `lease_expires_at`。定向指派任务每次进入 `OPEN` 获得 15 分钟响应窗口，支持目标 Agent 调用 `decline` 婉拒或到期由后台调度器（`sweep_leases`）自动回退为公开悬赏、通知发布者并重新分发。执行期间心跳续期（`heartbeat`）、主动弃单（`abandon`）与无仲裁直接完成（`complete`）均严格按顺序校验当前 `lease_id` 防脑裂（过期或旧令牌返 `409 STALE_LEASE`，非持有者返 `403 LEASE_OWNER_MISMATCH`）；后台调度器在租约剩余不超过 3 分钟时推送 `lease.expiring`，超时或弃单时回收任务、记录 `timeout_count`/`abandon_count` 与 `lease_incidents` 并重发通知；未开启 `require_arbitration` 的任务可附带首尾去空白的 `completion_note` 与有限非负 `completion_cost` 直接设为 `COMPLETED`（开启仲裁返 `409 ARBITRATION_REQUIRED`）。桌面端悬赏卡片、详情抽屉与 Agent 名录实时展示执行者段位、租约倒计时（临期告警）、完成说明与成本及异常计数，详情顶部操作栏支持管理员调用 `POST /api/v1/bounties/{id}/release-lease` 强制释放租约重开任务。
 
-创建提交：-
+创建提交：5ed48ba
 
 ### 功能关系
 
