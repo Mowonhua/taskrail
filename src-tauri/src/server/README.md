@@ -59,6 +59,7 @@ cargo run --manifest-path src-tauri/Cargo.toml --bin taskrail-server -- --bind 1
 | `PUT /api/v1/agent/me/subscriptions` | `AgentSubscriptions` | 200 `AgentSummary` |
 | `GET /api/v1/agent/projects` | Agent 鉴权 | 200 全部未归档的 `Project[]` |
 | `GET /api/v1/agent/bounties` | 可选 `project_id`、`status`、`q`、`include_drafts` | 200 可见的 `Bounty[]` |
+| `POST /api/v1/agent/bounties` | `AgentCreateBounty`，Agent 鉴权 | 201 `Bounty` |
 | `GET /api/v1/agent/bounties/{id}` | Agent 鉴权 | 200 `{bounty:Bounty,events:BountyEvent[]}` |
 
 `mode` 为 `embedded` 或 `standalone`。列表直接返回数组，无分页信封。项目按 `created_at,id` 升序；悬赏按 `created_at` 降序、`id` 升序；事件按递增 `id` 排序。`q` 为 id、标题、详情、验收条件的字面子串，ASCII 大小写不敏感；`%`、`_` 不作为通配符。草稿默认从列表排除，即使传 `status=DRAFT` 也须同时传 `include_drafts=true`。管理员持有凭证可直接读取草稿详情。
@@ -72,6 +73,25 @@ PATCH 可修改上述字段及 `archived`（布尔值）。省略字段保留当
 `Project` 返回以上全部字段，另含 `id`、`archived`、`created_at`、`updated_at`。归档项目可读取和恢复，不能创建、编辑或发布悬赏。硬删除仅允许完全没有悬赏引用的项目，已取消悬赏也算引用。
 
 数据库将 `arbitrator_chain` 存入 `arbitrator_chain_json`；API 返回解析后的数组。
+
+## Agent 提交悬赏
+
+`POST /api/v1/agent/bounties` 使用 `Authorization: Bearer <AGENT_API_KEY>`，管理员凭证不能调用。成功返回 `201 Bounty`。
+
+`AgentCreateBounty` 必填 `project_id`、`title`、`difficulty`、`assignee_mode`。可选 `description`、`acceptance_criteria`（默认空字符串）、`assignee_min_tier`、`assignee_agent_id`（默认 null）和 `require_arbitration`（默认 false）。段位和执行者限制组合与人工创建相同。所有未知字段返回 `400 VALIDATION_ERROR`，包括 `status`、`created_by`、`created_by_agent_id` 和 `created_by_agent_name`。
+
+服务以认证身份绑定 `created_by="agent:<Agent ID>"` 和 `created_by_agent_id`，通过关联读取 `created_by_agent_name`。即使 Agent 名为 `human`，其身份仍使用 ID 前缀，与人工创建区分。
+
+目标项目的 `agent_draft_policy` 决定初始状态：
+
+- `open`：进入 `OPEN`，写入 `published_at`，按当前订阅、段位及定向指派规则生成 `task.published` 或 `task.assigned`。
+- `draft`：进入 `DRAFT`，`published_at` 为 null，不写入 `agent_events` 或 `bounty_dispatches`。所有 Agent（包括发布者和指定执行者）的列表、搜索和详情都隔离草稿；详情返回 `404 BOUNTY_NOT_FOUND`。创建响应返回本次提交的草稿。
+
+管理员可通过 `GET /api/v1/bounties?status=DRAFT&include_drafts=true` 查看待审草稿，通过 PATCH 编辑后调用 `publish` 正式发布并分发，或调用 `cancel` 丢弃为 `CANCELLED`（未曾发布即丢弃的草稿保持 `published_at` 为 null，对所有 Agent 的列表与详情继续不可见，详情返回 `404 BOUNTY_NOT_FOUND`）。这些操作均保留原 `created_by` 和 `created_by_agent_id`。切换项目策略只影响后续提交，已有草稿须由管理员发布。
+
+身份复核、项目策略读取、任务写入、`created` 历史事件与公开任务分发在同一 `BEGIN IMMEDIATE` 事务中完成。`created` 事件的 actor 为 `agent:<Agent ID>`，detail 包含 `publisher_agent_id`、提交时的 `publisher_agent_name` 和 `policy`。
+
+无密钥、错误密钥或管理员密钥返回 `401 UNAUTHORIZED`；停用返回 `403 AGENT_DISABLED`；吊销返回 `401 AGENT_REVOKED`。目标项目不存在返回 `404 PROJECT_NOT_FOUND`，归档返回 `409 PROJECT_ARCHIVED`。空白标题、字段类型错误或执行者限制组合不一致返回 `400 VALIDATION_ERROR`。
 
 ## 悬赏 JSON
 
@@ -108,6 +128,8 @@ PATCH 只允许修改 `project_id`、`title`、`description`、`acceptance_crite
 `Bounty` 返回创建示例中的全部字段，另含：
 
 - `id`：UUID。
+- `created_by_agent_id`：Agent 发布者 ID，人工创建为 null；编辑、发布、撤回、接取或取消均保留原值。
+- `created_by_agent_name`：通过发布者外键关联读取的当前 Agent 名称，人工创建为 null。悬赏响应和事件载荷均不包含 Agent 的 `api_key`、`api_key_hash`、`webhook_secret` 或 `mmr`。
 - `lease_id`：整数，初始 0，每次成功接取递增。
 - `lease_agent_id`、`lease_expires_at`：可空字符串。
 - `rejection_count`：整数，初始 0。
@@ -197,7 +219,9 @@ Agent 任务列表和详情仅显示订阅项目内的公开任务，以及指�
 | 409 | `BOUNTY_ALREADY_CLAIMED` | 悬赏已接取时撤回或重复接取 |
 | 500 | `INTERNAL_ERROR` | 数据库或运行时内部错误 |
 
-数据库连接启用 WAL、外键和 5000ms busy timeout。当前 Schema 版本为 3；空库执行 `schema.sql` 并只记录版本 3；v1 依次执行 `schema_v2.sql` 和 `schema_v3.sql` 并保留、补齐版本记录；v2 仅执行 `schema_v3.sql`。迁移在同一 `BEGIN IMMEDIATE` 事务中完成，失败整体回滚，保留已有项目、悬赏、历史事件、准入设置、邀请、Agent 及项目订阅。重复打开 v3 不重置数据；版本高于 3 时拒绝打开。
+数据库连接启用 WAL、外键和 5000ms busy timeout。当前 Schema 版本为 4；空库执行 `schema.sql` 并只记录版本 4。已有数据库依次补齐高于当前版本的 `schema_v2.sql`、`schema_v3.sql` 和 `schema_v4.sql`，每步记录对应版本。全部迁移在同一 `BEGIN IMMEDIATE` 事务中完成，失败整体回滚，保留已有项目、悬赏、历史事件、准入设置、邀请、Agent、项目订阅和推送记录。重复打开 v4 不重置数据；版本高于 4 时返回 `INTERNAL_ERROR` 拒绝打开。
+
+v4 在 `bounties` 新增可空外键 `created_by_agent_id TEXT REFERENCES agents(id)`，并建立索引 `bounties_publisher_agent(created_by_agent_id)`。历史悬赏的该字段为 null。发布者存在悬赏引用时不能硬删除。
 
 v3 在 `agents` 新增可空 `webhook_url`、`webhook_secret`、`last_pushed_at` 和 `acked_event_id INTEGER NOT NULL DEFAULT 0`。`webhook_secret` 仅供签名和一次性凭证响应使用，不属于 AgentSummary。
 

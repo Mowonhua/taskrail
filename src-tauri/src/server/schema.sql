@@ -115,3 +115,5 @@ CREATE TABLE bounty_dispatches (
     created_at TEXT NOT NULL,
     PRIMARY KEY (bounty_id, agent_id)
 );
+ALTER TABLE bounties ADD COLUMN created_by_agent_id TEXT REFERENCES agents(id);
+CREATE INDEX IF NOT EXISTS bounties_publisher_agent ON bounties(created_by_agent_id);

@@ -8,7 +8,9 @@
   import ProjectIcon from '../ProjectIcon.svelte';
   import {
     formatAssigneeConstraint,
+    formatBountyPublisher,
     formatBountyStatus,
+    formatEventActor,
     formatEventLabel,
     formatServiceError,
     formatTimestamp,
@@ -49,6 +51,11 @@
   const assigneeLabel = $derived.by(() => {
     const _lang = $locale;
     return formatAssigneeConstraint(bounty);
+  });
+
+  const publisher = $derived.by(() => {
+    const _lang = $locale;
+    return formatBountyPublisher(bounty);
   });
 
   async function runAction(fn: () => Promise<void>): Promise<void> {
@@ -119,6 +126,13 @@
         <span class="bounty-card-project">
           <ProjectIcon icon={project?.icon ?? undefined} />
           <span class="bounty-card-project-name">{project?.name ?? $t('未命名项目')}</span>
+        </span>
+        <span
+          class="detail-meta-pill"
+          data-slot="detail-publisher"
+          data-publisher-kind={publisher.isAgent ? 'agent' : 'human'}
+        >
+          {publisher.label}
         </span>
         <span class="detail-meta-pill">{assigneeLabel}</span>
         {#if bounty.lease_agent_id}
@@ -225,17 +239,25 @@
         {:else}
           <ol class="detail-timeline">
             {#each events as item (item.id)}
+              {@const eventActionLabel = (() => {
+                const _lang = $locale;
+                return formatEventLabel(item.event_type);
+              })()}
+              {@const actorLabel = (() => {
+                const _lang = $locale;
+                return formatEventActor(item.actor, bounty);
+              })()}
+              {@const transitionLabel = (() => {
+                const _lang = $locale;
+                return item.from_status
+                  ? `${formatBountyStatus(item.from_status)} → ${formatBountyStatus(item.to_status)}`
+                  : formatBountyStatus(item.to_status);
+              })()}
               <li class="detail-timeline-item" data-event-type={item.event_type}>
                 <div class="detail-timeline-main">
-                  <span class="detail-timeline-action">{formatEventLabel(item.event_type)}</span>
-                  <span class="detail-timeline-actor">{item.actor}</span>
-                  <span class="detail-timeline-transition">
-                    {#if item.from_status}
-                      {formatBountyStatus(item.from_status)} → {formatBountyStatus(item.to_status)}
-                    {:else}
-                      {formatBountyStatus(item.to_status)}
-                    {/if}
-                  </span>
+                  <span class="detail-timeline-action">{eventActionLabel}</span>
+                  <span class="detail-timeline-actor">{actorLabel}</span>
+                  <span class="detail-timeline-transition">{transitionLabel}</span>
                 </div>
                 <time class="detail-timeline-time" datetime={item.created_at}>
                   {formatTimestamp(item.created_at)}

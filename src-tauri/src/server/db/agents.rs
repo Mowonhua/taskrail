@@ -416,6 +416,7 @@ pub(super) fn active_agent(conn: &Connection, id: &str) -> Result<AgentSummary> 
 }
 fn visible(agent: &AgentSummary, bounty: &Bounty) -> bool {
     bounty.status != BountyStatus::Draft
+        && bounty.published_at.is_some()
         && (bounty.assignee_agent_id.as_deref() == Some(&agent.id)
             || bounty.lease_agent_id.as_deref() == Some(&agent.id)
             || (bounty.assignee_mode != AssigneeMode::Specific

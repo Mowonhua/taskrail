@@ -2965,4 +2965,350 @@ describe('悬赏板工作台外壳集成测试', () => {
     expect(afterAck.events).toEqual([]);
     expect(afterAck.acked_event_id).toBe(page2.events[0].event_id);
   });
+
+  it('支持在设置页按项目配置 Agent 发单策略（直接公开与先入草稿待审）并展示说明气泡与策略徽章', async () => {
+    const { port } = createMemoryPort({
+      preferences: { ...emptyAppConfig().preferences, workspaceSection: 'settings' },
+    });
+    const bountyApi = createMemoryBountyClient();
+
+    instance = mount(App, { target, props: { files: port, bountyApi } });
+    await flush();
+
+    const pmPanel = target.querySelector<HTMLElement>('[data-section="project-management"]')!;
+    expect(pmPanel).not.toBeNull();
+
+    // 1. 新建「先入草稿待审」项目并测试 ? 帮助 Popover 与 Escape 关闭
+    pmPanel.querySelector<HTMLButtonElement>('[data-action="new-project"]')!.click();
+    await flush();
+
+    const helpBtn = pmPanel.querySelector<HTMLButtonElement>(
+      '[data-action="toggle-agent-policy-help"]',
+    )!;
+    const helpPopover = pmPanel.querySelector<HTMLElement>('#project-agent-policy-help')!;
+    expect(helpBtn.getAttribute('aria-expanded')).toBe('false');
+    expect(helpPopover.hidden).toBe(true);
+
+    helpBtn.click();
+    await flush();
+    expect(helpBtn.getAttribute('aria-expanded')).toBe('true');
+    expect(helpPopover.hidden).toBe(false);
+    expect(helpPopover.textContent).toContain('直接公开');
+    expect(helpPopover.textContent).toContain('先入草稿待审');
+
+    const draftToggle = pmPanel.querySelector<HTMLButtonElement>('[data-agent-policy="draft"]')!;
+    const openToggle = pmPanel.querySelector<HTMLButtonElement>('[data-agent-policy="open"]')!;
+    expect(openToggle.getAttribute('aria-pressed')).toBe('true');
+    expect(draftToggle.getAttribute('aria-pressed')).toBe('false');
+
+    // 焦点移到策略开关上按 Escape 仍可关闭说明气泡
+    draftToggle.focus();
+    draftToggle.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    await flush();
+    expect(helpBtn.getAttribute('aria-expanded')).toBe('false');
+    expect(helpPopover.hidden).toBe(true);
+
+    const nameInput = pmPanel.querySelector<HTMLInputElement>('#project-form-name')!;
+    nameInput.value = '先审后发项目';
+    nameInput.dispatchEvent(new Event('input', { bubbles: true }));
+    draftToggle.click();
+    await flush();
+    expect(draftToggle.getAttribute('aria-pressed')).toBe('true');
+
+    pmPanel.querySelector<HTMLButtonElement>('[data-action="submit-project-form"]')!.click();
+    await flush();
+
+    const projectsAfterCreate = await bountyApi.listProjects(true);
+    const createdDraftProject = projectsAfterCreate.find(p => p.name === '先审后发项目')!;
+    expect(createdDraftProject).toBeDefined();
+    expect(createdDraftProject.agent_draft_policy).toBe('draft');
+
+    const row = pmPanel.querySelector<HTMLElement>(
+      `[data-project-row="${createdDraftProject.id}"]`,
+    )!;
+    const policyTag = row.querySelector<HTMLElement>('[data-tag="agent-policy"]')!;
+    expect(policyTag.dataset.policyValue).toBe('draft');
+    expect(policyTag.textContent?.trim()).toBe('先入草稿待审');
+    expect(row.textContent).not.toContain('·');
+
+    // 2. 编辑项目切换为「直接公开」并校验更新回显
+    row.querySelector<HTMLButtonElement>('[data-action="edit-project"]')!.click();
+    await flush();
+    expect(
+      pmPanel
+        .querySelector<HTMLButtonElement>('[data-agent-policy="draft"]')
+        ?.getAttribute('aria-pressed'),
+    ).toBe('true');
+
+    pmPanel.querySelector<HTMLButtonElement>('[data-agent-policy="open"]')!.click();
+    await flush();
+    pmPanel.querySelector<HTMLButtonElement>('[data-action="submit-project-form"]')!.click();
+    await flush();
+
+    const updatedProject = await bountyApi.getProject(createdDraftProject.id);
+    expect(updatedProject.agent_draft_policy).toBe('open');
+    const updatedTag = pmPanel.querySelector<HTMLElement>(
+      `[data-project-row="${createdDraftProject.id}"] [data-tag="agent-policy"]`,
+    )!;
+    expect(updatedTag.dataset.policyValue).toBe('open');
+    expect(updatedTag.textContent?.trim()).toBe('直接公开');
+  });
+
+  it('覆盖两种项目发单策略下 Agent 自动发单、待我处理聚合刷新、发布者身份与人工审阅转正或丢弃全流程', async () => {
+    const { port } = createMemoryPort({
+      preferences: { ...emptyAppConfig().preferences, workspaceSection: 'bounties' },
+    });
+    const bountyApi = createMemoryBountyClient({ lan_open_registration: true });
+    const openProject = await bountyApi.createProject({
+      name: '直接公开项目',
+      agent_draft_policy: 'open',
+    });
+    const draftProject = await bountyApi.createProject({
+      name: '草稿待审项目',
+      agent_draft_policy: 'draft',
+    });
+
+    const publisherReg = await bountyApi.registerAgent({
+      name: '巡检机器人',
+      subscribe_all_projects: false,
+      project_ids: [openProject.id, draftProject.id],
+    });
+    const workerReg = await bountyApi.registerAgent({
+      name: '执行助手',
+      subscribe_all_projects: false,
+      project_ids: [openProject.id, draftProject.id],
+    });
+    const outsiderReg = await bountyApi.registerAgent({
+      name: '旁观者',
+      subscribe_all_projects: false,
+      project_ids: [],
+    });
+
+    instance = mount(App, { target, props: { files: port, bountyApi } });
+    await flush();
+
+    // 先由管理员创建一条人工悬赏，作为对比基线
+    target.querySelector<HTMLButtonElement>('[data-action="open-composer"]')!.click();
+    await flush();
+    const composer0 = target.querySelector<HTMLElement>('[data-dialog="bounty-composer"]')!;
+    const title0 = composer0.querySelector<HTMLInputElement>('#bounty-title-input')!;
+    title0.value = '人工基线悬赏';
+    title0.dispatchEvent(new Event('input', { bubbles: true }));
+    composer0.querySelector<HTMLButtonElement>('[data-action="publish-now"]')!.click();
+    await flush();
+
+    const humanBounty = (await bountyApi.listBounties()).find(b => b.title === '人工基线悬赏')!;
+    expect(humanBounty).toBeDefined();
+    const humanCard = target.querySelector<HTMLElement>(`[data-bounty-id="${humanBounty.id}"]`)!;
+    expect(humanCard.querySelector('[data-publisher-kind="agent"]')).toBeNull();
+
+    // 1. 「直接公开」策略：Agent 提交立即成为 OPEN、记录发布者身份、推送事件并在悬赏板展示
+    const openBounty = await bountyApi.agentCreateBounty(publisherReg.api_key, {
+      project_id: openProject.id,
+      title: '巡检发现的公开缺陷',
+      description: '复现步骤：\n\n- 检查日志',
+      acceptance_criteria: '- [ ] 补充回归测试',
+      difficulty: 'A',
+      assignee_mode: 'any',
+      require_arbitration: true,
+    });
+    expect(openBounty.status).toBe('OPEN');
+    expect(openBounty.created_by).toBe(`agent:${publisherReg.agent.id}`);
+    expect(openBounty.created_by_agent_id).toBe(publisherReg.agent.id);
+    expect(openBounty.created_by_agent_name).toBe('巡检机器人');
+
+    // worker 收到人类基线 + Agent 直接公开共 2 条事件；outsider 为 0
+    const workerEventsAfterOpen = await bountyApi.agentListEvents(workerReg.api_key, { cursor: 0 });
+    expect(workerEventsAfterOpen.events.map(ev => ev.data.title)).toEqual([
+      '人工基线悬赏',
+      '巡检发现的公开缺陷',
+    ]);
+    expect(
+      (await bountyApi.agentListEvents(outsiderReg.api_key, { cursor: 0 })).events,
+    ).toHaveLength(0);
+
+    // 切换页面再回到悬赏板触发自动刷新，验证卡片与详情抽屉均展示发布者 Agent 身份与时间线
+    target.querySelector<HTMLButtonElement>('[data-nav-section="agents"]')!.click();
+    await flush();
+    target.querySelector<HTMLButtonElement>('[data-nav-section="bounties"]')!.click();
+    await flush();
+
+    const openCard = target.querySelector<HTMLElement>(`[data-bounty-id="${openBounty.id}"]`)!;
+    expect(openCard).not.toBeNull();
+    expect(openCard.dataset.bountyStatus).toBe('OPEN');
+    expect(openCard.textContent).not.toContain('·');
+    const openPublisherBadge = openCard.querySelector<HTMLElement>(
+      '[data-publisher-kind="agent"]',
+    )!;
+    expect(openPublisherBadge.textContent?.trim()).toBe('Agent 提交: 巡检机器人');
+
+    openCard.querySelector<HTMLButtonElement>('.bounty-card-button')!.click();
+    await flush();
+    const openDrawer = target.querySelector<HTMLElement>('[data-dialog="bounty-detail"]')!;
+    expect(openDrawer.querySelector('[data-slot="detail-publisher"]')?.textContent?.trim()).toBe(
+      'Agent 提交: 巡检机器人',
+    );
+    expect(
+      openDrawer.querySelector('.detail-timeline-item[data-event-type="created"] .detail-timeline-actor')
+        ?.textContent?.trim(),
+    ).toBe('Agent: 巡检机器人');
+    expect(openDrawer.textContent).not.toContain('api_key');
+    expect(openDrawer.textContent).not.toContain('webhook_secret');
+    expect(openDrawer.textContent?.toLowerCase()).not.toContain('mmr');
+    openDrawer.querySelector<HTMLButtonElement>('[aria-label="关闭对话框"]')!.click();
+    await flush();
+
+    // 2. 「先入草稿待审」策略：Agent 提交落入 DRAFT，不推送任何事件且对所有 Agent 隔离
+    const draftEditPublish = await bountyApi.agentCreateBounty(publisherReg.api_key, {
+      project_id: draftProject.id,
+      title: '待审草稿一：编辑后转正',
+      description: '需要人工补充验收要求',
+      acceptance_criteria: '- [ ] 初步排查',
+      difficulty: 'B',
+      assignee_mode: 'any',
+      require_arbitration: false,
+    });
+    const draftDirectPublish = await bountyApi.agentCreateBounty(publisherReg.api_key, {
+      project_id: draftProject.id,
+      title: '待审草稿二：一键确认发布',
+      difficulty: 'C',
+      assignee_mode: 'any',
+    });
+    const draftDiscard = await bountyApi.agentCreateBounty(publisherReg.api_key, {
+      project_id: draftProject.id,
+      title: '待审草稿三：重复问题丢弃',
+      difficulty: 'C',
+      assignee_mode: 'any',
+    });
+
+    for (const draft of [draftEditPublish, draftDirectPublish, draftDiscard]) {
+      expect(draft.status).toBe('DRAFT');
+      expect(draft.published_at).toBeNull();
+      expect(draft.created_by_agent_id).toBe(publisherReg.agent.id);
+    }
+
+    // 所有 Agent（包含发布者自身）均不可读 DRAFT，且事件数为 0 新增
+    expect(
+      (await bountyApi.agentListBounties(publisherReg.api_key, { include_drafts: true })).some(
+        b => b.status === 'DRAFT',
+      ),
+    ).toBe(false);
+    await expect(
+      bountyApi.agentGetBountyDetail(publisherReg.api_key, draftEditPublish.id),
+    ).rejects.toMatchObject({ code: 'BOUNTY_NOT_FOUND', status: 404 });
+    expect(
+      (await bountyApi.agentListEvents(workerReg.api_key, { cursor: 0 })).events,
+    ).toHaveLength(2);
+
+    // 切入「待我处理」自动刷新聚合展示全部 3 条 Agent 草稿
+    target.querySelector<HTMLButtonElement>('[data-nav-section="inbox"]')!.click();
+    await flush();
+    const inboxView = target.querySelector<HTMLElement>('[data-view="inbox"]')!;
+    expect(inboxView).not.toBeNull();
+
+    // 在待我处理视图内新提交一条草稿后点击手动「刷新」按钮也能立即拉取
+    const draftLate = await bountyApi.agentCreateBounty(publisherReg.api_key, {
+      project_id: draftProject.id,
+      title: '待审草稿四：刷新拉取',
+      difficulty: 'C',
+      assignee_mode: 'any',
+    });
+    inboxView.querySelector<HTMLButtonElement>('[data-action="refresh-inbox"]')!.click();
+    await flush();
+
+    inboxView.querySelector<HTMLButtonElement>('[data-inbox-filter="DRAFT"]')!.click();
+    await flush();
+
+    for (const draft of [draftEditPublish, draftDirectPublish, draftDiscard, draftLate]) {
+      const card = inboxView.querySelector<HTMLElement>(`[data-bounty-id="${draft.id}"]`)!;
+      expect(card).not.toBeNull();
+      expect(card.dataset.bountyStatus).toBe('DRAFT');
+      expect(card.querySelector('[data-publisher-kind="agent"]')?.textContent?.trim()).toBe(
+        'Agent 提交: 巡检机器人',
+      );
+    }
+
+    // 3a. 审阅草稿一 -> 点击「编辑草稿」修改并发布为 OPEN，保留发布者身份且触发分发
+    inboxView
+      .querySelector<HTMLButtonElement>(`[data-bounty-id="${draftEditPublish.id}"] .bounty-card-button`)!
+      .click();
+    await flush();
+    const detail1 = target.querySelector<HTMLElement>('[data-dialog="bounty-detail"]')!;
+    detail1.querySelector<HTMLButtonElement>('[data-action="edit-draft"]')!.click();
+    await flush();
+
+    const editComposer = target.querySelector<HTMLElement>('[data-dialog="bounty-composer"]')!;
+    const editTitleInput = editComposer.querySelector<HTMLInputElement>('#bounty-title-input')!;
+    editTitleInput.value = '人工核验转正悬赏';
+    editTitleInput.dispatchEvent(new Event('input', { bubbles: true }));
+    editComposer.querySelector<HTMLButtonElement>('[data-action="publish-now"]')!.click();
+    await flush();
+
+    const publishedDetail1 = await bountyApi.getBountyDetail(draftEditPublish.id);
+    expect(publishedDetail1.bounty.status).toBe('OPEN');
+    expect(publishedDetail1.bounty.title).toBe('人工核验转正悬赏');
+    expect(publishedDetail1.bounty.created_by_agent_id).toBe(publisherReg.agent.id);
+    expect(publishedDetail1.bounty.created_by_agent_name).toBe('巡检机器人');
+    expect(publishedDetail1.events.map(ev => ev.actor)).toEqual([
+      `agent:${publisherReg.agent.id}`,
+      'human',
+      'human',
+    ]);
+    expect(inboxView.querySelector(`[data-bounty-id="${draftEditPublish.id}"]`)).toBeNull();
+
+    // 3b. 审阅草稿二 -> 在详情抽屉一键「立即发布」转正为 OPEN
+    inboxView
+      .querySelector<HTMLButtonElement>(`[data-bounty-id="${draftDirectPublish.id}"] .bounty-card-button`)!
+      .click();
+    await flush();
+    const detail2 = target.querySelector<HTMLElement>('[data-dialog="bounty-detail"]')!;
+    detail2.querySelector<HTMLButtonElement>('[data-action="publish-bounty"]')!.click();
+    await flush();
+    expect(detail2.dataset.bountyStatus).toBe('OPEN');
+    expect(detail2.querySelector('[data-slot="detail-publisher"]')?.textContent?.trim()).toBe(
+      'Agent 提交: 巡检机器人',
+    );
+    detail2.querySelector<HTMLButtonElement>('[aria-label="关闭对话框"]')!.click();
+    await flush();
+    expect(inboxView.querySelector(`[data-bounty-id="${draftDirectPublish.id}"]`)).toBeNull();
+
+    // 3c. 审阅草稿三 -> 在详情抽屉「丢弃草稿」转为 CANCELLED，绝不向任何 Agent 推送且继续保持对所有 Agent 不可见
+    inboxView
+      .querySelector<HTMLButtonElement>(`[data-bounty-id="${draftDiscard.id}"] .bounty-card-button`)!
+      .click();
+    await flush();
+    const detail3 = target.querySelector<HTMLElement>('[data-dialog="bounty-detail"]')!;
+    detail3.querySelector<HTMLButtonElement>('[data-action="cancel-bounty"]')!.click();
+    await flush();
+    expect(detail3.dataset.bountyStatus).toBe('CANCELLED');
+    detail3.querySelector<HTMLButtonElement>('[aria-label="关闭对话框"]')!.click();
+    await flush();
+    expect(inboxView.querySelector(`[data-bounty-id="${draftDiscard.id}"]`)).toBeNull();
+
+    for (const agentKey of [publisherReg.api_key, workerReg.api_key]) {
+      const visibleAfterDiscard = await bountyApi.agentListBounties(agentKey, {
+        status: 'CANCELLED',
+        include_drafts: true,
+      });
+      expect(visibleAfterDiscard.some(b => b.id === draftDiscard.id)).toBe(false);
+      await expect(bountyApi.agentGetBountyDetail(agentKey, draftDiscard.id)).rejects.toMatchObject({
+        code: 'BOUNTY_NOT_FOUND',
+        status: 404,
+      });
+    }
+
+    const workerEventsFinal = await bountyApi.agentListEvents(workerReg.api_key, { cursor: 0 });
+    expect(workerEventsFinal.events.map(ev => ev.data.title)).toEqual([
+      '人工基线悬赏',
+      '巡检发现的公开缺陷',
+      '人工核验转正悬赏',
+      '待审草稿二：一键确认发布',
+    ]);
+    expect(workerEventsFinal.events.some(ev => ev.bounty_id === draftDiscard.id)).toBe(false);
+    expect(workerEventsFinal.events.some(ev => ev.bounty_id === draftLate.id)).toBe(false);
+
+    // 切换策略回 open 不隐式公开既有未处理的 draftLate
+    await bountyApi.updateProject(draftProject.id, { agent_draft_policy: 'open' });
+    expect((await bountyApi.getBountyDetail(draftLate.id)).bounty.status).toBe('DRAFT');
+  });
 });

@@ -9,6 +9,7 @@ import {
   type AckAgentEventsResult,
   type AdminStatus,
   type AgentChannelStatus,
+  type AgentCreateBountyInput,
   type AgentDraftPolicy,
   type AgentEvent,
   type AgentFilter,
@@ -46,6 +47,17 @@ import {
 const VALID_DIFFICULTIES = new Set<BountyDifficulty>(['C', 'B', 'A', 'S']);
 const VALID_ASSIGNEE_MODES = new Set<AssigneeMode>(['any', 'min_tier', 'specific']);
 const VALID_AGENT_POLICIES = new Set<AgentDraftPolicy>(['open', 'draft']);
+const AGENT_CREATE_BOUNTY_ALLOWED_KEYS = new Set([
+  'project_id',
+  'title',
+  'description',
+  'acceptance_criteria',
+  'difficulty',
+  'assignee_mode',
+  'assignee_min_tier',
+  'assignee_agent_id',
+  'require_arbitration',
+]);
 const CANCELLABLE_STATUSES = new Set<BountyStatus>(['DRAFT', 'OPEN', 'WAITING_INFO']);
 const ACTIVE_LEASE_STATUSES = new Set<BountyStatus>([
   'IN_PROGRESS',
@@ -79,6 +91,7 @@ export interface BountyApiPort {
   disableAgent(id: string): Promise<AgentSummary>;
   enableAgent(id: string): Promise<AgentSummary>;
   revokeAgent(id: string): Promise<AgentSummary>;
+  agentCreateBounty?(apiKey: string, input: AgentCreateBountyInput): Promise<BountyTask>;
 }
 
 export interface AgentApiPort {
@@ -94,6 +107,7 @@ export interface AgentApiPort {
   updateMe(input: UpdateAgentInput): Promise<AgentSummary>;
   updateSubscriptions(input: AgentSubscriptionsInput): Promise<AgentSummary>;
   listProjects(): Promise<BountyProject[]>;
+  createBounty(input: AgentCreateBountyInput): Promise<BountyTask>;
   listBounties(query?: BountyQuery): Promise<BountyTask[]>;
   getBountyDetail(id: string): Promise<BountyDetail>;
   getWebhookConfig(): Promise<AgentWebhookConfig>;
@@ -120,6 +134,7 @@ export interface MemoryBountyClient extends BountyApiPort {
     input: AgentSubscriptionsInput,
   ): Promise<AgentSummary>;
   agentListProjects(apiKey: string): Promise<BountyProject[]>;
+  agentCreateBounty(apiKey: string, input: AgentCreateBountyInput): Promise<BountyTask>;
   agentListBounties(apiKey: string, query?: BountyQuery): Promise<BountyTask[]>;
   agentGetBountyDetail(apiKey: string, id: string): Promise<BountyDetail>;
   agentGetWebhookConfig(apiKey: string): Promise<AgentWebhookConfig>;
@@ -451,6 +466,10 @@ export class HttpAgentClient implements AgentApiPort {
     return await this.request<BountyProject[]>('GET', '/api/v1/agent/projects');
   }
 
+  async createBounty(input: AgentCreateBountyInput): Promise<BountyTask> {
+    return await this.request<BountyTask>('POST', '/api/v1/agent/bounties', { body: input });
+  }
+
   async listBounties(query?: BountyQuery): Promise<BountyTask[]> {
     const qs = buildBountyQueryString(query);
     return await this.request<BountyTask[]>(
@@ -660,6 +679,22 @@ api_key 仅注册成功时返回一次，请保存；后续接口携带 Authoriz
 注册订阅规则与订阅替换相同：不传 project_ids 且 subscribe_all_projects 缺省或为 true 时订阅全部项目；提供 project_ids 且未指定 true 时仅订阅这些项目。true 与非空 project_ids 不能同时使用。
 AgentSummary 包含 id、name、description、capabilities、api_key_prefix、tier、placement_completed、subscribe_all_projects、project_ids、status、invite_token_id、active_lease_count、last_seen_at、created_at、updated_at，不包含 api_key 或 api_key_hash。
 
+## 提交任务
+
+POST ${baseUrl}/api/v1/agent/bounties
+
+使用 Authorization: Bearer <AGENT_API_KEY>，成功返回 201 Bounty。
+必填 project_id、title、difficulty（C/B/A/S）、assignee_mode（any/min_tier/specific）。
+可选 description、acceptance_criteria（默认空字符串）、assignee_min_tier、assignee_agent_id（默认 null）、require_arbitration（默认 false）。
+any 的两个限制字段均须为 null；min_tier 仅提供 assignee_min_tier；specific 仅提供非空 assignee_agent_id。
+请求拒绝未知字段；传入 status、created_by 或发布者身份字段均返回 400 VALIDATION_ERROR。
+
+目标项目的 agent_draft_policy 决定初始状态：open 直接进入 OPEN 并按订阅、段位或定向指派分发；draft 进入 DRAFT，published_at 为 null。
+服务自动绑定 created_by 为 agent:<认证 Agent ID>，created_by_agent_id 为认证 Agent ID，created_by_agent_name 为关联的当前 Agent 名称。返回内容不含 Agent 凭证或内部分数。
+DRAFT 在人工确认前不向任何 Agent 推送，所有 Agent（包括发布者）均不能通过列表或详情读取草稿；详情返回 404 BOUNTY_NOT_FOUND。
+管理员可编辑并发布草稿为 OPEN，此时触发正式分发，或丢弃为 CANCELLED（未曾发布即丢弃仍对所有 Agent 不可见）；上述操作均保留原发布者身份。项目策略切换只影响后续提交。
+未知项目返回 404 PROJECT_NOT_FOUND，归档项目返回 409 PROJECT_ARCHIVED，空白标题或限制组合不一致返回 400 VALIDATION_ERROR。
+
 ## 任务读取
 
 - GET ${baseUrl}/api/v1/agent/bounties：返回 Bounty[]，支持 project_id、status、q 查询。q 为字面子串，% 和 _ 不作为通配符。
@@ -810,7 +845,11 @@ export function createMemoryBountyClient(seed?: {
     projects.set(project.id, clone(project));
   }
   for (const bounty of seed?.bounties ?? []) {
-    bounties.set(bounty.id, clone(bounty));
+    bounties.set(bounty.id, {
+      ...clone(bounty),
+      created_by_agent_id: bounty.created_by_agent_id ?? null,
+      created_by_agent_name: bounty.created_by_agent_name ?? null,
+    });
     eventsByBounty.set(bounty.id, []);
   }
 
@@ -1041,7 +1080,7 @@ export function createMemoryBountyClient(seed?: {
   }
 
   function isBountyVisibleToAgent(agent: AgentSummary, bounty: BountyTask): boolean {
-    if (bounty.status === 'DRAFT') return false;
+    if (bounty.status === 'DRAFT' || bounty.published_at === null) return false;
     if (bounty.assignee_agent_id === agent.id || bounty.lease_agent_id === agent.id) {
       return true;
     }
@@ -1203,6 +1242,8 @@ export function createMemoryBountyClient(seed?: {
         require_arbitration: input.require_arbitration ?? false,
         status: input.status,
         created_by: createdBy,
+        created_by_agent_id: null,
+        created_by_agent_name: null,
         lease_id: 0,
         lease_agent_id: null,
         lease_expires_at: null,
@@ -1689,6 +1730,83 @@ export function createMemoryBountyClient(seed?: {
         .filter(project => !project.archived)
         .sort((a, b) => a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id))
         .map(clone);
+    },
+
+    async agentCreateBounty(apiKey: string, input: AgentCreateBountyInput): Promise<BountyTask> {
+      const entry = authenticateAgent(apiKey);
+      if (!input || typeof input !== 'object' || Array.isArray(input)) {
+        throw new ServiceApiError('VALIDATION_ERROR', 400, '请求正文必须为 JSON 对象');
+      }
+      for (const key of Object.keys(input)) {
+        if (!AGENT_CREATE_BOUNTY_ALLOWED_KEYS.has(key)) {
+          throw new ServiceApiError('VALIDATION_ERROR', 400, `不允许传入未知或越权字段: ${key}`);
+        }
+      }
+      if (typeof input.project_id !== 'string') {
+        throw new ServiceApiError('VALIDATION_ERROR', 400, 'project_id 必须为字符串');
+      }
+      if (input.description !== undefined && typeof input.description !== 'string') {
+        throw new ServiceApiError('VALIDATION_ERROR', 400, 'description 必须为字符串');
+      }
+      if (
+        input.acceptance_criteria !== undefined &&
+        typeof input.acceptance_criteria !== 'string'
+      ) {
+        throw new ServiceApiError('VALIDATION_ERROR', 400, 'acceptance_criteria 必须为字符串');
+      }
+      if (
+        input.require_arbitration !== undefined &&
+        typeof input.require_arbitration !== 'boolean'
+      ) {
+        throw new ServiceApiError('VALIDATION_ERROR', 400, 'require_arbitration 必须为布尔值');
+      }
+
+      const minTier = input.assignee_min_tier ?? null;
+      const agentId = input.assignee_agent_id ?? null;
+      validateBountyFields(input.title, input.difficulty, input.assignee_mode, minTier, agentId);
+      const project = requireActiveProject(input.project_id);
+
+      const timestamp = nowIso();
+      const status: BountyStatus = project.agent_draft_policy === 'open' ? 'OPEN' : 'DRAFT';
+      const actor = `agent:${entry.summary.id}`;
+      const bounty: BountyTask = {
+        id: crypto.randomUUID(),
+        project_id: input.project_id,
+        title: input.title,
+        description: input.description ?? '',
+        acceptance_criteria: input.acceptance_criteria ?? '',
+        difficulty: input.difficulty,
+        assignee_mode: input.assignee_mode,
+        assignee_min_tier: minTier,
+        assignee_agent_id: agentId,
+        require_arbitration: input.require_arbitration ?? false,
+        status,
+        created_by: actor,
+        created_by_agent_id: entry.summary.id,
+        created_by_agent_name: entry.summary.name,
+        lease_id: 0,
+        lease_agent_id: null,
+        lease_expires_at: null,
+        rejection_count: 0,
+        completion_note: null,
+        published_at: status === 'OPEN' ? timestamp : null,
+        withdrawn_at: null,
+        cancelled_at: null,
+        completed_at: null,
+        created_at: timestamp,
+        updated_at: timestamp,
+      };
+      bounties.set(bounty.id, bounty);
+      eventsByBounty.set(bounty.id, []);
+      recordEvent(bounty, 'created', actor, null, {
+        publisher_agent_id: entry.summary.id,
+        publisher_agent_name: entry.summary.name,
+        policy: project.agent_draft_policy,
+      });
+      if (status === 'OPEN') {
+        dispatchBountyEvents(bounty, false);
+      }
+      return clone(bounty);
     },
 
     async agentListBounties(apiKey: string, query?: BountyQuery): Promise<BountyTask[]> {

@@ -1423,7 +1423,8 @@ button.danger-text {
 
 .status-pill,
 .arbitration-pill,
-.detail-meta-pill {
+.detail-meta-pill,
+.bounty-publisher-pill {
   display: inline-flex;
   align-items: center;
   padding: 2px 8px;
@@ -1433,6 +1434,13 @@ button.danger-text {
   color: var(--muted);
   font-size: 11.5px;
   font-weight: 500;
+}
+
+.bounty-publisher-pill[data-publisher-kind="agent"],
+.detail-meta-pill[data-publisher-kind="agent"] {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
 }
 
 .status-pill[data-status="OPEN"],
@@ -1509,6 +1517,13 @@ button.danger-text {
   padding-top: 4px;
   font-size: 12px;
   color: var(--muted);
+  flex-wrap: wrap;
+}
+
+.bounty-card-meta-end {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
   flex-wrap: wrap;
 }
 
@@ -2050,6 +2065,21 @@ button.danger-text {
   display: flex;
   align-items: center;
   gap: 8px;
+  flex-wrap: wrap;
+}
+
+.policy-toggle-group {
+  align-self: flex-start;
+}
+
+.policy-toggle-option {
+  font-size: 12px;
+}
+
+.project-policy-tag[data-policy-value="draft"] {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
 }
 
 .project-item-name {

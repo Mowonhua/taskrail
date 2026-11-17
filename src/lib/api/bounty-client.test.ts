@@ -15,9 +15,12 @@ import {
 } from './bounty-client';
 import {
   formatAgentChannelStatus,
+  formatAgentDraftPolicy,
   formatAgentStatus,
   formatAgentSubscriptionSummary,
   formatAgentTier,
+  formatBountyPublisher,
+  formatEventActor,
   formatInviteTokenStatus,
   formatServiceError,
 } from '../bounty/helpers';
@@ -397,6 +400,8 @@ describe('createMemoryBountyClient', () => {
       require_arbitration: false,
       status: 'WAITING_INFO',
       created_by: 'human',
+      created_by_agent_id: null,
+      created_by_agent_name: null,
       lease_id: 1,
       lease_agent_id: null,
       lease_expires_at: null,
@@ -1270,6 +1275,413 @@ describe('Issue 04 通道状态格式化与中英文翻译', () => {
 
     for (const entry of [streamingZh, webhookZh, offlineZh, streamingEn, webhookEn, offlineEn]) {
       expect(entry.label).not.toContain('·');
+    }
+    setLocalePreference('zh-CN');
+  });
+});
+
+describe('Issue 05 Agent 自动发单与项目级草稿审核策略', () => {
+  it('HttpAgentClient.createBounty 正确发送 POST /api/v1/agent/bounties 请求', async () => {
+    const calls: Array<{ url: string; method?: string; headers: Record<string, string>; body?: string }> = [];
+    const fetchMock: typeof fetch = async (input, init) => {
+      calls.push({
+        url: String(input),
+        method: init?.method,
+        headers: (init?.headers ?? {}) as Record<string, string>,
+        body: typeof init?.body === 'string' ? init.body : undefined,
+      });
+      return jsonResponse(
+        {
+          id: 'b-agent-1',
+          project_id: 'p1',
+          title: 'Fix CI flakiness',
+          description: 'Logs attached',
+          acceptance_criteria: 'npm test passes',
+          difficulty: 'B',
+          assignee_mode: 'min_tier',
+          assignee_min_tier: 'C',
+          assignee_agent_id: null,
+          require_arbitration: true,
+          status: 'DRAFT',
+          created_by: 'agent:ag-1',
+          created_by_agent_id: 'ag-1',
+          created_by_agent_name: 'inspector-bot',
+          lease_id: 0,
+          lease_agent_id: null,
+          lease_expires_at: null,
+          rejection_count: 0,
+          completion_note: null,
+          published_at: null,
+          withdrawn_at: null,
+          cancelled_at: null,
+          completed_at: null,
+          created_at: '2026-11-17T03:00:00.000Z',
+          updated_at: '2026-11-17T03:00:00.000Z',
+        },
+        201,
+      );
+    };
+
+    const agentClient = new HttpAgentClient('http://127.0.0.1:8420/', 'tr_ag_publisher', fetchMock);
+    const created = await agentClient.createBounty({
+      project_id: 'p1',
+      title: 'Fix CI flakiness',
+      description: 'Logs attached',
+      acceptance_criteria: 'npm test passes',
+      difficulty: 'B',
+      assignee_mode: 'min_tier',
+      assignee_min_tier: 'C',
+      require_arbitration: true,
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].method).toBe('POST');
+    expect(calls[0].url).toBe('http://127.0.0.1:8420/api/v1/agent/bounties');
+    expect(calls[0].headers.Authorization).toBe('Bearer tr_ag_publisher');
+    expect(calls[0].headers['Content-Type']).toBe('application/json');
+    expect(JSON.parse(calls[0].body!)).toEqual({
+      project_id: 'p1',
+      title: 'Fix CI flakiness',
+      description: 'Logs attached',
+      acceptance_criteria: 'npm test passes',
+      difficulty: 'B',
+      assignee_mode: 'min_tier',
+      assignee_min_tier: 'C',
+      require_arbitration: true,
+    });
+    expect(created.created_by_agent_id).toBe('ag-1');
+    expect(created.created_by_agent_name).toBe('inspector-bot');
+    expect(created.status).toBe('DRAFT');
+  });
+
+  it('createMemoryBountyClient 校验鉴权、未知/越权字段、项目状态及 SKILL.md 发单契约', async () => {
+    const client = createMemoryBountyClient({ lan_open_registration: true });
+    const activeProject = await client.createProject({ name: 'Active Project' });
+    const archivedProject = await client.createProject({ name: 'Archived Project' });
+    await client.updateProject(archivedProject.id, { archived: true });
+
+    const publisher = await client.registerAgent({ name: 'scout-agent' });
+    const disabled = await client.registerAgent({ name: 'disabled-agent' });
+    const revoked = await client.registerAgent({ name: 'revoked-agent' });
+    await client.disableAgent(disabled.agent.id);
+    await client.revokeAgent(revoked.agent.id);
+
+    // 鉴权与状态拦截
+    await expect(
+      client.agentCreateBounty('tr_ag_unknown', {
+        project_id: activeProject.id,
+        title: 'Task',
+        difficulty: 'C',
+        assignee_mode: 'any',
+      }),
+    ).rejects.toMatchObject({ code: 'UNAUTHORIZED', status: 401 });
+
+    await expect(
+      client.agentCreateBounty(disabled.api_key, {
+        project_id: activeProject.id,
+        title: 'Task',
+        difficulty: 'C',
+        assignee_mode: 'any',
+      }),
+    ).rejects.toMatchObject({ code: 'AGENT_DISABLED', status: 403 });
+
+    await expect(
+      client.agentCreateBounty(revoked.api_key, {
+        project_id: activeProject.id,
+        title: 'Task',
+        difficulty: 'C',
+        assignee_mode: 'any',
+      }),
+    ).rejects.toMatchObject({ code: 'AGENT_REVOKED', status: 401 });
+
+    // 越权字段（status / created_by / created_by_agent_id）被拒绝
+    for (const extra of [
+      { status: 'OPEN' },
+      { created_by: 'human' },
+      { created_by_agent_id: 'fake' },
+    ]) {
+      await expect(
+        client.agentCreateBounty(publisher.api_key, {
+          project_id: activeProject.id,
+          title: 'Forbidden extra',
+          difficulty: 'C',
+          assignee_mode: 'any',
+          ...extra,
+        } as never),
+      ).rejects.toMatchObject({ code: 'VALIDATION_ERROR', status: 400 });
+    }
+
+    // 标题空白、执行者组合不合法、未知项目与归档项目拦截
+    await expect(
+      client.agentCreateBounty(publisher.api_key, {
+        project_id: activeProject.id,
+        title: '   ',
+        difficulty: 'C',
+        assignee_mode: 'any',
+      }),
+    ).rejects.toMatchObject({ code: 'VALIDATION_ERROR', status: 400 });
+
+    await expect(
+      client.agentCreateBounty(publisher.api_key, {
+        project_id: activeProject.id,
+        title: 'Bad assignee',
+        difficulty: 'C',
+        assignee_mode: 'min_tier',
+      }),
+    ).rejects.toMatchObject({ code: 'VALIDATION_ERROR', status: 400 });
+
+    await expect(
+      client.agentCreateBounty(publisher.api_key, {
+        project_id: 'missing-project',
+        title: 'Unknown project',
+        difficulty: 'C',
+        assignee_mode: 'any',
+      }),
+    ).rejects.toMatchObject({ code: 'PROJECT_NOT_FOUND', status: 404 });
+
+    await expect(
+      client.agentCreateBounty(publisher.api_key, {
+        project_id: archivedProject.id,
+        title: 'Archived project',
+        difficulty: 'C',
+        assignee_mode: 'any',
+      }),
+    ).rejects.toMatchObject({ code: 'PROJECT_ARCHIVED', status: 409 });
+
+    // SKILL.md 包含 /api/v1/agent/bounties 与 agent_draft_policy 说明
+    const skillDoc = await client.getSkillMarkdown({ baseUrl: 'http://127.0.0.1:8420' });
+    expect(skillDoc.content).toContain('POST http://127.0.0.1:8420/api/v1/agent/bounties');
+    expect(skillDoc.content).toContain('agent_draft_policy');
+  });
+
+  it('支持 open 与 draft 双策略发单、草稿隔离及人工确认发布保留发布者身份', async () => {
+    const client = createMemoryBountyClient({ lan_open_registration: true });
+    const openProj = await client.createProject({
+      name: 'Open Policy Project',
+      agent_draft_policy: 'open',
+    });
+    const draftProj = await client.createProject({
+      name: 'Draft Policy Project',
+      agent_draft_policy: 'draft',
+    });
+
+    const publisher = await client.registerAgent({
+      name: 'feedback-watcher',
+      subscribe_all_projects: true,
+    });
+    const worker = await client.registerAgent({
+      name: 'worker-bot',
+      subscribe_all_projects: true,
+    });
+
+    const streamedToWorker: string[] = [];
+    const closeWorkerStream = await client.agentOpenStream(worker.api_key, ev => {
+      streamedToWorker.push(`${ev.event_type}:${ev.bounty_id}`);
+    });
+
+    // 1. open 策略：立即 OPEN、published_at 非空、写入身份字段与 created 事件并触发订阅分发
+    const openTask = await client.agentCreateBounty(publisher.api_key, {
+      project_id: openProj.id,
+      title: 'Fix login redirect',
+      description: 'Reported by monitor',
+      acceptance_criteria: 'E2E passes',
+      difficulty: 'B',
+      assignee_mode: 'any',
+    });
+    expect(openTask.status).toBe('OPEN');
+    expect(openTask.published_at).not.toBeNull();
+    expect(openTask.created_by).toBe(`agent:${publisher.agent.id}`);
+    expect(openTask.created_by_agent_id).toBe(publisher.agent.id);
+    expect(openTask.created_by_agent_name).toBe('feedback-watcher');
+
+    const openDetail = await client.getBountyDetail(openTask.id);
+    expect(openDetail.events).toHaveLength(1);
+    expect(openDetail.events[0]).toMatchObject({
+      event_type: 'created',
+      actor: `agent:${publisher.agent.id}`,
+      from_status: null,
+      to_status: 'OPEN',
+      detail: {
+        publisher_agent_id: publisher.agent.id,
+        publisher_agent_name: 'feedback-watcher',
+        policy: 'open',
+      },
+    });
+    expect(streamedToWorker).toEqual([`task.published:${openTask.id}`]);
+    const workerInboxAfterOpen = await client.agentListEvents(worker.api_key);
+    expect(workerInboxAfterOpen.events.map(e => e.bounty_id)).toEqual([openTask.id]);
+
+    // 2. draft 策略：落入 DRAFT、published_at 为 null、绝不分发事件且对所有 Agent（含发布者）隔离
+    const draftTask = await client.agentCreateBounty(publisher.api_key, {
+      project_id: draftProj.id,
+      title: 'Needs human triage',
+      description: 'Draft body',
+      difficulty: 'A',
+      assignee_mode: 'specific',
+      assignee_agent_id: worker.agent.id,
+      require_arbitration: true,
+    });
+    expect(draftTask.status).toBe('DRAFT');
+    expect(draftTask.published_at).toBeNull();
+    expect(draftTask.created_by).toBe(`agent:${publisher.agent.id}`);
+    expect(draftTask.created_by_agent_id).toBe(publisher.agent.id);
+    expect(draftTask.created_by_agent_name).toBe('feedback-watcher');
+
+    const draftDetailAdmin = await client.getBountyDetail(draftTask.id);
+    expect(draftDetailAdmin.events[0]).toMatchObject({
+      event_type: 'created',
+      actor: `agent:${publisher.agent.id}`,
+      from_status: null,
+      to_status: 'DRAFT',
+      detail: {
+        publisher_agent_id: publisher.agent.id,
+        publisher_agent_name: 'feedback-watcher',
+        policy: 'draft',
+      },
+    });
+
+    // 无任何推送或收件箱事件
+    expect(streamedToWorker).toEqual([`task.published:${openTask.id}`]);
+    expect((await client.agentListEvents(worker.api_key)).events).toHaveLength(1);
+    expect((await client.agentListEvents(publisher.api_key)).events).toHaveLength(1);
+
+    // 包括发布者在内的所有 Agent 不可见 DRAFT
+    for (const key of [publisher.api_key, worker.api_key]) {
+      const visibleIds = (await client.agentListBounties(key, { include_drafts: true })).map(b => b.id);
+      expect(visibleIds).toEqual([openTask.id]);
+      await expect(client.agentGetBountyDetail(key, draftTask.id)).rejects.toMatchObject({
+        code: 'BOUNTY_NOT_FOUND',
+        status: 404,
+      });
+    }
+
+    // 管理员编辑并确认发布后转为 OPEN，保留原发布者身份并触发定向指派分发
+    const edited = await client.updateBounty(draftTask.id, { title: 'Triaged & Ready' });
+    expect(edited.created_by).toBe(`agent:${publisher.agent.id}`);
+    expect(edited.created_by_agent_id).toBe(publisher.agent.id);
+    expect(edited.created_by_agent_name).toBe('feedback-watcher');
+
+    const published = await client.publishBounty(draftTask.id);
+    expect(published.status).toBe('OPEN');
+    expect(published.published_at).not.toBeNull();
+    expect(published.created_by).toBe(`agent:${publisher.agent.id}`);
+    expect(published.created_by_agent_id).toBe(publisher.agent.id);
+    expect(published.created_by_agent_name).toBe('feedback-watcher');
+
+    expect(streamedToWorker).toEqual([
+      `task.published:${openTask.id}`,
+      `task.assigned:${draftTask.id}`,
+    ]);
+    expect((await client.agentGetBountyDetail(worker.api_key, draftTask.id)).bounty.title).toBe(
+      'Triaged & Ready',
+    );
+
+    const discardedDraft = await client.agentCreateBounty(publisher.api_key, {
+      project_id: draftProj.id,
+      title: 'Private discarded draft',
+      description: 'UNAPPROVED_PRIVATE_BODY',
+      difficulty: 'C',
+      assignee_mode: 'any',
+    });
+    const cancelledDraft = await client.cancelBounty(discardedDraft.id);
+    expect(cancelledDraft.status).toBe('CANCELLED');
+    expect(cancelledDraft.published_at).toBeNull();
+    expect(cancelledDraft.created_by_agent_id).toBe(publisher.agent.id);
+    for (const key of [publisher.api_key, worker.api_key]) {
+      const visible = await client.agentListBounties(key, {
+        status: 'CANCELLED',
+        include_drafts: true,
+      });
+      expect(visible.some(b => b.id === discardedDraft.id)).toBe(false);
+      await expect(client.agentGetBountyDetail(key, discardedDraft.id)).rejects.toMatchObject({
+        code: 'BOUNTY_NOT_FOUND',
+        status: 404,
+      });
+    }
+
+    const humanTask = await client.createBounty({
+      project_id: openProj.id,
+      title: 'Human created',
+      difficulty: 'C',
+      assignee_mode: 'any',
+      status: 'OPEN',
+    });
+    expect(humanTask.created_by).toBe('human');
+    expect(humanTask.created_by_agent_id).toBeNull();
+    expect(humanTask.created_by_agent_name).toBeNull();
+
+    closeWorkerStream();
+  });
+
+  it('formatAgentDraftPolicy、formatBountyPublisher 与 formatEventActor 支持中英文且不含 · 分隔符', () => {
+    const agentBounty = {
+      created_by: 'agent:ag-1',
+      created_by_agent_id: 'ag-1',
+      created_by_agent_name: 'Scout',
+    };
+    const agentFallbackIdBounty = {
+      created_by: 'agent:ag-2',
+      created_by_agent_id: 'ag-2',
+      created_by_agent_name: null,
+    };
+    const agentPrefixOnlyBounty = {
+      created_by: 'agent:legacy-bot',
+      created_by_agent_id: null,
+      created_by_agent_name: null,
+    };
+    const humanBounty = {
+      created_by: 'human',
+      created_by_agent_id: null,
+      created_by_agent_name: null,
+    };
+
+    setLocalePreference('zh-CN');
+    expect(formatAgentDraftPolicy('open')).toBe('直接公开');
+    expect(formatAgentDraftPolicy('draft')).toBe('先入草稿待审');
+    expect(formatBountyPublisher(agentBounty)).toEqual({
+      isAgent: true,
+      label: 'Agent 提交: Scout',
+    });
+    expect(formatBountyPublisher(agentFallbackIdBounty)).toEqual({
+      isAgent: true,
+      label: 'Agent 提交: ag-2',
+    });
+    expect(formatBountyPublisher(agentPrefixOnlyBounty)).toEqual({
+      isAgent: true,
+      label: 'Agent 提交: legacy-bot',
+    });
+    expect(formatBountyPublisher(humanBounty)).toEqual({
+      isAgent: false,
+      label: '人工创建',
+    });
+    expect(formatEventActor('human', agentBounty)).toBe('管理员');
+    expect(formatEventActor('agent:ag-1', agentBounty)).toBe('Agent: Scout');
+    expect(formatEventActor('ag-1', agentBounty)).toBe('Agent: Scout');
+    expect(formatEventActor('agent:ag-2', agentFallbackIdBounty)).toBe('Agent: ag-2');
+
+    setLocalePreference('en');
+    expect(formatAgentDraftPolicy('open')).toBe('Publish directly');
+    expect(formatAgentDraftPolicy('draft')).toBe('Hold as draft for review');
+    expect(formatBountyPublisher(agentBounty)).toEqual({
+      isAgent: true,
+      label: 'Submitted by Agent: Scout',
+    });
+    expect(formatBountyPublisher(humanBounty)).toEqual({
+      isAgent: false,
+      label: 'Created manually',
+    });
+    expect(formatEventActor('human', agentBounty)).toBe('Admin');
+    expect(formatEventActor('agent:ag-1', agentBounty)).toBe('Agent: Scout');
+
+    for (const text of [
+      formatAgentDraftPolicy('open'),
+      formatAgentDraftPolicy('draft'),
+      formatBountyPublisher(agentBounty).label,
+      formatBountyPublisher(humanBounty).label,
+      formatEventActor('human'),
+      formatEventActor('agent:ag-1', agentBounty),
+    ]) {
+      expect(text).not.toContain('·');
     }
     setLocalePreference('zh-CN');
   });

@@ -6,6 +6,7 @@ import type { Action } from 'svelte/action';
 import {
   ServiceApiError,
   type AgentChannelStatus,
+  type AgentDraftPolicy,
   type AgentStatus,
   type AgentSummary,
   type AgentTier,
@@ -144,6 +145,55 @@ export function formatEventLabel(eventType: string): string {
     default:
       return eventType;
   }
+}
+
+export function formatAgentDraftPolicy(policy: AgentDraftPolicy): string {
+  switch (policy) {
+    case 'open':
+      return translate('直接公开');
+    case 'draft':
+      return translate('先入草稿待审');
+  }
+}
+
+export function formatBountyPublisher(
+  bounty: Pick<BountyTask, 'created_by' | 'created_by_agent_id' | 'created_by_agent_name'>,
+): { isAgent: boolean; label: string } {
+  if (bounty.created_by_agent_id || bounty.created_by.startsWith('agent:')) {
+    const name =
+      bounty.created_by_agent_name ||
+      bounty.created_by_agent_id ||
+      bounty.created_by.slice(6);
+    return {
+      isAgent: true,
+      label: translate('Agent 提交: {name}', { name }),
+    };
+  }
+  return {
+    isAgent: false,
+    label: translate('人工创建'),
+  };
+}
+
+export function formatEventActor(
+  actor: string,
+  bounty?: Pick<BountyTask, 'created_by' | 'created_by_agent_id' | 'created_by_agent_name'>,
+): string {
+  if (actor === 'human') {
+    return translate('管理员');
+  }
+  if (
+    bounty?.created_by_agent_id &&
+    (actor === `agent:${bounty.created_by_agent_id}` || actor === bounty.created_by_agent_id)
+  ) {
+    return translate('Agent: {name}', {
+      name: bounty.created_by_agent_name || bounty.created_by_agent_id,
+    });
+  }
+  if (actor.startsWith('agent:')) {
+    return translate('Agent: {name}', { name: actor.slice(6) });
+  }
+  return actor;
 }
 
 export function formatTimestamp(iso: string | null | undefined): string {

@@ -5,15 +5,17 @@
    */
   import { open as openDialog } from '@tauri-apps/plugin-dialog';
   import type {
+    AgentDraftPolicy,
     BountyProject,
     CreateProjectInput,
     UpdateProjectInput,
   } from '../api/types';
-  import { t } from '../i18n';
+  import { observeAnchoredPopover, positionAnchoredPopover } from '../anchored-popover';
+  import { locale, t } from '../i18n';
   import { serializeProjectIcon, type ProjectIcon as ProjectIconValue } from '../project-icons';
   import ProjectIcon from '../ProjectIcon.svelte';
   import ProjectIconPicker from '../ProjectIconPicker.svelte';
-  import { formatServiceError } from './helpers';
+  import { formatAgentDraftPolicy, formatServiceError } from './helpers';
 
   interface Props {
     projects: BountyProject[];
@@ -44,12 +46,65 @@
   let formDescription = $state('');
   let formWorkspacePath = $state('');
   let formDefaultCriteria = $state('');
+  let formAgentPolicy = $state<AgentDraftPolicy>('open');
+
+  let policyHelpButton = $state<HTMLButtonElement | undefined>(undefined);
+  let policyHelpBubble = $state<HTMLDivElement | undefined>(undefined);
+  let policyHelpOpen = $state(false);
 
   let iconPickerOpen = $state(false);
   let busy = $state(false);
   let panelError = $state('');
 
+  function closePolicyHelp(): void {
+    policyHelpOpen = false;
+    if (
+      typeof policyHelpBubble?.hidePopover === 'function' &&
+      policyHelpBubble.matches(':popover-open')
+    ) {
+      policyHelpBubble.hidePopover();
+    }
+  }
+
+  function togglePolicyHelp(): void {
+    if (!policyHelpButton || !policyHelpBubble) return;
+    policyHelpOpen = !policyHelpOpen;
+    if (!policyHelpOpen) {
+      closePolicyHelp();
+      return;
+    }
+    if (
+      typeof policyHelpBubble.showPopover === 'function' &&
+      !policyHelpBubble.matches(':popover-open')
+    ) {
+      policyHelpBubble.showPopover();
+    }
+    positionAnchoredPopover(policyHelpButton, policyHelpBubble, closePolicyHelp);
+  }
+
+  $effect(() => {
+    if (!policyHelpOpen || !policyHelpButton || !policyHelpBubble) return;
+    const stopObserve = observeAnchoredPopover(
+      policyHelpButton,
+      policyHelpBubble,
+      closePolicyHelp,
+    );
+    const onKeydown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        event.stopPropagation();
+        closePolicyHelp();
+      }
+    };
+    document.addEventListener('keydown', onKeydown, true);
+    return () => {
+      document.removeEventListener('keydown', onKeydown, true);
+      stopObserve();
+    };
+  });
+
   function openCreateForm(): void {
+    closePolicyHelp();
     formMode = 'create';
     editingId = null;
     formName = '';
@@ -57,10 +112,12 @@
     formDescription = '';
     formWorkspacePath = '';
     formDefaultCriteria = '';
+    formAgentPolicy = 'open';
     panelError = '';
   }
 
   function openEditForm(project: BountyProject): void {
+    closePolicyHelp();
     formMode = 'edit';
     editingId = project.id;
     formName = project.name;
@@ -68,10 +125,12 @@
     formDescription = project.description;
     formWorkspacePath = project.workspace_path;
     formDefaultCriteria = project.default_acceptance_criteria;
+    formAgentPolicy = project.agent_draft_policy ?? 'open';
     panelError = '';
   }
 
   function closeForm(): void {
+    closePolicyHelp();
     formMode = 'closed';
     editingId = null;
     panelError = '';
@@ -109,6 +168,7 @@
           description: formDescription.trim(),
           workspace_path: formWorkspacePath.trim(),
           default_acceptance_criteria: formDefaultCriteria,
+          agent_draft_policy: formAgentPolicy,
         });
       } else if (formMode === 'edit' && editingId) {
         await onUpdateProject(editingId, {
@@ -117,6 +177,7 @@
           description: formDescription.trim(),
           workspace_path: formWorkspacePath.trim(),
           default_acceptance_criteria: formDefaultCriteria,
+          agent_draft_policy: formAgentPolicy,
         });
       }
       closeForm();
@@ -287,6 +348,86 @@
         ></textarea>
       </div>
 
+      <div class="project-form-field" data-slot="project-agent-policy-field">
+        <div class="settings-label-group">
+          <span class="composer-label" id="project-form-agent-policy-label">
+            {$t('Agent 发单策略')}
+          </span>
+          <span class="settings-help">
+            <button
+              bind:this={policyHelpButton}
+              type="button"
+              class="settings-help-trigger"
+              data-action="toggle-agent-policy-help"
+              aria-label={$t('关于 Agent 发单策略')}
+              aria-expanded={policyHelpOpen}
+              aria-controls="project-agent-policy-help"
+              onclick={togglePolicyHelp}
+            >
+              <svg
+                width="14"
+                height="14"
+                viewBox="0 0 16 16"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.5"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
+              >
+                <circle cx="8" cy="8" r="6.25" />
+                <path d="M6.4 6.2a1.7 1.7 0 0 1 3.2.7c0 1.1-1.6 1.4-1.6 2.5" />
+                <circle cx="8" cy="11.8" r=".75" fill="currentColor" stroke="none" />
+              </svg>
+            </button>
+            <div
+              bind:this={policyHelpBubble}
+              id="project-agent-policy-help"
+              class="settings-help-popover dropdown"
+              role="note"
+              popover="manual"
+              hidden={!policyHelpOpen}
+              style="position: fixed; margin: 0; bottom: auto; right: auto; box-sizing: border-box;"
+            >
+              <p>{$t('直接公开：Agent 提交的任务立即成为待接单并推送通知')}</p>
+              <p>{$t('先入草稿待审：Agent 提交的任务先进入待我处理草稿箱等待人工确认')}</p>
+            </div>
+          </span>
+        </div>
+
+        <div
+          class="segmented-group policy-toggle-group"
+          role="group"
+          aria-labelledby="project-form-agent-policy-label"
+          data-slot="agent-policy-group"
+        >
+          <button
+            type="button"
+            class="segmented-button policy-toggle-option"
+            class:active={formAgentPolicy === 'open'}
+            aria-pressed={formAgentPolicy === 'open'}
+            data-agent-policy="open"
+            onclick={() => {
+              formAgentPolicy = 'open';
+            }}
+          >
+            {$t('直接公开')}
+          </button>
+          <button
+            type="button"
+            class="segmented-button policy-toggle-option"
+            class:active={formAgentPolicy === 'draft'}
+            aria-pressed={formAgentPolicy === 'draft'}
+            data-agent-policy="draft"
+            onclick={() => {
+              formAgentPolicy = 'draft';
+            }}
+          >
+            {$t('先入草稿待审')}
+          </button>
+        </div>
+      </div>
+
       <div class="inline-project-actions">
         <button
           type="button"
@@ -316,6 +457,11 @@
   {:else}
     <ul class="project-management-list" data-slot="project-list">
       {#each projects as project (project.id)}
+        {@const policyValue = project.agent_draft_policy ?? 'open'}
+        {@const policyLabel = (() => {
+          const _lang = $locale;
+          return formatAgentDraftPolicy(policyValue);
+        })()}
         <li
           class="project-management-item"
           class:archived={project.archived}
@@ -326,6 +472,13 @@
             <div class="project-item-copy">
               <div class="project-item-title-row">
                 <span class="project-item-name">{project.name}</span>
+                <span
+                  class="settings-tag project-policy-tag"
+                  data-tag="agent-policy"
+                  data-policy-value={policyValue}
+                >
+                  {policyLabel}
+                </span>
                 {#if project.archived}
                   <span class="settings-tag" data-tag="archived">{$t('已归档')}</span>
                 {/if}

@@ -527,6 +527,17 @@ export const appMessages: Readonly<Record<string, string>> = {
   "连接通道": "Channel",
   "最近推送": "Last pushed",
   "从未推送": "Never pushed",
-  "刷新": "Refresh"
+  "刷新": "Refresh",
+  "Agent 发单策略": "Agent publishing policy",
+  "关于 Agent 发单策略": "About Agent publishing policy",
+  "直接公开": "Publish directly",
+  "先入草稿待审": "Hold as draft for review",
+  "直接公开：Agent 提交的任务立即成为待接单并推送通知": "Publish directly: Agent-submitted bounties become Open immediately and notify matching Agents.",
+  "先入草稿待审：Agent 提交的任务先进入待我处理草稿箱等待人工确认": "Hold as draft for review: Agent-submitted bounties enter your Inbox drafts until manually approved.",
+  "Agent 提交: {name}": "Submitted by Agent: {name}",
+  "Agent: {name}": "Agent: {name}",
+  "人工创建": "Created manually",
+  "管理员": "Admin",
+  "确认发布": "Confirm & publish"
 };
 

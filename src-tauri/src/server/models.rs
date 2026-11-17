@@ -239,6 +239,27 @@ pub struct CreateBounty {
     pub created_by: String,
 }
 
+/// 结构职责：Agent 提交的悬赏内容；发布者由认证身份绑定，初始状态由项目策略决定。
+/// 约束条件：拒绝状态、发布者等额外字段；执行者限制组合与人工创建采用相同校验。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentCreateBounty {
+    pub project_id: String,
+    pub title: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub acceptance_criteria: String,
+    pub difficulty: Tier,
+    pub assignee_mode: AssigneeMode,
+    #[serde(default)]
+    pub assignee_min_tier: Option<Tier>,
+    #[serde(default)]
+    pub assignee_agent_id: Option<String>,
+    #[serde(default)]
+    pub require_arbitration: bool,
+}
+
 /// 结构职责：仅草稿可更新的内容；状态、发布者和租约不得由 PATCH 修改。
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -269,6 +290,10 @@ pub struct Bounty {
     pub require_arbitration: bool,
     pub status: BountyStatus,
     pub created_by: String,
+    /// Agent 发布时绑定的身份；人工创建为 None，编辑和状态流转均保留该值。
+    pub created_by_agent_id: Option<String>,
+    /// 由发布者外键关联读取的当前名称，不包含 Agent 凭证或评分。
+    pub created_by_agent_name: Option<String>,
     pub lease_id: i64,
     pub lease_agent_id: Option<String>,
     pub lease_expires_at: Option<String>,

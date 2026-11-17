@@ -1201,8 +1201,12 @@
     activeSection = section;
     preferences = { ...preferences, workspaceSection: section };
     mobileSidebarOpen = false;
-    if (section === 'agents' && serviceConnected) {
-      void refreshAgentsOnly();
+    if (serviceConnected) {
+      if (section === 'bounties' || section === 'inbox') {
+        void refreshBountiesOnly();
+      } else if (section === 'agents') {
+        void refreshAgentsOnly();
+      }
     }
     void persistConfig();
   }
@@ -1914,6 +1918,15 @@
                 </button>
               {/each}
             </div>
+
+            <button
+              type="button"
+              class="secondary-action"
+              data-action="refresh-inbox"
+              onclick={() => void refreshBountiesOnly()}
+            >
+              {$t('刷新')}
+            </button>
           </div>
 
           <div class="skeleton-stage" data-slot="inbox-region">

@@ -8,6 +8,7 @@
   import ProjectIcon from '../ProjectIcon.svelte';
   import {
     formatAssigneeConstraint,
+    formatBountyPublisher,
     formatBountyStatus,
     formatTimestamp,
     renderMarkdownAction,
@@ -29,6 +30,11 @@
   const assigneeLabel = $derived.by(() => {
     const _lang = $locale;
     return formatAssigneeConstraint(bounty);
+  });
+
+  const publisher = $derived.by(() => {
+    const _lang = $locale;
+    return formatBountyPublisher(bounty);
   });
 
   const timeLabel = $derived(formatTimestamp(bounty.updated_at || bounty.created_at));
@@ -79,7 +85,14 @@
         <span class="bounty-card-project-name">{project?.name ?? $t('未命名项目')}</span>
       </span>
 
-      <span class="bounty-card-constraint">{assigneeLabel}</span>
+      <div class="bounty-card-meta-end">
+        {#if publisher.isAgent}
+          <span class="bounty-publisher-pill" data-publisher-kind="agent">
+            {publisher.label}
+          </span>
+        {/if}
+        <span class="bounty-card-constraint">{assigneeLabel}</span>
+      </div>
     </div>
   </button>
 </article>

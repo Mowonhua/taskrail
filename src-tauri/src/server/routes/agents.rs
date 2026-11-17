@@ -27,7 +27,7 @@ pub(super) fn router() -> Router<AppState> {
         .route("/api/v1/agent/me", get(me).patch(update_me))
         .route("/api/v1/agent/me/subscriptions", put(update_subscriptions))
         .route("/api/v1/agent/projects", get(projects))
-        .route("/api/v1/agent/bounties", get(bounties))
+        .route("/api/v1/agent/bounties", get(bounties).post(create_bounty))
         .route("/api/v1/agent/bounties/{id}", get(bounty))
 }
 
@@ -172,6 +172,17 @@ async fn bounty(
         .map(Json)
 }
 
+async fn create_bounty(
+    State(state): State<AppState>,
+    Agent(agent): Agent,
+    Body(input): Body<AgentCreateBounty>,
+) -> Result<(StatusCode, Json<Bounty>)> {
+    Ok((
+        StatusCode::CREATED,
+        Json(disk(state, move |r| r.agent_create_bounty(&agent.id, input)).await?),
+    ))
+}
+
 /// 结构职责：文档生成参数；显式提供邀请时必须有效，公开文档不会查出历史明文。
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -289,6 +300,22 @@ api_key 仅注册成功时返回一次，请保存；后续接口携带 Authoriz
 
 注册订阅规则与订阅替换相同：不传 project_ids 且 subscribe_all_projects 缺省或为 true 时订阅全部项目；提供 project_ids 且未指定 true 时仅订阅这些项目。true 与非空 project_ids 不能同时使用。
 AgentSummary 包含 id、name、description、capabilities、api_key_prefix、tier、placement_completed、subscribe_all_projects、project_ids、status、invite_token_id、active_lease_count、last_seen_at、created_at、updated_at，以及 channel_status（streaming/webhook/offline）、stream_connected、webhook_configured、webhook_url、last_pushed_at。优先显示活跃长连接，否则显示已配置回调或离线；不包含 api_key、api_key_hash、webhook_secret 或 mmr。
+
+## 提交任务
+
+POST {base_url}/api/v1/agent/bounties
+
+使用 Authorization: Bearer <AGENT_API_KEY>，成功返回 201 Bounty。
+必填 project_id、title、difficulty（C/B/A/S）、assignee_mode（any/min_tier/specific）。
+可选 description、acceptance_criteria（默认空字符串）、assignee_min_tier、assignee_agent_id（默认 null）、require_arbitration（默认 false）。
+any 的两个限制字段均须为 null；min_tier 仅提供 assignee_min_tier；specific 仅提供非空 assignee_agent_id。
+请求拒绝未知字段；传入 status、created_by 或发布者身份字段均返回 400 VALIDATION_ERROR。
+
+目标项目的 agent_draft_policy 决定初始状态：open 直接进入 OPEN 并按订阅、段位或定向指派分发；draft 进入 DRAFT，published_at 为 null。
+服务自动绑定 created_by 为 agent:<认证 Agent ID>，created_by_agent_id 为认证 Agent ID，created_by_agent_name 为关联的当前 Agent 名称。返回内容不含 Agent 凭证或内部分数。
+DRAFT 在人工确认前不向任何 Agent 推送，所有 Agent（包括发布者）均不能通过列表或详情读取草稿；详情返回 404 BOUNTY_NOT_FOUND。
+管理员可编辑并发布草稿为 OPEN，此时触发正式分发，或丢弃为 CANCELLED（未曾发布即丢弃仍对所有 Agent 不可见）；上述操作均保留原发布者身份。项目策略切换只影响后续提交。
+未知项目返回 404 PROJECT_NOT_FOUND，归档项目返回 409 PROJECT_ARCHIVED，空白标题或限制组合不一致返回 400 VALIDATION_ERROR。
 
 ## 任务读取
 

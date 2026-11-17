@@ -88,6 +88,8 @@ export interface BountyTask {
   require_arbitration: boolean;
   status: BountyStatus;
   created_by: string;
+  created_by_agent_id: string | null;
+  created_by_agent_name: string | null;
   lease_id: number;
   lease_agent_id: string | null;
   lease_expires_at: string | null;
@@ -129,6 +131,18 @@ export interface CreateBountyInput {
   require_arbitration?: boolean;
   status: 'DRAFT' | 'OPEN';
   created_by?: string;
+}
+
+export interface AgentCreateBountyInput {
+  project_id: string;
+  title: string;
+  description?: string;
+  acceptance_criteria?: string;
+  difficulty: BountyDifficulty;
+  assignee_mode: AssigneeMode;
+  assignee_min_tier?: BountyDifficulty | null;
+  assignee_agent_id?: string | null;
+  require_arbitration?: boolean;
 }
 
 export interface UpdateBountyInput {
