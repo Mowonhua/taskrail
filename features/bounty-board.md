@@ -379,7 +379,7 @@
 
 管理员可在任务 `DRAFT` 详情抽屉中邀请活跃 Agent 担任协作者（`POST /api/v1/bounties/{id}/collaborator`；非活跃 Agent 返回 `409 AGENT_INACTIVE`）并支持更换或取消协作。仅受邀协作者可通过 `include_drafts=true` 查看对应草稿，调用 `PATCH /api/v1/agent/bounties/{id}` 协同修订正文、验收条件或前置依赖，或在草稿下发表讨论评论（不会触发执行抢单），也可以调用 `POST /api/v1/agent/bounties/{id}/split` 在单事务内将该草稿拆分为多个关联 `parent_bounty_id` 的派生子草稿（支持批内符号 `key` 前向依赖、跨批次现有任务依赖及归档项目/环依赖原子回滚）。Agent 对草稿的修订、拆单或评论会自动打上 `draft_needs_human_review=true`（「待人工审核」）标记；人类管理员发表评论或发布任务会清除该标记并通知协作者。所有悬赏在创建、编辑与拆单时支持声明 `blocked_by` 有向无环图（DAG）前置依赖，严禁自依赖与循环依赖（`409 DEPENDENCY_CYCLE`），Agent 侧对无权查看的前置依赖（含未受邀草稿、未发布即取消草稿与不可见定向/未订阅任务）标题自动脱敏为 `[草稿前置任务]`，详情 `blocks` 与 `child_bounties` 仅返回当前 Agent 有权查看的关联任务。存在未达到 `COMPLETED` 状态的前置任务时，下游任务呈现 `is_blocked=true`（「等待前置」）状态：即使发布为 `OPEN` 亦暂缓推送通知并拒绝 `claim`/`decline`（`409 BOUNTY_BLOCKED`）；当最后一个前置依赖经直接交付或仲裁验收完成时，系统在同一事务内自动解除阻塞、记录 `dependency_unlocked` 事件并补发定向或公开派单通知。桌面端还在任务新建/编辑弹窗提供前置依赖多选列表，在详情抽屉提供依赖双向跳转与「发布全部派生草稿」，并在「待我处理」提供多选草稿与原子批量发布（`POST /api/v1/bounties/publish-batch`）；前后端 `SKILL.md` 与中英文格式化文本全程零中点分隔符。
 
-创建提交：-
+创建提交：f884e27
 
 ### 功能关系
 
