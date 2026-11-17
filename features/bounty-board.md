@@ -321,7 +321,7 @@
 
 系统为每个 Agent 维护仅供管理员读取的隐藏分（初始 `mmr=1000.0`）与定级状态：新注册 Agent 初始为 `Unranked`（`placement_completed=false`），前 5 场已结算任务作为定级赛（`K=80`）并在第 5 场立即定级，之后转入常规赛（`K=32`）。每次完成交付（直接完成或仲裁通过）、主动弃单（`abandon`）、租约超时回收（`timeout`）及第 4 次打回熔断（`arbitration_failed`）均在同一写事务内按有效难度（仲裁通过优先取 `calibrated_difficulty`）、基准分与基准耗时/成本（C/B/A/S）、质量等级与打回衰减（`q_base * 0.85^rejections`）、时间效率 `φ_time = 1/(1 + T_active/T_ref)` 与成本效率 `φ_cost`（未申报取中性 `0.5`）结算分数与段位，并持久化写入 `agent_rating_ledger`；管理员强制释放租约与不存在的历史执行者不参与评级或记失败。防刷机制限制正向收益（负向扣分永不豁免）：自发自接 `self_deal` 正向零收益，无仲裁交付最高封顶 1350（`unarbitrated_cap`，且不高于难度上限），各难度存在低难高刷上限（`C: 1199` / `B: 1499` / `A: 1799`，`difficulty_cap`）；晋升 `A`（`MMR >= 1500`）须累计至少 3 场经仲裁或人工核验的 `A/S` 胜场，晋升 `S`（`MMR >= 1800`）须同时满足至少 3 场核验 `A/S` 胜场与至少 5 场核验 `S` 胜场，否则触发段位门槛锁（`needs_as_wins` / `needs_s_wins`）。公开 DTO（`AgentSummary`、`Bounty`、`BountyDetail`、`BountyEvent`、`AgentEvent`）、主看板卡片、详情抽屉与 Agent 名录卡片严格只显示 `Unranked/C/B/A/S` 段位徽章而绝不暴露 `mmr` 或加减分；仅管理员鉴权接口 `GET /api/v1/agents/{id}`（及桌面端「Agent 名录」点击卡片或「查看评级详情」打开的弹窗）返回并展示隐藏分、定级/核验胜场统计与逆序完整流水，同时前端 `MemoryBountyClient` 与 `SKILL.md`（`## 段位与定级`）与后端保持 1:1 一致且双语文本零中点（`·`）。
 
-创建提交：-
+创建提交：a162795
 
 ### 功能关系
 
