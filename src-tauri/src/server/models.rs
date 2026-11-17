@@ -12,6 +12,8 @@ macro_rules! string_enum {
 }
 
 string_enum!(Tier { C => "C", B => "B", A => "A", S => "S" });
+// 验收质量档位，供交付结算读取。
+string_enum!(QualityGrade { Perfect => "perfect", Flawed => "flawed" });
 string_enum!(AssigneeMode { Any => "any", MinTier => "min_tier", Specific => "specific" });
 string_enum!(BountyStatus {
     Draft => "DRAFT", Open => "OPEN", InProgress => "IN_PROGRESS",
@@ -311,6 +313,13 @@ pub struct Bounty {
     pub active_started_at: Option<String>,
     pub comment_count: i64,
     pub rejection_count: i64,
+    pub arbitrator_agent_id: Option<String>,
+    /// 仅关联读取裁判当前公开资料，不序列化凭证或内部评分。
+    pub arbitrator_agent_name: Option<String>,
+    pub arbitrator_agent_tier: Option<AgentTier>,
+    pub arbitration_expires_at: Option<String>,
+    pub quality_grade: Option<QualityGrade>,
+    pub calibrated_difficulty: Option<Tier>,
     pub completion_note: Option<String>,
     pub completion_cost: Option<f64>,
     pub published_at: Option<String>,
@@ -466,4 +475,36 @@ pub struct RequestInfoInput {
 pub struct BountyCommentResult {
     pub bounty: Bounty,
     pub comment: BountyComment,
+}
+
+/// 结构职责：整体替换全局仲裁顺位；拒绝空白项，保留首次出现的 ID 顺序。
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArbitrationConfig {
+    pub arbitrator_chain: Vec<String>,
+}
+
+/// 结构职责：持有者凭当前租约提交仲裁；成本须有限非负，空白说明保存为 None。
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SubmitArbitrationInput {
+    pub lease_id: i64,
+    pub completion_note: Option<String>,
+    pub completion_cost: Option<f64>,
+}
+
+/// 结构职责：裁判验收结果；质量缺省 perfect，可选校准难度与评论。
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApproveArbitrationInput {
+    pub quality_grade: Option<QualityGrade>,
+    pub calibrated_difficulty: Option<Tier>,
+    pub comment: Option<String>,
+}
+
+/// 结构职责：打回裁决；正文去除首尾空白后必须非空。
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RejectArbitrationInput {
+    pub comment: String,
 }

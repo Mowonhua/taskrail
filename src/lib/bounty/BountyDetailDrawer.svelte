@@ -3,13 +3,22 @@
    * 文件职责：承载右侧滑出的悬赏任务详情抽屉。
    * 定义范围：展示任务状态与元数据、状态转换动作栏（发布/撤回/编辑/取消）、Markdown+KaTeX 正文与验收条件渲染及状态流转时间线。
    */
-  import type { BountyDetail, BountyProject, BountyTask } from '../api/types';
+  import type {
+    ApproveArbitrationInput,
+    BountyDetail,
+    BountyDifficulty,
+    BountyProject,
+    BountyTask,
+    QualityGrade,
+    RejectArbitrationInput,
+  } from '../api/types';
   import { locale, t } from '../i18n';
   import ProjectIcon from '../ProjectIcon.svelte';
   import {
     computeActiveDurationMs,
     formatActiveDuration,
     formatAssigneeConstraint,
+    formatBountyArbitrator,
     formatBountyExecutor,
     formatBountyPublisher,
     formatBountyStatus,
@@ -19,6 +28,7 @@
     formatEventActor,
     formatEventLabel,
     formatLeaseCountdown,
+    formatQualityGrade,
     formatServiceError,
     formatTimestamp,
     renderMarkdownAction,
@@ -34,6 +44,8 @@
     onCancel: (bountyId: string) => Promise<void>;
     onReleaseLease: (bountyId: string) => Promise<void>;
     onCreateComment?: (bountyId: string, body: string) => Promise<void>;
+    onApproveArbitration?: (bountyId: string, input: ApproveArbitrationInput) => Promise<void>;
+    onRejectArbitration?: (bountyId: string, input: RejectArbitrationInput) => Promise<void>;
   }
 
   let {
@@ -46,6 +58,8 @@
     onCancel,
     onReleaseLease,
     onCreateComment,
+    onApproveArbitration,
+    onRejectArbitration,
   }: Props = $props();
 
   let busy = $state(false);
@@ -54,7 +68,13 @@
   let commentDraft = $state('');
   let commentSubmitting = $state(false);
   let commentError = $state('');
+  let approveGrade = $state<QualityGrade>('perfect');
+  let approveDifficulty = $state<'' | BountyDifficulty>('');
+  let approveComment = $state('');
+  let rejectComment = $state('');
+  let arbitrationError = $state('');
   let lastBountyId = '';
+  let lastArbitrationStateKey = '';
 
   const bounty = $derived(detail.bounty);
   const events = $derived(detail.events);
@@ -66,11 +86,21 @@
       commentDraft = '';
       commentError = '';
     }
+    const arbitrationKey = `${bounty.id}:${bounty.status}:${bounty.rejection_count}`;
+    if (arbitrationKey !== lastArbitrationStateKey) {
+      lastArbitrationStateKey = arbitrationKey;
+      approveGrade = 'perfect';
+      approveDifficulty = '';
+      approveComment = '';
+      rejectComment = '';
+      arbitrationError = '';
+    }
   });
 
   $effect(() => {
     const needsLiveTimer =
       bounty.status === 'IN_PROGRESS' ||
+      (bounty.status === 'PENDING_ARBITRATION' && Boolean(bounty.arbitration_expires_at)) ||
       (bounty.status === 'OPEN' &&
         bounty.assignee_mode === 'specific' &&
         Boolean(bounty.assignment_expires_at));
@@ -102,10 +132,21 @@
     return formatBountyExecutor(bounty);
   });
 
+  const arbitrator = $derived.by(() => {
+    const _lang = $locale;
+    return formatBountyArbitrator(bounty);
+  });
+
   const leaseCountdown = $derived.by(() => {
     const _lang = $locale;
     if (bounty.status !== 'IN_PROGRESS') return null;
     return formatLeaseCountdown(bounty.lease_expires_at, nowMs);
+  });
+
+  const arbitrationCountdown = $derived.by(() => {
+    const _lang = $locale;
+    if (bounty.status !== 'PENDING_ARBITRATION') return null;
+    return formatLeaseCountdown(bounty.arbitration_expires_at, nowMs);
   });
 
   const assignmentCountdown = $derived.by(() => {
@@ -114,11 +155,17 @@
     return formatLeaseCountdown(bounty.assignment_expires_at, nowMs);
   });
 
+  const qualityLabel = $derived.by(() => {
+    const _lang = $locale;
+    return bounty.quality_grade ? formatQualityGrade(bounty.quality_grade) : null;
+  });
+
   const activeDurationMs = $derived(computeActiveDurationMs(bounty, nowMs));
 
   const showActiveDuration = $derived(
     bounty.status === 'IN_PROGRESS' ||
       bounty.status === 'WAITING_INFO' ||
+      bounty.status === 'PENDING_ARBITRATION' ||
       activeDurationMs > 0,
   );
 
@@ -155,6 +202,46 @@
       await fn();
     } catch (error) {
       actionError = formatServiceError(error);
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function submitApproveArbitration(): Promise<void> {
+    if (!onApproveArbitration || busy) return;
+    arbitrationError = '';
+    actionError = '';
+    busy = true;
+    try {
+      const trimmedComment = approveComment.trim();
+      const input: ApproveArbitrationInput = {
+        quality_grade: approveGrade,
+        ...(approveDifficulty ? { calibrated_difficulty: approveDifficulty } : {}),
+        ...(trimmedComment ? { comment: trimmedComment } : {}),
+      };
+      await onApproveArbitration(bounty.id, input);
+    } catch (error) {
+      arbitrationError = formatServiceError(error);
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function submitRejectArbitration(): Promise<void> {
+    if (!onRejectArbitration || busy) return;
+    const trimmed = rejectComment.trim();
+    if (!trimmed) {
+      arbitrationError = $t('请输入打回原因。');
+      return;
+    }
+    arbitrationError = '';
+    actionError = '';
+    busy = true;
+    try {
+      await onRejectArbitration(bounty.id, { comment: trimmed });
+      rejectComment = '';
+    } catch (error) {
+      arbitrationError = formatServiceError(error);
     } finally {
       busy = false;
     }
@@ -217,6 +304,29 @@
           {#if bounty.require_arbitration}
             <span class="arbitration-pill">{$t('仲裁开启')}</span>
           {/if}
+          {#if (bounty.rejection_count ?? 0) > 0}
+            <span class="rejection-pill" data-slot="detail-rejection-count">
+              {$t('已打回 {count}/4 次', { count: bounty.rejection_count })}
+            </span>
+          {/if}
+          {#if bounty.status === 'COMPLETED' && qualityLabel}
+            <span
+              class="quality-pill"
+              data-slot="detail-quality-grade"
+              data-quality-grade={bounty.quality_grade}
+            >
+              {$t('验收等级: {grade}', { grade: qualityLabel })}
+            </span>
+          {/if}
+          {#if bounty.status === 'COMPLETED' && bounty.calibrated_difficulty}
+            <span
+              class="difficulty-badge"
+              data-slot="detail-calibrated-difficulty"
+              data-difficulty={bounty.calibrated_difficulty}
+            >
+              {$t('校准难度 {difficulty}', { difficulty: bounty.calibrated_difficulty })}
+            </span>
+          {/if}
         </div>
         <button
           type="button"
@@ -252,6 +362,19 @@
             {$t('执行者: {agent}', { agent: executor.label })}
           </span>
         {/if}
+        {#if arbitrator}
+          <span
+            class="detail-meta-pill bounty-arbitrator-pill"
+            data-slot="detail-arbitrator"
+            data-arbitrator-tier={arbitrator.tier ?? 'unknown'}
+          >
+            {$t('裁判: {agent}', { agent: arbitrator.label })}
+          </span>
+        {:else if bounty.status === 'PENDING_ARBITRATION'}
+          <span class="detail-meta-pill bounty-human-fallback-pill" data-slot="detail-human-fallback">
+            {$t('人工仲裁兜底')}
+          </span>
+        {/if}
         {#if bounty.status === 'WAITING_INFO'}
           <span
             class="detail-meta-pill bounty-frozen-pill"
@@ -273,6 +396,20 @@
             {leaseCountdown.expired
               ? leaseCountdown.label
               : $t('租约剩余 {countdown}', { countdown: leaseCountdown.label })}
+          </span>
+        {:else if arbitrationCountdown}
+          <span
+            class="detail-meta-pill bounty-lease-pill"
+            data-slot="detail-arbitration-countdown"
+            data-lease-state={arbitrationCountdown.expired
+              ? 'expired'
+              : arbitrationCountdown.expiringSoon
+                ? 'expiring'
+                : 'active'}
+          >
+            {arbitrationCountdown.expired
+              ? $t('仲裁已超时待顺延')
+              : $t('仲裁剩余 {countdown}', { countdown: arbitrationCountdown.label })}
           </span>
         {:else if assignmentCountdown}
           <span
@@ -433,6 +570,146 @@
             ></div>
           {:else}
             <p class="detail-empty-hint">{$t('执行者未填写完成说明')}</p>
+          {/if}
+        </section>
+      {/if}
+
+      {#if bounty.status === 'PENDING_ARBITRATION' && (onApproveArbitration || onRejectArbitration)}
+        <section class="detail-section detail-arbitration-card" data-slot="detail-arbitration-panel">
+          <h3 class="detail-section-title">{$t('仲裁验收裁决')}</h3>
+
+          {#if bounty.rejection_count === 3}
+            <p class="composer-field-warning" data-slot="detail-circuit-breaker-warning">
+              {$t('第 4 次打回将直接终止本轮交付并重新分发')}
+            </p>
+          {/if}
+
+          {#if arbitrationError}
+            <p class="detail-comment-error" role="alert" data-status="arbitration-error">
+              {arbitrationError}
+            </p>
+          {/if}
+
+          {#if onApproveArbitration}
+            <div class="detail-arbitration-block" data-slot="arbitration-approve-form">
+              <div class="detail-arbitration-grid">
+                <div class="project-form-field">
+                  <span class="composer-label" id="arbitration-grade-label">{$t('验收等级')}</span>
+                  <div
+                    class="segmented-group"
+                    role="group"
+                    aria-labelledby="arbitration-grade-label"
+                  >
+                    <button
+                      type="button"
+                      class="segmented-button"
+                      class:active={approveGrade === 'perfect'}
+                      aria-pressed={approveGrade === 'perfect'}
+                      data-quality-grade="perfect"
+                      disabled={busy}
+                      onclick={() => {
+                        approveGrade = 'perfect';
+                      }}
+                    >
+                      {$t('完美交付')}
+                    </button>
+                    <button
+                      type="button"
+                      class="segmented-button"
+                      class:active={approveGrade === 'flawed'}
+                      aria-pressed={approveGrade === 'flawed'}
+                      data-quality-grade="flawed"
+                      disabled={busy}
+                      onclick={() => {
+                        approveGrade = 'flawed';
+                      }}
+                    >
+                      {$t('有瑕疵')}
+                    </button>
+                  </div>
+                </div>
+
+                <div class="project-form-field">
+                  <label class="composer-label" for="arbitration-calibrated-difficulty">
+                    {$t('校准难度')}
+                  </label>
+                  <select
+                    id="arbitration-calibrated-difficulty"
+                    class="composer-select"
+                    data-slot="arbitration-calibrated-difficulty"
+                    disabled={busy}
+                    bind:value={approveDifficulty}
+                  >
+                    <option value="">
+                      {$t('不调整（保持 {difficulty}）', { difficulty: bounty.difficulty })}
+                    </option>
+                    <option value="C">C</option>
+                    <option value="B">B</option>
+                    <option value="A">A</option>
+                    <option value="S">S</option>
+                  </select>
+                </div>
+              </div>
+
+              <div class="project-form-field">
+                <label class="composer-label" for="arbitration-approve-comment">
+                  {$t('裁决备注（可选）')}
+                </label>
+                <input
+                  id="arbitration-approve-comment"
+                  type="text"
+                  class="settings-text-input"
+                  data-slot="arbitration-approve-comment"
+                  placeholder={$t('裁决备注（可选）')}
+                  disabled={busy}
+                  bind:value={approveComment}
+                />
+              </div>
+
+              <div class="detail-arbitration-actions">
+                <button
+                  type="button"
+                  class="primary"
+                  data-action="approve-arbitration"
+                  disabled={busy}
+                  onclick={() => void submitApproveArbitration()}
+                >
+                  {$t('通过验收')}
+                </button>
+              </div>
+            </div>
+          {/if}
+
+          {#if onRejectArbitration}
+            <div class="detail-arbitration-block detail-arbitration-reject-block" data-slot="arbitration-reject-form">
+              <div class="project-form-field">
+                <label class="composer-label" for="arbitration-reject-comment">
+                  {$t('打回原因（必填）')}
+                </label>
+                <textarea
+                  id="arbitration-reject-comment"
+                  class="detail-comment-input"
+                  rows="2"
+                  data-slot="arbitration-reject-comment"
+                  placeholder={$t('请说明需要修改的具体问题…')}
+                  disabled={busy}
+                  bind:value={rejectComment}
+                ></textarea>
+              </div>
+              <div class="detail-arbitration-actions">
+                <button
+                  type="button"
+                  class="danger-text"
+                  data-action="reject-arbitration"
+                  disabled={busy || !rejectComment.trim()}
+                  onclick={() => void submitRejectArbitration()}
+                >
+                  {bounty.rejection_count === 3
+                    ? $t('第 4 次打回并重开')
+                    : $t('打回修改')}
+                </button>
+              </div>
+            </div>
           {/if}
         </section>
       {/if}

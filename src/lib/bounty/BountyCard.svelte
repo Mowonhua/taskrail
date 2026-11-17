@@ -8,11 +8,13 @@
   import ProjectIcon from '../ProjectIcon.svelte';
   import {
     formatAssigneeConstraint,
+    formatBountyArbitrator,
     formatBountyExecutor,
     formatBountyPublisher,
     formatBountyStatus,
     formatCompletionCost,
     formatLeaseCountdown,
+    formatQualityGrade,
     formatTimestamp,
     renderMarkdownAction,
   } from './helpers';
@@ -28,10 +30,14 @@
   let nowMs = $state(Date.now());
 
   $effect(() => {
-    const activeLeaseExpires =
-      bounty.status === 'IN_PROGRESS' ? bounty.lease_expires_at : null;
+    const activeExpires =
+      bounty.status === 'IN_PROGRESS'
+        ? bounty.lease_expires_at
+        : bounty.status === 'PENDING_ARBITRATION'
+          ? bounty.arbitration_expires_at
+          : null;
     nowMs = Date.now();
-    if (!activeLeaseExpires) return;
+    if (!activeExpires) return;
     const timer = setInterval(() => {
       nowMs = Date.now();
     }, 1000);
@@ -58,10 +64,26 @@
     return formatBountyExecutor(bounty);
   });
 
+  const arbitrator = $derived.by(() => {
+    const _lang = $locale;
+    return formatBountyArbitrator(bounty);
+  });
+
   const leaseCountdown = $derived.by(() => {
     const _lang = $locale;
     if (bounty.status !== 'IN_PROGRESS') return null;
     return formatLeaseCountdown(bounty.lease_expires_at, nowMs);
+  });
+
+  const arbitrationCountdown = $derived.by(() => {
+    const _lang = $locale;
+    if (bounty.status !== 'PENDING_ARBITRATION') return null;
+    return formatLeaseCountdown(bounty.arbitration_expires_at, nowMs);
+  });
+
+  const qualityLabel = $derived.by(() => {
+    const _lang = $locale;
+    return bounty.quality_grade ? formatQualityGrade(bounty.quality_grade) : null;
   });
 
   const completionCostLabel = $derived.by(() => {
@@ -98,6 +120,29 @@
         </span>
         {#if bounty.require_arbitration}
           <span class="arbitration-pill">{$t('仲裁开启')}</span>
+        {/if}
+        {#if (bounty.rejection_count ?? 0) > 0}
+          <span class="rejection-pill" data-slot="card-rejection-count">
+            {$t('已打回 {count}/4 次', { count: bounty.rejection_count })}
+          </span>
+        {/if}
+        {#if bounty.status === 'COMPLETED' && qualityLabel}
+          <span
+            class="quality-pill"
+            data-slot="card-quality-grade"
+            data-quality-grade={bounty.quality_grade}
+          >
+            {qualityLabel}
+          </span>
+        {/if}
+        {#if bounty.status === 'COMPLETED' && bounty.calibrated_difficulty}
+          <span
+            class="difficulty-badge"
+            data-slot="card-calibrated-difficulty"
+            data-difficulty={bounty.calibrated_difficulty}
+          >
+            {$t('校准难度 {difficulty}', { difficulty: bounty.calibrated_difficulty })}
+          </span>
         {/if}
       </div>
       {#if timeLabel}
@@ -154,6 +199,19 @@
             {$t('执行者: {agent}', { agent: executor.label })}
           </span>
         {/if}
+        {#if arbitrator}
+          <span
+            class="bounty-arbitrator-pill"
+            data-slot="card-arbitrator"
+            data-arbitrator-tier={arbitrator.tier ?? 'unknown'}
+          >
+            {$t('裁判: {agent}', { agent: arbitrator.label })}
+          </span>
+        {:else if bounty.status === 'PENDING_ARBITRATION'}
+          <span class="bounty-human-fallback-pill" data-slot="card-human-fallback">
+            {$t('人工仲裁兜底')}
+          </span>
+        {/if}
         {#if bounty.status === 'WAITING_INFO'}
           <span
             class="bounty-frozen-pill"
@@ -175,6 +233,20 @@
             {leaseCountdown.expired
               ? leaseCountdown.label
               : $t('租约剩余 {countdown}', { countdown: leaseCountdown.label })}
+          </span>
+        {:else if arbitrationCountdown}
+          <span
+            class="bounty-lease-pill"
+            data-slot="card-arbitration-countdown"
+            data-lease-state={arbitrationCountdown.expired
+              ? 'expired'
+              : arbitrationCountdown.expiringSoon
+                ? 'expiring'
+                : 'active'}
+          >
+            {arbitrationCountdown.expired
+              ? $t('仲裁已超时待顺延')
+              : $t('仲裁剩余 {countdown}', { countdown: arbitrationCountdown.label })}
           </span>
         {/if}
         {#if (bounty.comment_count ?? 0) > 0}

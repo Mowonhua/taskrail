@@ -171,7 +171,7 @@ fn v2_migration_preserves_all_existing_tables_and_is_idempotent() {
             |r| r.get::<_, String>(0)
         )
         .unwrap(),
-        "1,2,3,4,5,6"
+        "1,2,3,4,5,6,7"
     );
     assert_eq!(
         conn.query_row("SELECT acked_event_id FROM agents", [], |r| r

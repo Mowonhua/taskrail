@@ -19,6 +19,8 @@
     AgentFilter,
     AgentStatus,
     AgentSummary,
+    ApproveArbitrationInput,
+    ArbitrationConfig,
     BountyDetail,
     BountyProject,
     BountyQuery,
@@ -30,6 +32,7 @@
     CreateProjectInput,
     InviteTokenSummary,
     OnboardingSettings,
+    RejectArbitrationInput,
     ServiceMode,
     SkillDocument,
     UpdateBountyInput,
@@ -168,9 +171,15 @@
   });
   let onboardingLoaded = $state(false);
   let onboardingLoadError = $state('');
+  let arbitrationConfig = $state<ArbitrationConfig>({ arbitrator_chain: [] });
+  let arbitrationConfigLoaded = $state(false);
+  let arbitrationConfigLoadError = $state('');
   let agents = $state<AgentSummary[]>([]);
   let agentsLoaded = $state(false);
   let agentsLoadError = $state('');
+  let allAgents = $state<AgentSummary[]>([]);
+  let allAgentsLoaded = $state(false);
+  let allAgentsLoadError = $state('');
   let agentActivityFilter = $state<'all' | AgentActivity>('all');
   let agentStatusFilter = $state<'ALL' | AgentStatus>('ALL');
   let skillGuideOpen = $state(false);
@@ -383,13 +392,16 @@
   let componentDisposed = false;
   let bountyListInFlightCount = 0;
   let agentListInFlightCount = 0;
+  let allAgentListInFlightCount = 0;
   let detailInFlightCount = 0;
 
   let bountyListRequestSeq = 0;
   let workspaceRequestSeq = 0;
   let detailRequestSeq = 0;
   let agentListRequestSeq = 0;
+  let allAgentListRequestSeq = 0;
   let onboardingRequestSeq = 0;
+  let arbitrationConfigRequestSeq = 0;
   let skillDocRequestSeq = 0;
   let serviceReconnectSeq = 0;
   let connectionStatusSeq = 0;
@@ -410,6 +422,10 @@
       query.include_drafts = true;
     }
     return query;
+  }
+
+  function hasAgentFilter(): boolean {
+    return agentStatusFilter !== 'ALL' || agentActivityFilter !== 'all';
   }
 
   function buildAgentFilter(): AgentFilter {
@@ -476,34 +492,86 @@
     return { lan_open_registration: false, invite_tokens: [] };
   }
 
-  async function refreshAgentsOnly(): Promise<void> {
-    const agentsSeq = ++agentListRequestSeq;
+  async function refreshAllAgentsOnly(): Promise<void> {
+    const allSeq = ++allAgentListRequestSeq;
     const serviceSeq = serviceReconnectSeq;
     const api = activeBountyApi;
-    const filter = buildAgentFilter();
-    agentListInFlightCount += 1;
+    if (typeof api.listAgents !== 'function') {
+      if (allSeq === allAgentListRequestSeq && serviceSeq === serviceReconnectSeq) {
+        allAgents = [];
+        allAgentsLoaded = true;
+        allAgentsLoadError = '';
+      }
+      return;
+    }
+    allAgentListInFlightCount += 1;
     try {
-      const list = await api.listAgents(filter);
+      const list = await api.listAgents();
       if (
-        agentsSeq !== agentListRequestSeq ||
+        allSeq !== allAgentListRequestSeq ||
         serviceSeq !== serviceReconnectSeq ||
         api !== activeBountyApi
       ) {
         return;
       }
-      agents = Array.isArray(list) ? list : [];
-      agentsLoaded = true;
-      agentsLoadError = '';
+      allAgents = Array.isArray(list) ? list : [];
+      allAgentsLoaded = true;
+      allAgentsLoadError = '';
     } catch (error) {
       if (
-        agentsSeq === agentListRequestSeq &&
+        allSeq === allAgentListRequestSeq &&
         serviceSeq === serviceReconnectSeq &&
         api === activeBountyApi
       ) {
-        agentsLoadError = formatServiceError(error);
+        allAgentsLoadError = formatServiceError(error);
+      }
+    } finally {
+      allAgentListInFlightCount -= 1;
+    }
+  }
+
+  async function refreshAgentsOnly(): Promise<void> {
+    const agentsSeq = ++agentListRequestSeq;
+    const unfiltered = !hasAgentFilter();
+    const allSeq = unfiltered ? ++allAgentListRequestSeq : null;
+    const serviceSeq = serviceReconnectSeq;
+    const api = activeBountyApi;
+    const filter = buildAgentFilter();
+    agentListInFlightCount += 1;
+    if (unfiltered) {
+      allAgentListInFlightCount += 1;
+    }
+    try {
+      const list = await api.listAgents(filter);
+      if (serviceSeq !== serviceReconnectSeq || api !== activeBountyApi) {
+        return;
+      }
+      const normalized = Array.isArray(list) ? list : [];
+      if (agentsSeq === agentListRequestSeq) {
+        agents = normalized;
+        agentsLoaded = true;
+        agentsLoadError = '';
+      }
+      if (allSeq !== null && allSeq === allAgentListRequestSeq) {
+        allAgents = normalized;
+        allAgentsLoaded = true;
+        allAgentsLoadError = '';
+      }
+    } catch (error) {
+      if (serviceSeq === serviceReconnectSeq && api === activeBountyApi) {
+        const message = formatServiceError(error);
+        if (agentsSeq === agentListRequestSeq) {
+          agentsLoadError = message;
+        }
+        if (allSeq !== null && allSeq === allAgentListRequestSeq) {
+          allAgentsLoadError = message;
+        }
       }
     } finally {
       agentListInFlightCount -= 1;
+      if (unfiltered) {
+        allAgentListInFlightCount -= 1;
+      }
     }
   }
 
@@ -531,6 +599,55 @@
         api === activeBountyApi
       ) {
         onboardingLoadError = formatServiceError(error);
+      }
+      return null;
+    }
+  }
+
+  function normalizeArbitrationConfig(raw: unknown): ArbitrationConfig {
+    if (raw && typeof raw === 'object') {
+      const candidate = raw as Partial<ArbitrationConfig>;
+      return {
+        arbitrator_chain: Array.isArray(candidate.arbitrator_chain)
+          ? candidate.arbitrator_chain.filter((item): item is string => typeof item === 'string')
+          : [],
+      };
+    }
+    return { arbitrator_chain: [] };
+  }
+
+  async function refreshArbitrationConfig(): Promise<ArbitrationConfig | null> {
+    const arbSeq = ++arbitrationConfigRequestSeq;
+    const serviceSeq = serviceReconnectSeq;
+    const api = activeBountyApi;
+    if (typeof api.getArbitrationConfig !== 'function') {
+      if (arbSeq === arbitrationConfigRequestSeq && serviceSeq === serviceReconnectSeq) {
+        arbitrationConfig = { arbitrator_chain: [] };
+        arbitrationConfigLoaded = true;
+        arbitrationConfigLoadError = '';
+      }
+      return { arbitrator_chain: [] };
+    }
+    try {
+      const config = normalizeArbitrationConfig(await api.getArbitrationConfig());
+      if (
+        arbSeq !== arbitrationConfigRequestSeq ||
+        serviceSeq !== serviceReconnectSeq ||
+        api !== activeBountyApi
+      ) {
+        return null;
+      }
+      arbitrationConfig = config;
+      arbitrationConfigLoaded = true;
+      arbitrationConfigLoadError = '';
+      return config;
+    } catch (error) {
+      if (
+        arbSeq === arbitrationConfigRequestSeq &&
+        serviceSeq === serviceReconnectSeq &&
+        api === activeBountyApi
+      ) {
+        arbitrationConfigLoadError = formatServiceError(error);
       }
       return null;
     }
@@ -576,33 +693,131 @@
     const workspaceSeq = ++workspaceRequestSeq;
     const listSeq = ++bountyListRequestSeq;
     const agentsSeq = ++agentListRequestSeq;
+    const allAgentsSeq = ++allAgentListRequestSeq;
     const onbSeq = ++onboardingRequestSeq;
+    const arbSeq = ++arbitrationConfigRequestSeq;
     const statusSeq = inheritedStatusSeq ?? ++connectionStatusSeq;
     const serviceSeq = serviceReconnectSeq;
     const api = activeBountyApi;
     const query = buildBountyQuery();
     const agentFilterQuery = buildAgentFilter();
+    const agentFiltered = hasAgentFilter();
     bountyListInFlightCount += 1;
     agentListInFlightCount += 1;
+    allAgentListInFlightCount += 1;
+    const applyOnboardingSettled = (
+      onboardingSettled: PromiseSettledResult<OnboardingSettings>,
+    ): void => {
+      if (
+        onbSeq !== onboardingRequestSeq ||
+        serviceSeq !== serviceReconnectSeq ||
+        api !== activeBountyApi
+      ) {
+        return;
+      }
+      if (onboardingSettled.status === 'fulfilled') {
+        onboardingSettings = normalizeOnboardingSettings(onboardingSettled.value);
+        onboardingLoaded = true;
+        onboardingLoadError = '';
+      } else {
+        onboardingLoadError = formatServiceError(onboardingSettled.reason);
+      }
+    };
+    const applyAgentsSettled = (
+      agentsSettled: PromiseSettledResult<AgentSummary[]>,
+    ): void => {
+      if (
+        agentsSeq !== agentListRequestSeq ||
+        serviceSeq !== serviceReconnectSeq ||
+        api !== activeBountyApi
+      ) {
+        return;
+      }
+      if (agentsSettled.status === 'fulfilled') {
+        agents = Array.isArray(agentsSettled.value) ? agentsSettled.value : [];
+        agentsLoaded = true;
+        agentsLoadError = '';
+      } else {
+        agentsLoadError = formatServiceError(agentsSettled.reason);
+      }
+    };
+    const applyAllAgentsSettled = (
+      allAgentsSettled: PromiseSettledResult<AgentSummary[]>,
+    ): void => {
+      if (
+        allAgentsSeq !== allAgentListRequestSeq ||
+        serviceSeq !== serviceReconnectSeq ||
+        api !== activeBountyApi
+      ) {
+        return;
+      }
+      if (allAgentsSettled.status === 'fulfilled') {
+        allAgents = Array.isArray(allAgentsSettled.value) ? allAgentsSettled.value : [];
+        allAgentsLoaded = true;
+        allAgentsLoadError = '';
+      } else {
+        allAgentsLoadError = formatServiceError(allAgentsSettled.reason);
+      }
+    };
+    const applyArbitrationSettled = (
+      arbitrationSettled: PromiseSettledResult<ArbitrationConfig>,
+    ): void => {
+      if (
+        arbSeq !== arbitrationConfigRequestSeq ||
+        serviceSeq !== serviceReconnectSeq ||
+        api !== activeBountyApi
+      ) {
+        return;
+      }
+      if (arbitrationSettled.status === 'fulfilled') {
+        arbitrationConfig = normalizeArbitrationConfig(arbitrationSettled.value);
+        arbitrationConfigLoaded = true;
+        arbitrationConfigLoadError = '';
+      } else {
+        arbitrationConfigLoadError = formatServiceError(arbitrationSettled.reason);
+      }
+    };
     try {
-      const [projectsList, filteredList, fullList, onboardingSettled, agentsSettled] =
-        await Promise.all([
-          api.listProjects(true),
-          api.listBounties(query),
-          api.listBounties({ include_drafts: true }),
-          typeof api.getOnboardingSettings === 'function'
-            ? Promise.allSettled([api.getOnboardingSettings()]).then(([result]) => result)
-            : Promise.resolve({
-                status: 'fulfilled' as const,
-                value: { lan_open_registration: false, invite_tokens: [] } satisfies OnboardingSettings,
-              }),
-          typeof api.listAgents === 'function'
-            ? Promise.allSettled([api.listAgents(agentFilterQuery)]).then(([result]) => result)
-            : Promise.resolve({
-                status: 'fulfilled' as const,
-                value: [] satisfies AgentSummary[],
-              }),
-        ]);
+      const [
+        projectsList,
+        filteredList,
+        fullList,
+      ] = await Promise.all([
+        api.listProjects(true),
+        api.listBounties(query),
+        api.listBounties({ include_drafts: true }),
+        (typeof api.getOnboardingSettings === 'function'
+          ? Promise.allSettled([api.getOnboardingSettings()]).then(([result]) => result)
+          : Promise.resolve({
+              status: 'fulfilled' as const,
+              value: { lan_open_registration: false, invite_tokens: [] } satisfies OnboardingSettings,
+            })
+        ).then(applyOnboardingSettled),
+        (typeof api.listAgents === 'function'
+          ? Promise.allSettled([api.listAgents(agentFilterQuery)]).then(([result]) => result)
+          : Promise.resolve({
+              status: 'fulfilled' as const,
+              value: [] satisfies AgentSummary[],
+            })
+        ).then(result => {
+          applyAgentsSettled(result);
+          if (!agentFiltered) {
+            applyAllAgentsSettled(result);
+          }
+        }),
+        agentFiltered && typeof api.listAgents === 'function'
+          ? Promise.allSettled([api.listAgents()])
+              .then(([result]) => result)
+              .then(applyAllAgentsSettled)
+          : Promise.resolve(),
+        (typeof api.getArbitrationConfig === 'function'
+          ? Promise.allSettled([api.getArbitrationConfig()]).then(([result]) => result)
+          : Promise.resolve({
+              status: 'fulfilled' as const,
+              value: { arbitrator_chain: [] } satisfies ArbitrationConfig,
+            })
+        ).then(applyArbitrationSettled),
+      ]);
       if (
         workspaceSeq !== workspaceRequestSeq ||
         serviceSeq !== serviceReconnectSeq ||
@@ -626,32 +841,6 @@
             item.status === 'PENDING_ARBITRATION',
         );
       }
-      if (
-        onbSeq === onboardingRequestSeq &&
-        serviceSeq === serviceReconnectSeq &&
-        api === activeBountyApi
-      ) {
-        if (onboardingSettled.status === 'fulfilled') {
-          onboardingSettings = normalizeOnboardingSettings(onboardingSettled.value);
-          onboardingLoaded = true;
-          onboardingLoadError = '';
-        } else {
-          onboardingLoadError = formatServiceError(onboardingSettled.reason);
-        }
-      }
-      if (
-        agentsSeq === agentListRequestSeq &&
-        serviceSeq === serviceReconnectSeq &&
-        api === activeBountyApi
-      ) {
-        if (agentsSettled.status === 'fulfilled') {
-          agents = Array.isArray(agentsSettled.value) ? agentsSettled.value : [];
-          agentsLoaded = true;
-          agentsLoadError = '';
-        } else {
-          agentsLoadError = formatServiceError(agentsSettled.reason);
-        }
-      }
       if (statusSeq === connectionStatusSeq) {
         serviceConnected = true;
         serviceConnectionError = '';
@@ -670,6 +859,7 @@
     } finally {
       bountyListInFlightCount -= 1;
       agentListInFlightCount -= 1;
+      allAgentListInFlightCount -= 1;
     }
   }
 
@@ -719,28 +909,80 @@
       );
     }
 
-    if (
-      agentListInFlightCount === 0 &&
-      typeof api.listAgents === 'function' &&
-      !agentsLoadError
-    ) {
-      const agentsSeq = ++agentListRequestSeq;
-      const agentFilter = buildAgentFilter();
-      tasks.push(
-        api.listAgents(agentFilter).then(list => {
-          if (
-            componentDisposed ||
-            serviceSeq !== serviceReconnectSeq ||
-            api !== activeBountyApi ||
-            agentsSeq !== agentListRequestSeq ||
-            agentsLoadError
-          ) {
-            return;
-          }
-          agents = Array.isArray(list) ? list : [];
-          agentsLoaded = true;
-        }),
-      );
+    const agentFiltered = hasAgentFilter();
+    if (!agentFiltered) {
+      if (
+        agentListInFlightCount === 0 &&
+        typeof api.listAgents === 'function' &&
+        !agentsLoadError
+      ) {
+        const agentsSeq = ++agentListRequestSeq;
+        const syncAll = allAgentListInFlightCount === 0 && !allAgentsLoadError;
+        const allAgentsSeq = syncAll ? ++allAgentListRequestSeq : null;
+        const agentFilter = buildAgentFilter();
+        tasks.push(
+          api.listAgents(agentFilter).then(list => {
+            if (componentDisposed || serviceSeq !== serviceReconnectSeq || api !== activeBountyApi) {
+              return;
+            }
+            const normalized = Array.isArray(list) ? list : [];
+            if (agentsSeq === agentListRequestSeq && !agentsLoadError) {
+              agents = normalized;
+              agentsLoaded = true;
+            }
+            if (allAgentsSeq !== null && allAgentsSeq === allAgentListRequestSeq && !allAgentsLoadError) {
+              allAgents = normalized;
+              allAgentsLoaded = true;
+            }
+          }),
+        );
+      }
+    } else {
+      if (
+        agentListInFlightCount === 0 &&
+        typeof api.listAgents === 'function' &&
+        !agentsLoadError
+      ) {
+        const agentsSeq = ++agentListRequestSeq;
+        const agentFilter = buildAgentFilter();
+        tasks.push(
+          api.listAgents(agentFilter).then(list => {
+            if (
+              componentDisposed ||
+              serviceSeq !== serviceReconnectSeq ||
+              api !== activeBountyApi ||
+              agentsSeq !== agentListRequestSeq ||
+              agentsLoadError
+            ) {
+              return;
+            }
+            agents = Array.isArray(list) ? list : [];
+            agentsLoaded = true;
+          }),
+        );
+      }
+      if (
+        allAgentListInFlightCount === 0 &&
+        typeof api.listAgents === 'function' &&
+        !allAgentsLoadError
+      ) {
+        const allAgentsSeq = ++allAgentListRequestSeq;
+        tasks.push(
+          api.listAgents().then(list => {
+            if (
+              componentDisposed ||
+              serviceSeq !== serviceReconnectSeq ||
+              api !== activeBountyApi ||
+              allAgentsSeq !== allAgentListRequestSeq ||
+              allAgentsLoadError
+            ) {
+              return;
+            }
+            allAgents = Array.isArray(list) ? list : [];
+            allAgentsLoaded = true;
+          }),
+        );
+      }
     }
 
     if (detailInFlightCount === 0 && activeDetail !== null) {
@@ -799,6 +1041,7 @@
     let statusSeq = ++connectionStatusSeq;
     bountyListInFlightCount += 1;
     agentListInFlightCount += 1;
+    allAgentListInFlightCount += 1;
     detailInFlightCount += 1;
     try {
       const resolved = await resolveBountyApiInstance(preferences, preferInjected);
@@ -816,16 +1059,24 @@
         workspaceRequestSeq += 1;
         detailRequestSeq += 1;
         agentListRequestSeq += 1;
+        allAgentListRequestSeq += 1;
         onboardingRequestSeq += 1;
+        arbitrationConfigRequestSeq += 1;
         allBountyProjects = [];
         bounties = [];
         actionableBounties = [];
         onboardingSettings = { lan_open_registration: false, invite_tokens: [] };
         onboardingLoaded = false;
         onboardingLoadError = '';
+        arbitrationConfig = { arbitrator_chain: [] };
+        arbitrationConfigLoaded = false;
+        arbitrationConfigLoadError = '';
         agents = [];
         agentsLoaded = false;
         agentsLoadError = '';
+        allAgents = [];
+        allAgentsLoaded = false;
+        allAgentsLoadError = '';
         activeDetail = null;
       }
       statusSeq = ++connectionStatusSeq;
@@ -839,6 +1090,7 @@
     } finally {
       bountyListInFlightCount -= 1;
       agentListInFlightCount -= 1;
+      allAgentListInFlightCount -= 1;
       detailInFlightCount -= 1;
     }
   }
@@ -889,6 +1141,28 @@
     if (serviceSeq === serviceReconnectSeq && api === activeBountyApi) {
       await refreshBountyWorkspace();
     }
+  }
+
+  async function handleUpdateArbitrationConfig(chain: string[]): Promise<ArbitrationConfig> {
+    const arbSeq = ++arbitrationConfigRequestSeq;
+    const serviceSeq = serviceReconnectSeq;
+    const api = activeBountyApi;
+    if (typeof api.updateArbitrationConfig !== 'function') {
+      throw new Error('Arbitration config API is unavailable');
+    }
+    const updated = normalizeArbitrationConfig(
+      await api.updateArbitrationConfig({ arbitrator_chain: chain }),
+    );
+    if (
+      arbSeq === arbitrationConfigRequestSeq &&
+      serviceSeq === serviceReconnectSeq &&
+      api === activeBountyApi
+    ) {
+      arbitrationConfig = updated;
+      arbitrationConfigLoaded = true;
+      arbitrationConfigLoadError = '';
+    }
+    return updated;
   }
 
   async function handleToggleLanRegistration(enabled: boolean): Promise<OnboardingSettings> {
@@ -1007,10 +1281,15 @@
     const serviceSeq = serviceReconnectSeq;
     const api = activeBountyApi;
     agentListInFlightCount += 1;
+    allAgentListInFlightCount += 1;
     try {
       const updated = await api.disableAgent(id);
       if (serviceSeq === serviceReconnectSeq && api === activeBountyApi) {
-        await refreshAgentsOnly();
+        if (hasAgentFilter()) {
+          await Promise.all([refreshAgentsOnly(), refreshAllAgentsOnly()]);
+        } else {
+          await refreshAgentsOnly();
+        }
         if (serviceSeq === serviceReconnectSeq && api === activeBountyApi) {
           showToast($t('已停用 Agent'));
         }
@@ -1018,6 +1297,7 @@
       return updated;
     } finally {
       agentListInFlightCount -= 1;
+      allAgentListInFlightCount -= 1;
     }
   }
 
@@ -1025,10 +1305,15 @@
     const serviceSeq = serviceReconnectSeq;
     const api = activeBountyApi;
     agentListInFlightCount += 1;
+    allAgentListInFlightCount += 1;
     try {
       const updated = await api.enableAgent(id);
       if (serviceSeq === serviceReconnectSeq && api === activeBountyApi) {
-        await refreshAgentsOnly();
+        if (hasAgentFilter()) {
+          await Promise.all([refreshAgentsOnly(), refreshAllAgentsOnly()]);
+        } else {
+          await refreshAgentsOnly();
+        }
         if (serviceSeq === serviceReconnectSeq && api === activeBountyApi) {
           showToast($t('已启用 Agent'));
         }
@@ -1036,6 +1321,7 @@
       return updated;
     } finally {
       agentListInFlightCount -= 1;
+      allAgentListInFlightCount -= 1;
     }
   }
 
@@ -1043,10 +1329,15 @@
     const serviceSeq = serviceReconnectSeq;
     const api = activeBountyApi;
     agentListInFlightCount += 1;
+    allAgentListInFlightCount += 1;
     try {
       const updated = await api.revokeAgent(id);
       if (serviceSeq === serviceReconnectSeq && api === activeBountyApi) {
-        await refreshAgentsOnly();
+        if (hasAgentFilter()) {
+          await Promise.all([refreshAgentsOnly(), refreshAllAgentsOnly()]);
+        } else {
+          await refreshAgentsOnly();
+        }
         if (serviceSeq === serviceReconnectSeq && api === activeBountyApi) {
           showToast($t('已吊销 Agent'));
         }
@@ -1054,6 +1345,7 @@
       return updated;
     } finally {
       agentListInFlightCount -= 1;
+      allAgentListInFlightCount -= 1;
     }
   }
 
@@ -1282,6 +1574,100 @@
     }
   }
 
+  async function handleApproveArbitrationFromDrawer(
+    bountyId: string,
+    input: ApproveArbitrationInput,
+  ): Promise<void> {
+    const detailSeq = ++detailRequestSeq;
+    const serviceSeq = serviceReconnectSeq;
+    const api = activeBountyApi;
+    if (typeof api.approveArbitration !== 'function') {
+      throw new Error('Arbitration API is unavailable');
+    }
+    detailInFlightCount += 1;
+    try {
+      await api.approveArbitration(bountyId, input);
+      const refreshedDetail = await api.getBountyDetail(bountyId);
+      if (
+        detailSeq === detailRequestSeq &&
+        serviceSeq === serviceReconnectSeq &&
+        api === activeBountyApi &&
+        activeDetail?.bounty.id === bountyId
+      ) {
+        activeDetail = refreshedDetail;
+      }
+      await refreshBountyWorkspace();
+      showToast($t('已通过仲裁验收'));
+    } catch (error) {
+      showToast(formatServiceError(error));
+      try {
+        const refreshedDetail = await api.getBountyDetail(bountyId);
+        if (
+          detailSeq === detailRequestSeq &&
+          serviceSeq === serviceReconnectSeq &&
+          api === activeBountyApi &&
+          activeDetail?.bounty.id === bountyId
+        ) {
+          activeDetail = refreshedDetail;
+        }
+      } catch {
+        /* 忽略刷新详情失败 */
+      }
+      await refreshBountyWorkspace();
+      throw error;
+    } finally {
+      detailInFlightCount -= 1;
+    }
+  }
+
+  async function handleRejectArbitrationFromDrawer(
+    bountyId: string,
+    input: RejectArbitrationInput,
+  ): Promise<void> {
+    const detailSeq = ++detailRequestSeq;
+    const serviceSeq = serviceReconnectSeq;
+    const api = activeBountyApi;
+    if (typeof api.rejectArbitration !== 'function') {
+      throw new Error('Arbitration API is unavailable');
+    }
+    detailInFlightCount += 1;
+    try {
+      const updated = await api.rejectArbitration(bountyId, input);
+      const refreshedDetail = await api.getBountyDetail(bountyId);
+      if (
+        detailSeq === detailRequestSeq &&
+        serviceSeq === serviceReconnectSeq &&
+        api === activeBountyApi &&
+        activeDetail?.bounty.id === bountyId
+      ) {
+        activeDetail = refreshedDetail;
+      }
+      await refreshBountyWorkspace();
+      showToast(
+        updated.status === 'OPEN' ? $t('第 4 次打回已重开悬赏') : $t('已打回并恢复执行'),
+      );
+    } catch (error) {
+      showToast(formatServiceError(error));
+      try {
+        const refreshedDetail = await api.getBountyDetail(bountyId);
+        if (
+          detailSeq === detailRequestSeq &&
+          serviceSeq === serviceReconnectSeq &&
+          api === activeBountyApi &&
+          activeDetail?.bounty.id === bountyId
+        ) {
+          activeDetail = refreshedDetail;
+        }
+      } catch {
+        /* 忽略刷新详情失败 */
+      }
+      await refreshBountyWorkspace();
+      throw error;
+    } finally {
+      detailInFlightCount -= 1;
+    }
+  }
+
   function openCreateComposer(): void {
     editingBounty = null;
     composerOpen = true;
@@ -1433,6 +1819,8 @@
         void refreshBountiesOnly();
       } else if (section === 'agents') {
         void refreshAgentsOnly();
+      } else if (section === 'settings') {
+        void refreshAllAgentsOnly();
       }
     }
     void persistConfig();
@@ -2276,10 +2664,16 @@
               {serviceEpoch}
               {serviceConnectionError}
               bountyProjects={settingsBountyProjects}
+              agents={allAgents}
+              agentsLoaded={allAgentsLoaded}
+              agentsLoadError={allAgentsLoadError}
               {showArchivedProjects}
               {onboardingSettings}
               {onboardingLoaded}
               {onboardingLoadError}
+              {arbitrationConfig}
+              {arbitrationConfigLoaded}
+              {arbitrationConfigLoadError}
               {skillDocument}
               desktop={capabilities.desktop}
               mobile={Boolean(files.isMobile)}
@@ -2301,6 +2695,8 @@
               onCreateBountyProject={handleCreateBountyProject}
               onUpdateBountyProject={handleUpdateBountyProject}
               onDeleteBountyProject={handleDeleteBountyProject}
+              onRetryLoadArbitrationConfig={refreshArbitrationConfig}
+              onUpdateArbitrationConfig={handleUpdateArbitrationConfig}
               onRetryLoadOnboarding={refreshOnboarding}
               onToggleLanRegistration={handleToggleLanRegistration}
               onCreateInviteToken={handleCreateInviteToken}
@@ -2329,6 +2725,8 @@
       onCancel={handleCancelFromDrawer}
       onReleaseLease={handleReleaseLeaseFromDrawer}
       onCreateComment={handleCreateCommentFromDrawer}
+      onApproveArbitration={handleApproveArbitrationFromDrawer}
+      onRejectArbitration={handleRejectArbitrationFromDrawer}
     />
   {/if}
 

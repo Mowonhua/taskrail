@@ -771,7 +771,14 @@ describe('悬赏板工作台外壳集成测试', () => {
       active_started_at: null,
       comment_count: 0,
       rejection_count: 0,
+      arbitrator_agent_id: null,
+      arbitrator_agent_name: null,
+      arbitrator_agent_tier: null,
+      arbitration_expires_at: null,
+      quality_grade: null,
+      calibrated_difficulty: null,
       completion_note: null,
+      completion_cost: null,
       published_at: '2026-11-16T12:05:00.000Z',
       withdrawn_at: null,
       cancelled_at: null,
@@ -3913,5 +3920,457 @@ describe('悬赏板工作台外壳集成测试', () => {
       cursor: executorEvents.latest_event_id,
     });
     expect(cancelEvents.events.map(item => item.event_type)).toContain('task.cancelled');
+  });
+
+  it('Issue 08 设置页支持配置全局仲裁顺位链（含未注册符号 ID 与排序）及项目覆盖链并渲染零中点标记', async () => {
+    const { port } = createMemoryPort({
+      preferences: { ...emptyAppConfig().preferences, workspaceSection: 'settings' },
+    });
+    const bountyApi = createMemoryBountyClient({ lan_open_registration: true });
+    const proj = await bountyApi.createProject({ name: '仲裁配置项目' });
+    const judgeAlpha = await bountyApi.registerAgent({ name: 'judge-alpha' });
+    const judgeBeta = await bountyApi.registerAgent({ name: 'judge-beta' });
+
+    instance = mount(App, { target, props: { files: port, bountyApi } });
+    await flush();
+
+    const arbSection = target.querySelector<HTMLElement>('[data-section="arbitration-config"]')!;
+    expect(arbSection).not.toBeNull();
+    expect(arbSection.textContent).not.toContain('·');
+
+    // 打开帮助 Popover 并通过 Escape 关闭
+    const helpBtn = arbSection.querySelector<HTMLButtonElement>('[data-action="toggle-arbitration-help"]')!;
+    const helpPopover = arbSection.querySelector<HTMLElement>('#global-arbitration-help')!;
+    helpBtn.click();
+    await flush();
+    expect(helpPopover.hidden).toBe(false);
+    helpBtn.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    await flush();
+    expect(helpPopover.hidden).toBe(true);
+
+    // 选择已注册 Agent + 手工输入未注册符号 ID + 调整顺位 + 保存
+    const globalEditor = arbSection.querySelector<HTMLElement>('[data-chain-scope="global"]')!;
+    const agentSelect = globalEditor.querySelector<HTMLSelectElement>('[data-slot="arbitrator-agent-select"]')!;
+    agentSelect.value = judgeAlpha.agent.id;
+    agentSelect.dispatchEvent(new Event('change', { bubbles: true }));
+    await flush();
+    globalEditor.querySelector<HTMLButtonElement>('[data-action="add-selected-arbitrator"]')!.click();
+    await flush();
+
+    const manualInput = globalEditor.querySelector<HTMLInputElement>('[data-slot="arbitrator-id-input"]')!;
+    manualInput.value = 'backup-symbol';
+    manualInput.dispatchEvent(new Event('input', { bubbles: true }));
+    await flush();
+    globalEditor.querySelector<HTMLButtonElement>('[data-action="add-manual-arbitrator"]')!.click();
+    await flush();
+
+    const entriesBefore = [...globalEditor.querySelectorAll<HTMLElement>('[data-arbitrator-entry]')];
+    expect(entriesBefore.map(el => el.dataset.arbitratorEntry)).toEqual([
+      judgeAlpha.agent.id,
+      'backup-symbol',
+    ]);
+    expect(entriesBefore[1].textContent).toContain('未注册符号 ID');
+
+    // 将第二顺位上移至第一顺位
+    entriesBefore[1]
+      .querySelector<HTMLButtonElement>('[data-action="move-arbitrator-up"]')!
+      .click();
+    await flush();
+
+    arbSection
+      .querySelector<HTMLButtonElement>('[data-action="save-global-arbitration-chain"]')!
+      .click();
+    await flush();
+
+    expect((await bountyApi.getArbitrationConfig()).arbitrator_chain).toEqual([
+      'backup-symbol',
+      judgeAlpha.agent.id,
+    ]);
+    expect(arbSection.querySelector('[data-status="arbitration-feedback"]')?.textContent).toContain(
+      '已保存全局仲裁顺位',
+    );
+
+    // 项目管理中为项目配置专属仲裁链并验证项目行徽章
+    const projectPanel = target.querySelector<HTMLElement>('[data-section="project-management"]')!;
+    const projectRow = projectPanel.querySelector<HTMLElement>(`[data-project-row="${proj.id}"]`)!;
+    projectRow.querySelector<HTMLButtonElement>('[data-action="edit-project"]')!.click();
+    await flush();
+
+    const projEditor = projectPanel.querySelector<HTMLElement>('[data-chain-scope="project"]')!;
+    const projSelect = projEditor.querySelector<HTMLSelectElement>('[data-slot="arbitrator-agent-select"]')!;
+    projSelect.value = judgeBeta.agent.id;
+    projSelect.dispatchEvent(new Event('change', { bubbles: true }));
+    await flush();
+    projEditor.querySelector<HTMLButtonElement>('[data-action="add-selected-arbitrator"]')!.click();
+    await flush();
+
+    projectPanel.querySelector<HTMLButtonElement>('[data-action="submit-project-form"]')!.click();
+    await flush();
+
+    const updatedRow = projectPanel.querySelector<HTMLElement>(`[data-project-row="${proj.id}"]`)!;
+    expect(
+      updatedRow.querySelector('[data-tag="project-arbitration-override"]')?.textContent?.trim(),
+    ).toBe('专属裁判链 1');
+    const updatedProj = (await bountyApi.listProjects(true)).find(item => item.id === proj.id)!;
+    expect(updatedProj.arbitrator_chain).toEqual([judgeBeta.agent.id]);
+  });
+
+  it('Issue 08 悬赏卡片与详情抽屉完整呈现 PENDING_ARBITRATION 倒计时、人工兜底、3 次打回与第 4 次熔断重开及质量校准验收', async () => {
+    vi.useFakeTimers({
+      toFake: ['Date', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'],
+    });
+    const baseMs = Date.parse('2026-11-17T15:00:00.000Z');
+    vi.setSystemTime(baseMs);
+
+    const { port } = createMemoryPort({
+      preferences: { ...emptyAppConfig().preferences, workspaceSection: 'inbox' },
+    });
+    const bountyApi = createMemoryBountyClient({ lan_open_registration: true });
+    const proj = await bountyApi.createProject({ name: '仲裁闭环项目' });
+    const judgeAlpha = await bountyApi.registerAgent({ name: 'judge-alpha' });
+    const worker = await bountyApi.registerAgent({ name: 'worker-beta' });
+
+    await bountyApi.updateArbitrationConfig({ arbitrator_chain: [judgeAlpha.agent.id] });
+
+    const task1 = await bountyApi.createBounty({
+      project_id: proj.id,
+      title: '仲裁倒计时与打回熔断任务',
+      difficulty: 'B',
+      require_arbitration: true,
+      assignee_mode: 'any',
+      status: 'OPEN',
+    });
+    const task2 = await bountyApi.createBounty({
+      project_id: proj.id,
+      title: '质量等级与难度校准验收任务',
+      difficulty: 'B',
+      require_arbitration: true,
+      assignee_mode: 'any',
+      status: 'OPEN',
+    });
+
+    const claim1 = await bountyApi.agentClaimBounty(worker.api_key, task1.id);
+    await bountyApi.agentSubmitArbitration(worker.api_key, task1.id, {
+      lease_id: claim1.lease_id,
+      completion_note: 'task1 初次交付',
+      completion_cost: 0.35,
+    });
+
+    const claim2 = await bountyApi.agentClaimBounty(worker.api_key, task2.id);
+    await bountyApi.agentSubmitArbitration(worker.api_key, task2.id, {
+      lease_id: claim2.lease_id,
+      completion_note: 'task2 交付',
+      completion_cost: 0.8,
+    });
+
+    instance = mount(App, { target, props: { files: port, bountyApi } });
+    await flush();
+
+    const inboxGrid = target.querySelector<HTMLElement>('[data-slot="inbox-card-grid"]')!;
+    expect(inboxGrid.textContent).not.toContain('·');
+
+    const card1 = inboxGrid.querySelector<HTMLElement>(`[data-bounty-id="${task1.id}"]`)!;
+    expect(card1.dataset.bountyStatus).toBe('PENDING_ARBITRATION');
+    expect(card1.querySelector('[data-slot="card-arbitrator"]')?.textContent).toContain('judge-alpha');
+    expect(card1.querySelector('[data-slot="card-arbitration-countdown"]')?.textContent?.trim()).toMatch(
+      /^仲裁剩余 15:0[01]$/,
+    );
+
+    // 推进超过 15 分钟并刷新，唯一裁判超时耗尽后自动切换为人工仲裁兜底
+    await vi.advanceTimersByTimeAsync(15 * 60 * 1000 + 2000);
+    await bountyApi.sweepLeases(Date.now());
+    target.querySelector<HTMLButtonElement>('[data-action="refresh-inbox"]')!.click();
+    await flush();
+
+    const fallbackCard1 = target.querySelector<HTMLElement>(`[data-bounty-id="${task1.id}"]`)!;
+    expect(fallbackCard1.querySelector('[data-slot="card-arbitrator"]')).toBeNull();
+    expect(fallbackCard1.querySelector('[data-slot="card-human-fallback"]')?.textContent?.trim()).toBe(
+      '人工仲裁兜底',
+    );
+
+    // 打开详情抽屉，执行第 1 次打回
+    fallbackCard1.querySelector<HTMLButtonElement>('.bounty-card-button')!.click();
+    await flush();
+
+    const drawer = target.querySelector<HTMLElement>('[data-dialog="bounty-detail"]')!;
+    expect(drawer.textContent).not.toContain('·');
+    expect(drawer.querySelector('[data-slot="detail-human-fallback"]')?.textContent?.trim()).toBe(
+      '人工仲裁兜底',
+    );
+
+    const rejectInput = drawer.querySelector<HTMLTextAreaElement>(
+      '[data-slot="arbitration-reject-comment"]',
+    )!;
+    rejectInput.value = '第 1 次请补充测试';
+    rejectInput.dispatchEvent(new Event('input', { bubbles: true }));
+    await flush();
+    drawer.querySelector<HTMLButtonElement>('[data-action="reject-arbitration"]')!.click();
+    await flush();
+
+    expect(drawer.dataset.bountyStatus).toBe('IN_PROGRESS');
+    expect(drawer.querySelector('[data-slot="detail-rejection-count"]')?.textContent?.trim()).toBe(
+      '已打回 1/4 次',
+    );
+    expect(target.querySelector('.toast-bar')?.textContent).toContain('已打回并恢复执行');
+
+    // 模拟第 2、3 次打回后再次提交 -> 抽屉展示第 4 次熔断警示
+    for (let round = 2; round <= 3; round += 1) {
+      const latest = (await bountyApi.getBountyDetail(task1.id)).bounty;
+      await bountyApi.agentSubmitArbitration(worker.api_key, task1.id, {
+        lease_id: latest.lease_id,
+        completion_note: `第 ${round} 次提交`,
+      });
+      await bountyApi.rejectArbitration(task1.id, { comment: `第 ${round} 次打回` });
+    }
+    const latestRound3 = (await bountyApi.getBountyDetail(task1.id)).bounty;
+    await bountyApi.agentSubmitArbitration(worker.api_key, task1.id, {
+      lease_id: latestRound3.lease_id,
+      completion_note: '第 4 次提交待兜底裁决',
+    });
+    // 推进超时转为人工兜底并同步抽屉
+    await vi.advanceTimersByTimeAsync(15 * 60 * 1000 + 2000);
+    await bountyApi.sweepLeases(Date.now());
+    await flush();
+
+    expect(drawer.querySelector('[data-slot="detail-circuit-breaker-warning"]')?.textContent).toContain(
+      '第 4 次打回将直接终止本轮交付并重新分发',
+    );
+    const rejectBtn4 = drawer.querySelector<HTMLButtonElement>('[data-action="reject-arbitration"]')!;
+    expect(rejectBtn4.textContent?.trim()).toBe('第 4 次打回并重开');
+
+    const rejectInput4 = drawer.querySelector<HTMLTextAreaElement>(
+      '[data-slot="arbitration-reject-comment"]',
+    )!;
+    rejectInput4.value = '第 4 次打回重开';
+    rejectInput4.dispatchEvent(new Event('input', { bubbles: true }));
+    await flush();
+    rejectBtn4.click();
+    await flush();
+
+    expect(drawer.dataset.bountyStatus).toBe('OPEN');
+    expect(target.querySelector('.toast-bar')?.textContent).toContain('第 4 次打回已重开悬赏');
+
+    drawer.querySelector<HTMLButtonElement>('[aria-label="关闭对话框"]')!.click();
+    await flush();
+
+    // 在 task2 抽屉中选择「有瑕疵」与校准难度「S」通过验收
+    target.querySelector<HTMLButtonElement>('[data-nav-section="bounties"]')!.click();
+    await flush();
+    target
+      .querySelector<HTMLButtonElement>(`[data-bounty-id="${task2.id}"] .bounty-card-button`)!
+      .click();
+    await flush();
+
+    const drawer2 = target.querySelector<HTMLElement>('[data-dialog="bounty-detail"]')!;
+    drawer2.querySelector<HTMLButtonElement>('[data-quality-grade="flawed"]')!.click();
+    const diffSelect = drawer2.querySelector<HTMLSelectElement>(
+      '[data-slot="arbitration-calibrated-difficulty"]',
+    )!;
+    diffSelect.value = 'S';
+    diffSelect.dispatchEvent(new Event('change', { bubbles: true }));
+    const approveCommentInput = drawer2.querySelector<HTMLInputElement>(
+      '[data-slot="arbitration-approve-comment"]',
+    )!;
+    approveCommentInput.value = '整体达标';
+    approveCommentInput.dispatchEvent(new Event('input', { bubbles: true }));
+    await flush();
+
+    drawer2.querySelector<HTMLButtonElement>('[data-action="approve-arbitration"]')!.click();
+    await flush();
+
+    expect(drawer2.dataset.bountyStatus).toBe('COMPLETED');
+    expect(drawer2.querySelector('[data-slot="detail-quality-grade"]')?.textContent?.trim()).toBe(
+      '验收等级: 有瑕疵',
+    );
+    expect(
+      drawer2.querySelector('[data-slot="detail-calibrated-difficulty"]')?.textContent?.trim(),
+    ).toBe('校准难度 S');
+    expect(target.querySelector('.toast-bar')?.textContent).toContain('已通过仲裁验收');
+
+    const completedCard2 = target.querySelector<HTMLElement>(`[data-bounty-id="${task2.id}"]`)!;
+    expect(completedCard2.querySelector('[data-slot="card-quality-grade"]')?.textContent?.trim()).toBe(
+      '有瑕疵',
+    );
+    expect(
+      completedCard2.querySelector('[data-slot="card-calibrated-difficulty"]')?.textContent?.trim(),
+    ).toBe('校准难度 S');
+    expect(completedCard2.textContent).not.toContain('·');
+    expect(drawer2.textContent).not.toContain('·');
+  });
+
+  it('Issue 08 Agent 名录启用 busy 筛选后切换设置页时已注册空闲裁判仍正确识别且下拉框可用且名录未就绪或失败时不误标未注册符号 ID', async () => {
+    const { port } = createMemoryPort({
+      preferences: { ...emptyAppConfig().preferences, workspaceSection: 'agents' },
+    });
+    const bountyApi = createMemoryBountyClient({ lan_open_registration: true });
+    const proj = await bountyApi.createProject({ name: '筛选隔离项目' });
+    const idleJudge = await bountyApi.registerAgent({ name: 'idle-judge-agent' });
+    const busyWorker = await bountyApi.registerAgent({ name: 'busy-worker-agent' });
+
+    const task = await bountyApi.createBounty({
+      project_id: proj.id,
+      title: '占用名录执行态任务',
+      difficulty: 'C',
+      assignee_mode: 'any',
+      status: 'OPEN',
+    });
+    await bountyApi.agentClaimBounty(busyWorker.api_key, task.id);
+    await bountyApi.updateArbitrationConfig({ arbitrator_chain: [idleJudge.agent.id] });
+
+    instance = mount(App, { target, props: { files: port, bountyApi } });
+    await flush();
+
+    // 在 Agent 名录切到「执行任务中」(busy) 筛选，名录仅保留 busyWorker
+    target.querySelector<HTMLButtonElement>('[data-agent-activity-filter="busy"]')!.click();
+    await flush();
+    const filteredCards = [...target.querySelectorAll<HTMLElement>('[data-agent-id]')].map(
+      el => el.dataset.agentId,
+    );
+    expect(filteredCards).toEqual([busyWorker.agent.id]);
+
+    // 打开设置页，全局仲裁链中的空闲裁判仍应识别为已注册 Agent，且下拉框可选其他已注册 Agent
+    target.querySelector<HTMLButtonElement>('[data-nav-section="settings"]')!.click();
+    await flush();
+
+    const globalEditor = target.querySelector<HTMLElement>('[data-chain-scope="global"]')!;
+    const judgeEntry = globalEditor.querySelector<HTMLElement>(
+      `[data-arbitrator-entry="${idleJudge.agent.id}"]`,
+    )!;
+    expect(judgeEntry).not.toBeNull();
+    expect(judgeEntry.textContent).toContain('idle-judge-agent');
+    expect(judgeEntry.textContent).not.toContain('未注册符号 ID');
+
+    const agentSelect = globalEditor.querySelector<HTMLSelectElement>(
+      '[data-slot="arbitrator-agent-select"]',
+    );
+    expect(agentSelect).not.toBeNull();
+    expect(
+      [...agentSelect!.options].some(opt => opt.value === busyWorker.agent.id),
+    ).toBe(true);
+
+    // 验证名录加载中与加载失败均不得误判为「未注册符号 ID」
+    unmount(instance);
+    instance = null;
+
+    const originalListAgents = bountyApi.listAgents.bind(bountyApi);
+    let resolvePendingAgents!: (list: Awaited<ReturnType<typeof originalListAgents>>) => void;
+    const listAgentsSpy = vi
+      .spyOn(bountyApi, 'listAgents')
+      .mockImplementationOnce(
+        () =>
+          new Promise(resolve => {
+            resolvePendingAgents = resolve;
+          }),
+      );
+
+    const { port: settingsPort } = createMemoryPort({
+      preferences: { ...emptyAppConfig().preferences, workspaceSection: 'settings' },
+    });
+    instance = mount(App, { target, props: { files: settingsPort, bountyApi } });
+    await flush();
+
+    const pendingEntry = target.querySelector<HTMLElement>(
+      `[data-chain-scope="global"] [data-arbitrator-entry="${idleJudge.agent.id}"]`,
+    )!;
+    expect(pendingEntry.textContent).not.toContain('未注册符号 ID');
+    expect(
+      pendingEntry.querySelector<HTMLElement>('[data-arbitrator-identity="loading"]')?.textContent?.trim(),
+    ).toBe('正在加载 Agent 名录…');
+
+    resolvePendingAgents(await originalListAgents());
+    await flush();
+    expect(
+      target.querySelector<HTMLElement>(
+        `[data-chain-scope="global"] [data-arbitrator-entry="${idleJudge.agent.id}"]`,
+      )?.textContent,
+    ).toContain('idle-judge-agent');
+
+    unmount(instance);
+    instance = null;
+    listAgentsSpy.mockRejectedValueOnce(new Error('AGENTS_LOAD_503'));
+    const { port: errorPort } = createMemoryPort({
+      preferences: { ...emptyAppConfig().preferences, workspaceSection: 'settings' },
+    });
+    instance = mount(App, { target, props: { files: errorPort, bountyApi } });
+    await flush();
+
+    const errorEntry = target.querySelector<HTMLElement>(
+      `[data-chain-scope="global"] [data-arbitrator-entry="${idleJudge.agent.id}"]`,
+    )!;
+    expect(errorEntry.textContent).not.toContain('未注册符号 ID');
+    expect(
+      errorEntry.querySelector<HTMLElement>('[data-arbitrator-identity="error"]')?.textContent?.trim(),
+    ).toBe('Agent 名录加载失败');
+  });
+
+  it('Issue 08 仲裁链手动输入带前后空格的符号 ID 时保留原值并透传给 API', async () => {
+    const { port } = createMemoryPort({
+      preferences: { ...emptyAppConfig().preferences, workspaceSection: 'settings' },
+    });
+    const bountyApi = createMemoryBountyClient({ lan_open_registration: true });
+    const proj = await bountyApi.createProject({ name: '保留原值符号项目' });
+
+    instance = mount(App, { target, props: { files: port, bountyApi } });
+    await flush();
+
+    const arbSection = target.querySelector<HTMLElement>('[data-section="arbitration-config"]')!;
+    const globalEditor = arbSection.querySelector<HTMLElement>('[data-chain-scope="global"]')!;
+    const manualInput = globalEditor.querySelector<HTMLInputElement>(
+      '[data-slot="arbitrator-id-input"]',
+    )!;
+    const addBtn = globalEditor.querySelector<HTMLButtonElement>(
+      '[data-action="add-manual-arbitrator"]',
+    )!;
+
+    // 纯空白输入保持按钮禁用
+    manualInput.value = '   ';
+    manualInput.dispatchEvent(new Event('input', { bubbles: true }));
+    await flush();
+    expect(addBtn.disabled).toBe(true);
+
+    // 带前后空格的非空符号 ID 允许添加且保留原始空格
+    const rawGlobalSymbol = '  review-symbol  ';
+    manualInput.value = rawGlobalSymbol;
+    manualInput.dispatchEvent(new Event('input', { bubbles: true }));
+    await flush();
+    expect(addBtn.disabled).toBe(false);
+    addBtn.click();
+    await flush();
+
+    const addedItem = globalEditor.querySelector<HTMLElement>(
+      `[data-arbitrator-entry="${rawGlobalSymbol}"]`,
+    );
+    expect(addedItem).not.toBeNull();
+    expect(addedItem!.dataset.arbitratorEntry).toBe(rawGlobalSymbol);
+
+    arbSection
+      .querySelector<HTMLButtonElement>('[data-action="save-global-arbitration-chain"]')!
+      .click();
+    await flush();
+
+    expect((await bountyApi.getArbitrationConfig()).arbitrator_chain).toEqual([rawGlobalSymbol]);
+
+    // 项目专属仲裁链同样保留带前后空格的符号 ID
+    const projectPanel = target.querySelector<HTMLElement>('[data-section="project-management"]')!;
+    const projectRow = projectPanel.querySelector<HTMLElement>(`[data-project-row="${proj.id}"]`)!;
+    projectRow.querySelector<HTMLButtonElement>('[data-action="edit-project"]')!.click();
+    await flush();
+
+    const projEditor = projectPanel.querySelector<HTMLElement>('[data-chain-scope="project"]')!;
+    const projManualInput = projEditor.querySelector<HTMLInputElement>(
+      '[data-slot="arbitrator-id-input"]',
+    )!;
+    const rawProjectSymbol = '  proj-symbol  ';
+    projManualInput.value = rawProjectSymbol;
+    projManualInput.dispatchEvent(new Event('input', { bubbles: true }));
+    await flush();
+    projEditor.querySelector<HTMLButtonElement>('[data-action="add-manual-arbitrator"]')!.click();
+    await flush();
+
+    projectPanel.querySelector<HTMLButtonElement>('[data-action="submit-project-form"]')!.click();
+    await flush();
+
+    const updatedProj = (await bountyApi.listProjects(true)).find(item => item.id === proj.id)!;
+    expect(updatedProj.arbitrator_chain).toEqual([rawProjectSymbol]);
   });
 });

@@ -15,6 +15,7 @@ use std::{
 use uuid::Uuid;
 
 mod agents;
+mod arbitration;
 mod comments;
 mod events;
 mod leases;
@@ -28,8 +29,8 @@ pub struct Repository {
 }
 
 const PROJECT_COLUMNS: &str = "id,name,icon,description,workspace_path,default_acceptance_criteria,agent_draft_policy,arbitrator_chain_json,archived,created_at,updated_at";
-const BOUNTY_COLUMNS: &str = "b.id,b.project_id,b.title,b.description,b.acceptance_criteria,b.difficulty,b.assignee_mode,b.assignee_min_tier,b.assignee_agent_id,b.require_arbitration,b.status,b.created_by,b.lease_id,b.lease_agent_id,b.lease_expires_at,b.rejection_count,b.completion_note,b.published_at,b.withdrawn_at,b.cancelled_at,b.completed_at,b.created_at,b.updated_at,b.created_by_agent_id,a.name,la.name,la.tier,aa.name,aa.tier,b.assignment_expires_at,b.completion_cost,b.active_duration_ms,b.active_started_at,(SELECT COUNT(*) FROM bounty_comments c WHERE c.bounty_id=b.id)";
-const BOUNTY_SOURCE: &str = "bounties b LEFT JOIN agents a ON a.id=b.created_by_agent_id LEFT JOIN agents la ON la.id=b.lease_agent_id LEFT JOIN agents aa ON aa.id=b.assignee_agent_id";
+const BOUNTY_COLUMNS: &str = "b.id,b.project_id,b.title,b.description,b.acceptance_criteria,b.difficulty,b.assignee_mode,b.assignee_min_tier,b.assignee_agent_id,b.require_arbitration,b.status,b.created_by,b.lease_id,b.lease_agent_id,b.lease_expires_at,b.rejection_count,b.completion_note,b.published_at,b.withdrawn_at,b.cancelled_at,b.completed_at,b.created_at,b.updated_at,b.created_by_agent_id,a.name,la.name,la.tier,aa.name,aa.tier,b.assignment_expires_at,b.completion_cost,b.active_duration_ms,b.active_started_at,(SELECT COUNT(*) FROM bounty_comments c WHERE c.bounty_id=b.id),b.arbitrator_agent_id,ar.name,ar.tier,b.arbitration_expires_at,b.quality_grade,b.calibrated_difficulty";
+const BOUNTY_SOURCE: &str = "bounties b LEFT JOIN agents a ON a.id=b.created_by_agent_id LEFT JOIN agents la ON la.id=b.lease_agent_id LEFT JOIN agents aa ON aa.id=b.assignee_agent_id LEFT JOIN agents ar ON ar.id=b.arbitrator_agent_id";
 
 impl Repository {
     /// 函数职责：初始化文件、连接参数和版本化迁移；重复打开不重置数据。
@@ -55,13 +56,13 @@ impl Repository {
             [],
             |r| r.get(0),
         )?;
-        if version > 6 {
+        if version > 7 {
             return Err(ApiError::internal("数据库版本高于当前服务支持版本"));
         }
         if version == 0 {
             tx.execute_batch(include_str!("schema.sql"))?;
             tx.execute(
-                "INSERT INTO schema_migrations(version,applied_at) VALUES(6,?1)",
+                "INSERT INTO schema_migrations(version,applied_at) VALUES(7,?1)",
                 [now()],
             )?;
         } else {
@@ -72,6 +73,7 @@ impl Repository {
                 (4, include_str!("schema_v4.sql")),
                 (5, include_str!("schema_v5.sql")),
                 (6, include_str!("schema_v6.sql")),
+                (7, include_str!("schema_v7.sql")),
             ] {
                 if version < target {
                     tx.execute_batch(schema)?;
@@ -117,8 +119,9 @@ impl Repository {
         Ok(value)
     }
 
-    pub fn create_project(&self, input: CreateProject) -> Result<Project> {
+    pub fn create_project(&self, mut input: CreateProject) -> Result<Project> {
         validate_project(&input.name, input.icon.as_deref())?;
+        input.arbitrator_chain = arbitration::normalize_chain(input.arbitrator_chain)?;
         self.write(|tx| {
             let id = Uuid::new_v4().to_string();
             let timestamp = now();
@@ -148,7 +151,7 @@ impl Repository {
             if let Some(v) = patch.workspace_path { p.workspace_path = v; }
             if let Some(v) = patch.default_acceptance_criteria { p.default_acceptance_criteria = v; }
             if let Some(v) = patch.agent_draft_policy { p.agent_draft_policy = v; }
-            if let Some(v) = patch.arbitrator_chain { p.arbitrator_chain = v; }
+            if let Some(v) = patch.arbitrator_chain { p.arbitrator_chain = arbitration::normalize_chain(v)?; }
             if let Some(v) = patch.archived { p.archived = v; }
             validate_project(&p.name, p.icon.as_deref())?;
             tx.execute("UPDATE projects SET name=?2,icon=?3,description=?4,workspace_path=?5,default_acceptance_criteria=?6,agent_draft_policy=?7,arbitrator_chain_json=?8,archived=?9,updated_at=?10 WHERE id=?1",
@@ -566,6 +569,12 @@ fn bounty_row(r: &Row<'_>) -> rusqlite::Result<Bounty> {
         active_duration_ms: r.get(31)?,
         active_started_at: r.get(32)?,
         comment_count: r.get(33)?,
+        arbitrator_agent_id: r.get(34)?,
+        arbitrator_agent_name: r.get(35)?,
+        arbitrator_agent_tier: optional_enum(r, 36)?,
+        arbitration_expires_at: r.get(37)?,
+        quality_grade: optional_enum(r, 38)?,
+        calibrated_difficulty: optional_enum(r, 39)?,
     })
 }
 
@@ -600,7 +609,7 @@ mod tests {
         Repository::open(&path).unwrap();
         let conn = Connection::open(&path).unwrap();
         conn.execute(
-            "INSERT INTO schema_migrations(version,applied_at) VALUES(7,'future')",
+            "INSERT INTO schema_migrations(version,applied_at) VALUES(8,'future')",
             [],
         )
         .unwrap();
@@ -609,7 +618,7 @@ mod tests {
             conn.query_row("SELECT MAX(version) FROM schema_migrations", [], |r| r
                 .get::<_, i64>(0))
                 .unwrap(),
-            7
+            8
         );
     }
 
@@ -654,7 +663,7 @@ mod tests {
             conn.query_row("SELECT MAX(version) FROM schema_migrations", [], |r| r
                 .get::<_, i64>(0))
                 .unwrap(),
-            6
+            7
         );
         repo.create_bounty_comment(
             "b",

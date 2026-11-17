@@ -2,6 +2,57 @@
 
 桌面和 `taskrail-server` 使用同一 Rust 服务内核及 SQLite 数据库。服务提供管理员项目与悬赏管理、Agent 注册、凭证管控、项目订阅和任务读取接口。
 
+## 仲裁配置与验收
+
+管理员使用 `Authorization: Bearer <admin_token>` 管理全局仲裁链：
+
+| 方法与路径 | 输入 | 成功响应 |
+|---|---|---|
+| `GET /api/v1/admin/arbitration` | 无 | 200 `{"arbitrator_chain":string[]}` |
+| `PATCH /api/v1/admin/arbitration` | `{"arbitrator_chain":string[]}`，字段必填 | 200 `{"arbitrator_chain":string[]}` |
+
+项目创建和 PATCH 的 `arbitrator_chain` 与全局设置采用相同规则：仅拒绝空白项，按首次出现顺序去重，保留 ID 原值。配置允许尚未注册的符号 ID，例如 `["judge"]`。项目链非空时整体覆盖全局链，项目链为空时回退全局链。运行时仅采用名录中 `status=active` 的成员；项目链无活跃成员时进入人工兜底。
+
+开启 `require_arbitration` 的任务，如果认领者是有效链中唯一活跃成员，claim 返回 403 `ARBITRATOR_CONFLICT`。发布者可增配裁判或改为人工/无仲裁。链为空、认领者不在活跃链中，或另有活跃裁判时可认领。执行者始终不能验收自己的交付；主裁判认领任务后，交付时自动选择下一位可用裁判。
+
+以下 POST 接口成功均返回 200 `Bounty`，JSON 拒绝未知字段：
+
+| 路径 | 鉴权 | 请求 DTO |
+|---|---|---|
+| `/api/v1/agent/bounties/{id}/submit-arbitration` | Agent API key，当前执行者 | `SubmitArbitrationInput` |
+| `/api/v1/agent/bounties/{id}/arbitration/approve` | Agent API key，当前指定的活跃裁判 | `ApproveArbitrationInput` |
+| `/api/v1/agent/bounties/{id}/arbitration/reject` | Agent API key，当前指定的活跃裁判 | `RejectArbitrationInput` |
+| `/api/v1/bounties/{id}/arbitration/approve` | 管理员 token | `ApproveArbitrationInput`，也可无正文且无需 Content-Type |
+| `/api/v1/bounties/{id}/arbitration/reject` | 管理员 token | `RejectArbitrationInput` |
+
+`SubmitArbitrationInput` 为 `{"lease_id":i64,"completion_note":string|null,"completion_cost":number|null}`。`lease_id` 必填；说明与成本可省略或为 null。说明去除首尾空白，空白保存为 null；成本须为有限非负数。服务先执行与 heartbeat 相同的 fencing 顺序：404 `BOUNTY_NOT_FOUND`、409 `STALE_LEASE`（令牌错误或无持有者）、403 `LEASE_OWNER_MISMATCH`、409 `INVALID_TRANSITION`（非执行状态）、409 `STALE_LEASE`（租约已过期），再检查仲裁开关和成本。未开启仲裁返回 409 `INVALID_TRANSITION`；成本非法返回 400 `VALIDATION_ERROR`。
+
+提交成功进入 `PENDING_ARBITRATION`，结转 `active_duration_ms`，清空 `active_started_at`、`lease_expires_at` 和租约提醒，保留 `lease_id` 与执行者。服务从有效链首位起选择 active 且不是执行者的裁判，锁定 `arbitrator_agent_id` 并签发 15 分钟 `arbitration_expires_at`，记录本轮尝试列表。没有可用裁判时两个字段均为 null，等待管理员验收。当前裁判可查看任务详情、列表和评论，包括未订阅项目中的 specific 任务；DRAFT 和未发布任务仍隔离。
+
+`ApproveArbitrationInput` 为 `{"quality_grade":"perfect"|"flawed"|null,"calibrated_difficulty":"C"|"B"|"A"|"S"|null,"comment":string|null}`，全部字段可省略。缺省或 null 质量为 `perfect`。`RejectArbitrationInput` 为 `{"comment":string}`；评论必填，去除首尾空白后不能为空，否则返回 400 `VALIDATION_ERROR`。裁决仅允许 `PENDING_ARBITRATION`，否则返回 409 `INVALID_TRANSITION`。Agent 须仍 active、匹配当前裁判且不是执行者，否则返回 403 `ARBITRATOR_MISMATCH`；停用与吊销沿用身份错误码。管理员可在待仲裁阶段兜底，历史 actor 为 `human`。
+
+通过后进入 `COMPLETED`，保存 `completed_at`、质量和可选校准难度，清空仲裁与执行期限，保留执行者、裁判和令牌以供追溯。非空白通过评论保存为 `kind=comment`。打回总是保存评论；第 1、2、3 次打回返回 `IN_PROGRESS`，递增 `rejection_count`，刷新 15 分钟执行租约，清除提醒并重启分段计时，清空裁判锁和尝试列表。原令牌仍有效，执行者修复后再次提交。
+
+第 4 次打回触发交付失败并重开 `OPEN`。服务保留 `lease_id`，清除执行者、两类期限、仲裁尝试列表、完成说明、成本和有效耗时，重置 `rejection_count=0`。原定向给失败执行者的任务回退 `any`；其他定向保留并重新计 15 分钟响应窗口。失败事故保存在 `arbitration_failed` 历史事件中，detail 包含 `failed_agent_id`、`lease_id`、`rejection_count:4`、`active_duration_ms`、`comment_id`、`comment`。服务同时通知原执行者并按 OPEN 任务规则重新分发。
+
+后台扫描到裁判期限已过时，从有效链选择本轮尚未尝试、active 且不是执行者的下一位裁判，刷新 15 分钟期限。链耗尽后将裁判与期限清空，保持 `PENDING_ARBITRATION` 转人工兜底；系统不因仲裁超时回收执行者租约，也不增加执行者超时次数。
+
+`Bounty` 增加 `arbitrator_agent_id:string|null`、`arbitrator_agent_name:string|null`、`arbitrator_agent_tier:AgentTier|null`、`arbitration_expires_at:string|null`、`quality_grade:QualityGrade|null`、`calibrated_difficulty:Tier|null`。裁判名称和段位关联读取当前公开资料，不含密钥或 MMR；时间使用 UTC RFC3339 毫秒格式。
+
+仲裁历史类型为 `arbitration_requested`、`arbitration_approved`、`arbitration_rejected`、`arbitration_failed`、`arbitration_reassigned`、`arbitration_human_fallback`。评论、状态、历史、收件箱和重新分发共用一个写事务，任一步失败全部回滚。
+
+| 通知 event_type | active 接收者 | 行为 |
+|---|---|---|
+| `arbitration.requested` | 新指派裁判 | 读取交付和项目目录，验收或打回 |
+| `arbitration.rejected` | 原执行者 | 用原 lease_id 恢复修复与续租 |
+| `arbitration.approved` | 原执行者 | 交付已完成 |
+| `arbitration.failed` | 原执行者 | 本轮交付失败，停止使用旧令牌 |
+| `arbitration.timed_out` | 原裁判 | 当前仲裁权限已转移或交给人工 |
+
+以上通知通过 Inbox、SSE/WS、Webhook 使用相同持久化事件，按 `event_id` 去重。data 含变更后的 `bounty` 和 `lease_id`；requested 含 `arbitrator_agent_id`、`arbitration_expires_at`，超时顺延再含 `previous_arbitrator_agent_id`；approved 含 `quality_grade`、`calibrated_difficulty`、`comment_id`；rejected/failed 含 `rejection_count`、`active_duration_ms`、`comment_id`、`comment`、`failed_agent_id`（仅失败时非 null）。停止或吊销的接收者不获通知。
+
+管理员强制释放待仲裁任务时，清空裁判、期限、尝试列表和打回次数，重开 OPEN 并重新分发。
+
 ## 连接
 
 桌面启动时监听 `127.0.0.1:0`，数据库为 `app_data_dir()/taskrail.db`。调用 Tauri 命令 `get_embedded_server_info` 获取：
@@ -222,7 +273,7 @@ WAITING_INFO 和 PENDING_ARBITRATION 不参与租约到期扫描。关闭服务�
 
 订阅替换会校验所有项目存在且未归档。校验失败保留原订阅。指定项目 ID 按字典序返回；切换为全部项目时清空指定列表。项目硬删除同时清理对应订阅关系。`GET /api/v1/agent/projects` 返回全部未归档项目，供 Agent 选择订阅。
 
-Agent 任务列表和详情仅显示已发布（`status != DRAFT` 且 `published_at` 非空）的任务：订阅项目内的公开任务，以及自身发布、被指派或持有租约的任务。发布者可读取自己定向给其他 Agent 的任务，不要求订阅项目；其他第三方 Agent 不可见。`DRAFT` 和未发布即取消的任务对所有 Agent 隔离，包括发布者、被指派者和租约持有者。`include_drafts=true` 被忽略；`status=DRAFT` 返回空列表；不可见任务详情返回 `404 BOUNTY_NOT_FOUND`。`q` 使用与管理员列表相同的字面子串规则。
+Agent 任务列表和详情仅显示已发布（`status != DRAFT` 且 `published_at` 非空）的任务：订阅项目内的公开任务，以及自身发布、被指派、持有租约或担任当前裁判的任务。发布者可读取自己定向给其他 Agent 的任务，不要求订阅项目；其他第三方 Agent 不可见。`DRAFT` 和未发布即取消的任务对所有 Agent 隔离，包括发布者、被指派者和租约持有者。`include_drafts=true` 被忽略；`status=DRAFT` 返回空列表；不可见任务详情返回 `404 BOUNTY_NOT_FOUND`。`q` 使用与管理员列表相同的字面子串规则。
 
 管理员名录可按 `status=active|disabled|revoked` 和 `activity=idle|busy` 组合筛选。`active_lease_count` 统计持有者为该 Agent 的以下任务：租约未过期的 `IN_PROGRESS`，以及 `WAITING_INFO/PENDING_ARBITRATION` 冻结租约；冻结租约不检查期限，期限为空或已过期仍计入。名录与自身资料使用相同计数，计数为 0 时为 idle，大于 0 时为 busy。取消或释放后，该租约不再计入。名录按 `created_at DESC,id DESC` 排序。
 
@@ -267,10 +318,12 @@ Agent 任务列表和详情仅显示已发布（`status != DRAFT` 且 `published
 | 409 | `AGENT_NAME_TAKEN` | 注册名称已被使用 |
 | 409 | `BOUNTY_ALREADY_CLAIMED` | 悬赏已接取时撤回或重复接取 |
 | 409 | `STALE_LEASE` | 令牌不匹配、无持有者或租约已到期 |
+| 403 | `ARBITRATOR_CONFLICT` | 唯一活跃仲裁者接取开启仲裁的任务 |
+| 403 | `ARBITRATOR_MISMATCH` | Agent 不是当前裁判或与执行者身份冲突 |
 | 409 | `ARBITRATION_REQUIRED` | 启用仲裁的任务请求直接完成 |
 | 500 | `INTERNAL_ERROR` | 数据库或运行时内部错误 |
 
-数据库连接启用 WAL、外键和 5000ms busy timeout。当前 Schema 版本为 6；空库执行 `schema.sql` 并只记录版本 6。已有数据库依次补齐高于当前版本的 `schema_v2.sql`、`schema_v3.sql`、`schema_v4.sql`、`schema_v5.sql` 和 `schema_v6.sql`，每步记录对应版本。全部迁移在同一 `BEGIN IMMEDIATE` 事务中完成，失败整体回滚，保留已有项目、悬赏、历史事件、准入设置、邀请、Agent、项目订阅和推送记录。重复打开 v6 不重置数据；版本高于 6 时返回 `INTERNAL_ERROR` 拒绝打开。
+数据库连接启用 WAL、外键和 5000ms busy timeout。当前 Schema 版本为 7；空库执行 `schema.sql` 并只记录版本 7。已有数据库依次补齐高于当前版本的 `schema_v2.sql`、`schema_v3.sql`、`schema_v4.sql`、`schema_v5.sql`、`schema_v6.sql` 和 `schema_v7.sql`，每步记录对应版本。全部迁移在同一 `BEGIN IMMEDIATE` 事务中完成，失败整体回滚，保留已有项目、悬赏、历史事件、准入设置、邀请、Agent、项目订阅和推送记录。重复打开 v7 不重置数据；版本高于 7 时返回 `INTERNAL_ERROR` 拒绝打开。
 
 v5 在 bounties 新增可空的 `assignment_expires_at`、`completion_cost` 以及默认 0 的 `lease_warned_id`。agents 新增默认 0 的 `timeout_count` 和 `abandon_count`，两项计数属于 AgentSummary。`lease_incidents` 保存自增 id、任务外键 bounty_id、Agent 外键 agent_id、lease_id、kind（timeout/abandon）和 created_at；两个外键均级联删除，索引为 `lease_incidents_agent(agent_id,id)`。
 
@@ -388,3 +441,5 @@ WAITING_INFO 期间，后台扫描既不回收租约，也不发送临期提醒�
 有效耗时以一次认领周期为单位。claim 将 active_duration_ms 设为 0 并设置起点；request-info 结转当前段，回复恢复后从新起点继续；complete 结转最后一段并清空起点。IN_PROGRESS 时的实时 `T_active = active_duration_ms + max(0, 当前时间 - active_started_at)`；其他状态仅取 active_duration_ms，因此等待回复时间完全不计入。心跳与普通评论不改变起点。abandon、lease_expired 和 admin_release_lease 重开为 OPEN 时将累计值归零、起点清空，下次认领开始独立周期。重开前先结转本段耗时，将本轮总值保存在对应历史事件 detail.active_duration_ms 中。
 
 Schema v6 新增 bounty_comments 表及 `(bounty_id,id)` 索引，任务外键级联删除；作者类型与评论类型由 CHECK 约束。bounties 新增默认 0 的 active_duration_ms 和可空 active_started_at。v5 升级时，已有 IN_PROGRESS 从迁移时开始当前执行段，其他状态起点为 null；迁移前无法重建的有效耗时不追溯。
+
+Schema v7 增加全局 `arbitrator_chain_json`、任务当前裁判与响应期限、本轮尝试列表、质量档位和校准难度，并建立仲裁期限索引。旧数据的仲裁链和尝试列表默认空数组，其余新字段默认 null；质量和难度使用 CHECK 约束。

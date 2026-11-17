@@ -5,6 +5,8 @@
    */
   import { HttpBountyClient, normalizeServerUrl } from './api/bounty-client';
   import type {
+    AgentSummary,
+    ArbitrationConfig,
     BountyProject,
     CreatedInviteToken,
     CreateInviteTokenInput,
@@ -16,6 +18,7 @@
     UpdateProjectInput,
   } from './api/types';
   import AgentOnboardingPanel from './bounty/AgentOnboardingPanel.svelte';
+  import ArbitratorChainEditor from './bounty/ArbitratorChainEditor.svelte';
   import { formatServiceError } from './bounty/helpers';
   import ProjectManagementPanel from './bounty/ProjectManagementPanel.svelte';
   import { composeFontStack, DEFAULT_FONT_STACK, GENERIC_FAMILIES, parseFontStack } from './font-stack';
@@ -39,10 +42,16 @@
     serviceEpoch?: number;
     serviceConnectionError?: string;
     bountyProjects?: BountyProject[];
+    agents?: AgentSummary[];
+    agentsLoaded?: boolean;
+    agentsLoadError?: string;
     showArchivedProjects?: boolean;
     onboardingSettings?: OnboardingSettings;
     onboardingLoaded?: boolean;
     onboardingLoadError?: string;
+    arbitrationConfig?: ArbitrationConfig;
+    arbitrationConfigLoaded?: boolean;
+    arbitrationConfigLoadError?: string;
     skillDocument?: SkillDocument | null;
     desktop?: boolean;
     mobile?: boolean;
@@ -66,6 +75,8 @@
     onCreateBountyProject?: (input: CreateProjectInput) => Promise<BountyProject>;
     onUpdateBountyProject?: (id: string, input: UpdateProjectInput) => Promise<BountyProject>;
     onDeleteBountyProject?: (id: string) => Promise<void>;
+    onRetryLoadArbitrationConfig?: () => Promise<ArbitrationConfig | null | void> | void;
+    onUpdateArbitrationConfig?: (chain: string[]) => Promise<ArbitrationConfig>;
     onRetryLoadOnboarding?: () => Promise<OnboardingSettings | null | void> | void;
     onToggleLanRegistration?: (enabled: boolean) => Promise<OnboardingSettings>;
     onCreateInviteToken?: (input?: CreateInviteTokenInput) => Promise<CreatedInviteToken>;
@@ -91,10 +102,16 @@
     serviceEpoch = 0,
     serviceConnectionError = '',
     bountyProjects = [],
+    agents = [],
+    agentsLoaded = true,
+    agentsLoadError = '',
     showArchivedProjects = false,
     onboardingSettings = { lan_open_registration: false, invite_tokens: [] },
     onboardingLoaded = true,
     onboardingLoadError = '',
+    arbitrationConfig = { arbitrator_chain: [] },
+    arbitrationConfigLoaded = true,
+    arbitrationConfigLoadError = '',
     skillDocument = null,
     desktop = false,
     mobile = false,
@@ -118,6 +135,10 @@
       throw new Error('Not configured');
     },
     onDeleteBountyProject = async () => {
+      throw new Error('Not configured');
+    },
+    onRetryLoadArbitrationConfig,
+    onUpdateArbitrationConfig = async () => {
       throw new Error('Not configured');
     },
     onRetryLoadOnboarding,
@@ -148,6 +169,97 @@
   let testingConnection = $state(false);
   let savingConnection = $state(false);
   let connectionFeedback = $state<{ kind: 'success' | 'error'; message: string } | null>(null);
+
+  let arbitrationChainDraft = $state<string[]>([]);
+  let savingArbitrationChain = $state(false);
+  let arbitrationFeedback = $state<{ kind: 'success' | 'error'; message: string } | null>(null);
+  let lastSyncedArbitrationKey = '';
+  let arbitrationHelpButton = $state<HTMLButtonElement | undefined>(undefined);
+  let arbitrationHelpBubble = $state<HTMLDivElement | undefined>(undefined);
+  let arbitrationHelpOpen = $state(false);
+
+  function closeArbitrationHelp(): void {
+    arbitrationHelpOpen = false;
+    if (
+      typeof arbitrationHelpBubble?.hidePopover === 'function' &&
+      arbitrationHelpBubble.matches(':popover-open')
+    ) {
+      arbitrationHelpBubble.hidePopover();
+    }
+  }
+
+  function toggleArbitrationHelp(): void {
+    if (!arbitrationHelpButton || !arbitrationHelpBubble) return;
+    arbitrationHelpOpen = !arbitrationHelpOpen;
+    if (!arbitrationHelpOpen) {
+      closeArbitrationHelp();
+      return;
+    }
+    if (
+      typeof arbitrationHelpBubble.showPopover === 'function' &&
+      !arbitrationHelpBubble.matches(':popover-open')
+    ) {
+      arbitrationHelpBubble.showPopover();
+    }
+    positionAnchoredPopover(arbitrationHelpButton, arbitrationHelpBubble, closeArbitrationHelp);
+  }
+
+  $effect(() => {
+    if (!arbitrationHelpOpen || !arbitrationHelpButton || !arbitrationHelpBubble) return;
+    const stopObserve = observeAnchoredPopover(
+      arbitrationHelpButton,
+      arbitrationHelpBubble,
+      closeArbitrationHelp,
+    );
+    const onKeydown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        event.stopPropagation();
+        closeArbitrationHelp();
+      }
+    };
+    document.addEventListener('keydown', onKeydown, true);
+    return () => {
+      document.removeEventListener('keydown', onKeydown, true);
+      stopObserve();
+    };
+  });
+
+  $effect(() => {
+    const incomingChain = arbitrationConfig?.arbitrator_chain ?? [];
+    const syncKey = `${serviceEpoch}:${JSON.stringify(incomingChain)}`;
+    if (syncKey !== lastSyncedArbitrationKey) {
+      lastSyncedArbitrationKey = syncKey;
+      arbitrationChainDraft = [...incomingChain];
+      arbitrationFeedback = null;
+    }
+  });
+
+  async function handleSaveGlobalArbitrationChain(): Promise<void> {
+    if (savingArbitrationChain) return;
+    arbitrationFeedback = null;
+    if (!arbitrationConfigLoaded) {
+      arbitrationFeedback = {
+        kind: 'error',
+        message: $t('全局仲裁配置尚未加载完成，无法保存。'),
+      };
+      return;
+    }
+    savingArbitrationChain = true;
+    try {
+      const updated = await onUpdateArbitrationConfig(arbitrationChainDraft);
+      const nextChain = [...(updated?.arbitrator_chain ?? arbitrationChainDraft)];
+      lastSyncedArbitrationKey = `${serviceEpoch}:${JSON.stringify(nextChain)}`;
+      arbitrationChainDraft = nextChain;
+      const msg = $t('已保存全局仲裁顺位');
+      arbitrationFeedback = { kind: 'success', message: msg };
+      onNotify?.(msg);
+    } catch (error) {
+      arbitrationFeedback = { kind: 'error', message: formatServiceError(error) };
+    } finally {
+      savingArbitrationChain = false;
+    }
+  }
 
   $effect(() => {
     serviceModeDraft = preferences.serviceMode ?? 'embedded';
@@ -740,6 +852,9 @@
 
     <ProjectManagementPanel
       projects={bountyProjects}
+      {agents}
+      {agentsLoaded}
+      {agentsLoadError}
       showArchived={showArchivedProjects}
       {desktop}
       {mobile}
@@ -748,6 +863,112 @@
       onUpdateProject={onUpdateBountyProject}
       onDeleteProject={onDeleteBountyProject}
     />
+
+    <div class="service-connection-card" data-section="arbitration-config">
+      <div class="service-connection-header">
+        <div class="settings-label-group">
+          <span class="settings-row-label">{$t('仲裁者顺位配置')}</span>
+          <span class="settings-help">
+            <button
+              bind:this={arbitrationHelpButton}
+              type="button"
+              class="settings-help-trigger"
+              data-action="toggle-arbitration-help"
+              aria-label={$t('关于仲裁者顺位')}
+              aria-expanded={arbitrationHelpOpen}
+              aria-controls="global-arbitration-help"
+              onclick={toggleArbitrationHelp}
+            >
+              <svg
+                width="14"
+                height="14"
+                viewBox="0 0 16 16"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.5"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
+              >
+                <circle cx="8" cy="8" r="6.25" />
+                <path d="M6.4 6.2a1.7 1.7 0 0 1 3.2.7c0 1.1-1.6 1.4-1.6 2.5" />
+                <circle cx="8" cy="11.8" r=".75" fill="currentColor" stroke="none" />
+              </svg>
+            </button>
+            <div
+              bind:this={arbitrationHelpBubble}
+              id="global-arbitration-help"
+              class="settings-help-popover dropdown"
+              role="note"
+              popover="manual"
+              hidden={!arbitrationHelpOpen}
+              style="position: fixed; margin: 0; bottom: auto; right: auto; box-sizing: border-box;"
+            >
+              <p>
+                {$t('首位处于 active 且非执行者的候选人将接手 15 分钟仲裁窗，超时后顺延至下一顺位；无人可用时转交人工仲裁兜底。')}
+              </p>
+              <p>
+                {$t('全局链允许预填尚未注册的符号 ID；项目配置非空链时整体覆盖全局链，留空则沿用全局链。')}
+              </p>
+            </div>
+          </span>
+        </div>
+
+        <button
+          type="button"
+          class="primary secondary-action"
+          data-action="save-global-arbitration-chain"
+          disabled={savingArbitrationChain || !arbitrationConfigLoaded}
+          onclick={() => void handleSaveGlobalArbitrationChain()}
+        >
+          {savingArbitrationChain ? $t('正在保存…') : $t('保存全局顺位')}
+        </button>
+      </div>
+
+      {#if arbitrationConfigLoadError}
+        <div
+          class="drawer-error-banner onboarding-load-error-banner"
+          role="alert"
+          data-status="arbitration-load-error"
+        >
+          <span>{$t('加载仲裁配置失败：{error}', { error: arbitrationConfigLoadError })}</span>
+          {#if onRetryLoadArbitrationConfig}
+            <button
+              type="button"
+              class="secondary-action"
+              data-action="retry-load-arbitration"
+              onclick={() => void onRetryLoadArbitrationConfig()}
+            >
+              {$t('重试加载')}
+            </button>
+          {/if}
+        </div>
+      {/if}
+
+      <ArbitratorChainEditor
+        scope="global"
+        chain={arbitrationChainDraft}
+        {agents}
+        {agentsLoaded}
+        {agentsLoadError}
+        disabled={savingArbitrationChain || !arbitrationConfigLoaded}
+        emptyText={$t('未配置顺位（直接由人工仲裁兜底）')}
+        onChange={next => {
+          arbitrationChainDraft = next;
+          arbitrationFeedback = null;
+        }}
+      />
+
+      {#if arbitrationFeedback}
+        <p
+          class={arbitrationFeedback.kind === 'error' ? 'dialog-error settings-error' : 'service-feedback-success'}
+          role={arbitrationFeedback.kind === 'error' ? 'alert' : 'status'}
+          data-status="arbitration-feedback"
+        >
+          {arbitrationFeedback.message}
+        </p>
+      {/if}
+    </div>
 
     <AgentOnboardingPanel
       onboarding={onboardingSettings}

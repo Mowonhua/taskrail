@@ -16,6 +16,7 @@ import {
   type BountyStatus,
   type BountyTask,
   type InviteTokenSummary,
+  type QualityGrade,
 } from '../api/types';
 import { errorMessage } from '../errors';
 import { translate } from '../i18n';
@@ -151,6 +152,31 @@ export function formatBountyExecutor(
   };
 }
 
+export function formatBountyArbitrator(
+  bounty: Pick<BountyTask, 'arbitrator_agent_id' | 'arbitrator_agent_name' | 'arbitrator_agent_tier'>,
+): { agentId: string; name: string; tier: AgentTier | null; label: string } | null {
+  if (!bounty.arbitrator_agent_id) {
+    return null;
+  }
+  const name = bounty.arbitrator_agent_name || bounty.arbitrator_agent_id;
+  const tier = bounty.arbitrator_agent_tier ?? null;
+  return {
+    agentId: bounty.arbitrator_agent_id,
+    name,
+    tier,
+    label: tier ? translate('{name}（{tier}）', { name, tier: formatAgentTier(tier) }) : name,
+  };
+}
+
+export function formatQualityGrade(grade: QualityGrade): string {
+  switch (grade) {
+    case 'perfect':
+      return translate('完美交付');
+    case 'flawed':
+      return translate('有瑕疵');
+  }
+}
+
 export interface LeaseCountdownInfo {
   expired: boolean;
   expiringSoon: boolean;
@@ -282,6 +308,18 @@ export function formatEventLabel(eventType: string): string {
       return translate('租约超时回收');
     case 'assignment_expired':
       return translate('指派超时回退');
+    case 'arbitration_requested':
+      return translate('提交仲裁');
+    case 'arbitration_approved':
+      return translate('仲裁通过');
+    case 'arbitration_rejected':
+      return translate('仲裁打回');
+    case 'arbitration_failed':
+      return translate('多次打回重开');
+    case 'arbitration_reassigned':
+      return translate('仲裁顺延改派');
+    case 'arbitration_human_fallback':
+      return translate('仲裁转人工兜底');
     default:
       return eventType;
   }
@@ -327,6 +365,8 @@ export function formatEventActor(
       | 'lease_agent_name'
       | 'assignee_agent_id'
       | 'assignee_agent_name'
+      | 'arbitrator_agent_id'
+      | 'arbitrator_agent_name'
     >
   >,
 ): string {
@@ -342,6 +382,14 @@ export function formatEventActor(
   ) {
     return translate('Agent: {name}', {
       name: bounty.lease_agent_name || bounty.lease_agent_id,
+    });
+  }
+  if (
+    bounty?.arbitrator_agent_id &&
+    (actor === `agent:${bounty.arbitrator_agent_id}` || actor === bounty.arbitrator_agent_id)
+  ) {
+    return translate('Agent: {name}', {
+      name: bounty.arbitrator_agent_name || bounty.arbitrator_agent_id,
     });
   }
   if (
@@ -413,6 +461,10 @@ export function formatServiceError(error: unknown): string {
         return translate('租约令牌已过期或租约已失效，请重新获取最新任务状态。');
       case 'ARBITRATION_REQUIRED':
         return translate('该任务已开启仲裁验收，不能直接标记为完成。');
+      case 'ARBITRATOR_CONFLICT':
+        return translate('唯一仲裁者不得接取开启仲裁的任务，请增配裁判或改由人工/无仲裁执行。');
+      case 'ARBITRATOR_MISMATCH':
+        return translate('仅当前指定的活跃仲裁者可执行该裁决操作。');
       case 'UNAUTHORIZED':
         return translate('管理员凭证无效或未授权（401）。');
       case 'VALIDATION_ERROR':

@@ -6,6 +6,7 @@
   import { open as openDialog } from '@tauri-apps/plugin-dialog';
   import type {
     AgentDraftPolicy,
+    AgentSummary,
     BountyProject,
     CreateProjectInput,
     UpdateProjectInput,
@@ -15,10 +16,14 @@
   import { serializeProjectIcon, type ProjectIcon as ProjectIconValue } from '../project-icons';
   import ProjectIcon from '../ProjectIcon.svelte';
   import ProjectIconPicker from '../ProjectIconPicker.svelte';
+  import ArbitratorChainEditor from './ArbitratorChainEditor.svelte';
   import { formatAgentDraftPolicy, formatServiceError } from './helpers';
 
   interface Props {
     projects: BountyProject[];
+    agents?: AgentSummary[];
+    agentsLoaded?: boolean;
+    agentsLoadError?: string;
     showArchived: boolean;
     desktop: boolean;
     mobile: boolean;
@@ -30,6 +35,9 @@
 
   let {
     projects,
+    agents = [],
+    agentsLoaded = true,
+    agentsLoadError = '',
     showArchived,
     desktop,
     mobile,
@@ -47,6 +55,7 @@
   let formWorkspacePath = $state('');
   let formDefaultCriteria = $state('');
   let formAgentPolicy = $state<AgentDraftPolicy>('open');
+  let formArbitratorChain = $state<string[]>([]);
 
   let policyHelpButton = $state<HTMLButtonElement | undefined>(undefined);
   let policyHelpBubble = $state<HTMLDivElement | undefined>(undefined);
@@ -113,6 +122,7 @@
     formWorkspacePath = '';
     formDefaultCriteria = '';
     formAgentPolicy = 'open';
+    formArbitratorChain = [];
     panelError = '';
   }
 
@@ -126,6 +136,7 @@
     formWorkspacePath = project.workspace_path;
     formDefaultCriteria = project.default_acceptance_criteria;
     formAgentPolicy = project.agent_draft_policy ?? 'open';
+    formArbitratorChain = [...(project.arbitrator_chain ?? [])];
     panelError = '';
   }
 
@@ -169,6 +180,7 @@
           workspace_path: formWorkspacePath.trim(),
           default_acceptance_criteria: formDefaultCriteria,
           agent_draft_policy: formAgentPolicy,
+          arbitrator_chain: formArbitratorChain,
         });
       } else if (formMode === 'edit' && editingId) {
         await onUpdateProject(editingId, {
@@ -178,6 +190,7 @@
           workspace_path: formWorkspacePath.trim(),
           default_acceptance_criteria: formDefaultCriteria,
           agent_draft_policy: formAgentPolicy,
+          arbitrator_chain: formArbitratorChain,
         });
       }
       closeForm();
@@ -428,6 +441,27 @@
         </div>
       </div>
 
+      <div class="project-form-field" data-slot="project-arbitration-field">
+        <span
+          class="composer-label"
+          title={$t('全局链允许预填尚未注册的符号 ID；项目配置非空链时整体覆盖全局链，留空则沿用全局链。')}
+        >
+          {$t('项目专属仲裁链（留空沿用全局）')}
+        </span>
+        <ArbitratorChainEditor
+          scope="project"
+          chain={formArbitratorChain}
+          {agents}
+          {agentsLoaded}
+          {agentsLoadError}
+          disabled={busy}
+          emptyText={$t('未配置项目顺位（沿用全局仲裁链）')}
+          onChange={next => {
+            formArbitratorChain = next;
+          }}
+        />
+      </div>
+
       <div class="inline-project-actions">
         <button
           type="button"
@@ -479,6 +513,14 @@
                 >
                   {policyLabel}
                 </span>
+                {#if (project.arbitrator_chain ?? []).length > 0}
+                  <span
+                    class="settings-tag project-arbitration-tag"
+                    data-tag="project-arbitration-override"
+                  >
+                    {$t('专属裁判链 {count}', { count: (project.arbitrator_chain ?? []).length })}
+                  </span>
+                {/if}
                 {#if project.archived}
                   <span class="settings-tag" data-tag="archived">{$t('已归档')}</span>
                 {/if}

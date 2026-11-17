@@ -244,7 +244,7 @@ impl Repository {
         self.list_projects(false)
     }
 
-    /// 函数职责：返回已发布的订阅范围内公开任务及自身发布/指派/持有任务；任何参数都不能显示 DRAFT。
+    /// 函数职责：返回已发布的订阅范围内公开任务及自身发布/指派/持有/仲裁任务；任何参数都不能显示 DRAFT。
     pub fn agent_bounties(&self, id: &str, mut filter: BountyFilter) -> Result<Vec<Bounty>> {
         let agent = active_agent(&self.connect()?, id)?;
         filter.include_drafts = false;
@@ -424,6 +424,7 @@ pub(super) fn visible(agent: &AgentSummary, bounty: &Bounty) -> bool {
         && (bounty.created_by_agent_id.as_deref() == Some(&agent.id)
             || bounty.assignee_agent_id.as_deref() == Some(&agent.id)
             || bounty.lease_agent_id.as_deref() == Some(&agent.id)
+            || bounty.arbitrator_agent_id.as_deref() == Some(&agent.id)
             || (bounty.assignee_mode != AssigneeMode::Specific
                 && (agent.subscribe_all_projects
                     || agent.project_ids.contains(&bounty.project_id))))

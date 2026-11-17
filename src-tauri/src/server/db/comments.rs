@@ -113,7 +113,7 @@ fn nonempty(body: &str) -> Result<&str> {
     Ok(body)
 }
 
-fn insert(
+pub(super) fn insert(
     tx: &Transaction<'_>,
     id: &str,
     author_id: Option<&str>,

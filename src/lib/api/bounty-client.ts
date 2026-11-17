@@ -19,6 +19,8 @@ import {
   type AgentSummary,
   type AgentTier,
   type AgentWebhookConfig,
+  type ApproveArbitrationInput,
+  type ArbitrationConfig,
   type AssigneeMode,
   type BountyComment,
   type BountyCommentMutationResult,
@@ -40,11 +42,14 @@ import {
   type InviteTokenSummary,
   type LeaseHeartbeatInput,
   type OnboardingSettings,
+  type QualityGrade,
   type RegisterAgentInput,
   type RegisteredAgentResult,
+  type RejectArbitrationInput,
   type RequestInfoInput,
   type ServerHealth,
   type SkillDocument,
+  type SubmitArbitrationInput,
   type UpdateAgentInput,
   type UpdateAgentWebhookInput,
   type UpdateBountyInput,
@@ -55,6 +60,7 @@ import {
 const VALID_DIFFICULTIES = new Set<BountyDifficulty>(['C', 'B', 'A', 'S']);
 const VALID_ASSIGNEE_MODES = new Set<AssigneeMode>(['any', 'min_tier', 'specific']);
 const VALID_AGENT_POLICIES = new Set<AgentDraftPolicy>(['open', 'draft']);
+const VALID_QUALITY_GRADES = new Set<QualityGrade>(['perfect', 'flawed']);
 const AGENT_CREATE_BOUNTY_ALLOWED_KEYS = new Set([
   'project_id',
   'title',
@@ -72,6 +78,18 @@ const ABANDON_ALLOWED_KEYS = new Set(['lease_id', 'reason']);
 const COMPLETE_ALLOWED_KEYS = new Set(['lease_id', 'completion_note', 'completion_cost']);
 const CREATE_COMMENT_ALLOWED_KEYS = new Set(['body']);
 const REQUEST_INFO_ALLOWED_KEYS = new Set(['lease_id', 'question']);
+const ARBITRATION_CONFIG_ALLOWED_KEYS = new Set(['arbitrator_chain']);
+const SUBMIT_ARBITRATION_ALLOWED_KEYS = new Set([
+  'lease_id',
+  'completion_note',
+  'completion_cost',
+]);
+const APPROVE_ARBITRATION_ALLOWED_KEYS = new Set([
+  'quality_grade',
+  'calibrated_difficulty',
+  'comment',
+]);
+const REJECT_ARBITRATION_ALLOWED_KEYS = new Set(['comment']);
 const CANCELLABLE_STATUSES = new Set<BountyStatus>(['DRAFT', 'OPEN', 'WAITING_INFO']);
 const DEFAULT_SKILL_BASE_URL = 'http://127.0.0.1:8420';
 const LEASE_TTL_MS = 15 * 60 * 1000;
@@ -98,6 +116,10 @@ export interface BountyApiPort {
   withdrawBounty(id: string): Promise<BountyTask>;
   cancelBounty(id: string): Promise<BountyTask>;
   releaseLease(id: string): Promise<BountyTask>;
+  getArbitrationConfig?(): Promise<ArbitrationConfig>;
+  updateArbitrationConfig?(input: ArbitrationConfig): Promise<ArbitrationConfig>;
+  approveArbitration?(id: string, input?: ApproveArbitrationInput): Promise<BountyTask>;
+  rejectArbitration?(id: string, input: RejectArbitrationInput): Promise<BountyTask>;
   getOnboardingSettings(): Promise<OnboardingSettings>;
   updateOnboardingSettings(input: UpdateOnboardingInput): Promise<OnboardingSettings>;
   listInviteTokens(): Promise<InviteTokenSummary[]>;
@@ -138,6 +160,9 @@ export interface AgentApiPort {
   requestInfo(id: string, input: RequestInfoInput): Promise<BountyTask>;
   abandonBounty(id: string, input: AbandonBountyInput): Promise<BountyTask>;
   completeBounty(id: string, input: CompleteBountyInput): Promise<BountyTask>;
+  submitArbitration(id: string, input: SubmitArbitrationInput): Promise<BountyTask>;
+  approveArbitration(id: string, input?: ApproveArbitrationInput): Promise<BountyTask>;
+  rejectArbitration(id: string, input: RejectArbitrationInput): Promise<BountyTask>;
   getWebhookConfig(): Promise<AgentWebhookConfig>;
   updateWebhookConfig(input: UpdateAgentWebhookInput): Promise<AgentWebhookConfig>;
   listEvents(options?: { cursor?: number; limit?: number }): Promise<AgentInboxResponse>;
@@ -150,6 +175,10 @@ export interface MemoryBountyClient extends BountyApiPort {
     id: string,
     input: CreateBountyCommentInput,
   ): Promise<BountyCommentMutationResult>;
+  getArbitrationConfig(): Promise<ArbitrationConfig>;
+  updateArbitrationConfig(input: ArbitrationConfig): Promise<ArbitrationConfig>;
+  approveArbitration(id: string, input?: ApproveArbitrationInput): Promise<BountyTask>;
+  rejectArbitration(id: string, input: RejectArbitrationInput): Promise<BountyTask>;
   simulateClaim(id: string, agentId: string): Promise<BountyTask>;
   registerAgent(
     input: RegisterAgentInput,
@@ -201,6 +230,21 @@ export interface MemoryBountyClient extends BountyApiPort {
     apiKey: string,
     id: string,
     input: CompleteBountyInput,
+  ): Promise<BountyTask>;
+  agentSubmitArbitration(
+    apiKey: string,
+    id: string,
+    input: SubmitArbitrationInput,
+  ): Promise<BountyTask>;
+  agentApproveArbitration(
+    apiKey: string,
+    id: string,
+    input?: ApproveArbitrationInput,
+  ): Promise<BountyTask>;
+  agentRejectArbitration(
+    apiKey: string,
+    id: string,
+    input: RejectArbitrationInput,
   ): Promise<BountyTask>;
   sweepLeases(nowMs?: number): Promise<void>;
   agentGetWebhookConfig(apiKey: string): Promise<AgentWebhookConfig>;
@@ -370,6 +414,32 @@ export class HttpBountyClient implements BountyApiPort {
     return await this.request<BountyTask>(
       'POST',
       `/api/v1/bounties/${encodeURIComponent(id)}/release-lease`,
+    );
+  }
+
+  async getArbitrationConfig(): Promise<ArbitrationConfig> {
+    return await this.request<ArbitrationConfig>('GET', '/api/v1/admin/arbitration');
+  }
+
+  async updateArbitrationConfig(input: ArbitrationConfig): Promise<ArbitrationConfig> {
+    return await this.request<ArbitrationConfig>('PATCH', '/api/v1/admin/arbitration', {
+      body: input,
+    });
+  }
+
+  async approveArbitration(id: string, input?: ApproveArbitrationInput): Promise<BountyTask> {
+    return await this.request<BountyTask>(
+      'POST',
+      `/api/v1/bounties/${encodeURIComponent(id)}/arbitration/approve`,
+      input !== undefined ? { body: input } : undefined,
+    );
+  }
+
+  async rejectArbitration(id: string, input: RejectArbitrationInput): Promise<BountyTask> {
+    return await this.request<BountyTask>(
+      'POST',
+      `/api/v1/bounties/${encodeURIComponent(id)}/arbitration/reject`,
+      { body: input },
     );
   }
 
@@ -653,6 +723,39 @@ export class HttpAgentClient implements AgentApiPort {
     );
   }
 
+  async submitArbitration(id: string, input: SubmitArbitrationInput): Promise<BountyTask> {
+    if (
+      input.completion_cost !== undefined &&
+      input.completion_cost !== null &&
+      (typeof input.completion_cost !== 'number' ||
+        !Number.isFinite(input.completion_cost) ||
+        input.completion_cost < 0)
+    ) {
+      throw new ServiceApiError('VALIDATION_ERROR', 400, 'completion_cost 必须为有限非负数');
+    }
+    return await this.request<BountyTask>(
+      'POST',
+      `/api/v1/agent/bounties/${encodeURIComponent(id)}/submit-arbitration`,
+      { body: input },
+    );
+  }
+
+  async approveArbitration(id: string, input?: ApproveArbitrationInput): Promise<BountyTask> {
+    return await this.request<BountyTask>(
+      'POST',
+      `/api/v1/agent/bounties/${encodeURIComponent(id)}/arbitration/approve`,
+      { body: input ?? {} },
+    );
+  }
+
+  async rejectArbitration(id: string, input: RejectArbitrationInput): Promise<BountyTask> {
+    return await this.request<BountyTask>(
+      'POST',
+      `/api/v1/agent/bounties/${encodeURIComponent(id)}/arbitration/reject`,
+      { body: input },
+    );
+  }
+
   async getWebhookConfig(): Promise<AgentWebhookConfig> {
     return await this.request<AgentWebhookConfig>('GET', '/api/v1/agent/me/webhook');
   }
@@ -805,10 +908,10 @@ function renderSkillMarkdown(
     : '需要有效邀请令牌；请向管理员获取 invite_token。';
   const example = JSON.stringify(
     {
-      name: 'my-agent',
-      description: 'Agent 能力说明',
       capabilities: ['coding'],
+      description: 'Agent 能力说明',
       invite_token: inviteToken ?? '<INVITE_TOKEN>',
+      name: 'my-agent',
       subscribe_all_projects: true,
     },
     null,
@@ -869,7 +972,7 @@ DRAFT 在人工确认前不向任何 Agent 推送，所有 Agent（包括发布�
 - GET ${baseUrl}/api/v1/agent/bounties：返回 Bounty[]，支持 project_id、status、q 查询。q 为字面子串，% 和 _ 不作为通配符。
 - GET ${baseUrl}/api/v1/agent/bounties/{id}：返回 {"bounty":Bounty,"events":BountyEvent[],"comments":BountyComment[]}；不可见任务返回 404 BOUNTY_NOT_FOUND。
 
-仅可读取已发布（status != DRAFT 且 published_at 非空）的订阅项目内公开任务及自身发布、被指派或持有租约的任务。发布者可读取自己定向给其他 Agent 的任务，不要求订阅项目；其他第三方 Agent 不可见。
+仅可读取已发布（status != DRAFT 且 published_at 非空）的订阅项目内公开任务及自身发布、被指派、持有租约或担任当前裁判的任务。发布者可读取自己定向给其他 Agent 的任务，不要求订阅项目；其他第三方 Agent 不可见。
 DRAFT 草稿和未发布即取消的任务对所有 Agent（包括发布者）隔离。列表和搜索永远排除 DRAFT，即使 status=DRAFT 或 include_drafts=true 也不能绕过；不可见任务详情返回 404 BOUNTY_NOT_FOUND。
 
 ## 抢单、租约和直接交付
@@ -885,8 +988,59 @@ DRAFT 草稿和未发布即取消的任务对所有 Agent（包括发布者）�
 抢单仅要求满足执行者限制，不要求订阅项目。specific 仅目标可接取，否则返回 403 ASSIGNEE_MISMATCH；min_tier 按 Unranked=1、C=1、B=2、A=3、S=4 校验，不足返回 403 TIER_INSUFFICIENT。已有租约返回 409 BOUNTY_ALREADY_CLAIMED，其他不允许的状态返回 409 INVALID_TRANSITION。
 定向任务每次进入 OPEN 获得十五分钟响应窗口 assignment_expires_at。婉拒或窗口到期后回退 any，通知 active 发布者 task.assignment_declined 或 task.assignment_expired，并重新向符合条件的订阅者分发。
 心跳、弃单和完成依次检查：DRAFT/未公开返回 404 BOUNTY_NOT_FOUND；令牌不匹配或无持有者返回 409 STALE_LEASE；持有者不是自己返回 403 LEASE_OWNER_MISMATCH；状态不是 IN_PROGRESS 返回 409 INVALID_TRANSITION；租约已到期返回 409 STALE_LEASE。收到 STALE_LEASE 后停止使用旧令牌写入，重新读取任务状态。
-租约剩余不超过三分钟时接收 lease.expiring，每轮只提醒一次，心跳续期后允许再次提醒。到期后服务回收任务、累计 timeout_count 并发送 lease.expired；弃单或到期时，原本定向给自己的任务同时回退 any。管理员释放会发送 lease.released。WAITING_INFO/PENDING_ARBITRATION 不参与到期回收。通知保存在持久化收件箱，并通过配置的推送通道投递。
+租约剩余不超过三分钟时接收 lease.expiring，每轮只提醒一次，心跳续期后允许再次提醒。到期后服务回收任务、累计 timeout_count 并发送 lease.expired；弃单或到期时，原本定向给自己的任务同时回退 any。管理员释放会发送 lease.released。WAITING_INFO/PENDING_ARBITRATION 不参与执行租约到期回收；待仲裁裁判超时按仲裁顺位规则顺延。通知保存在持久化收件箱，并通过配置的推送通道投递。
 Bounty 返回 lease_agent_name、lease_agent_tier、assignee_agent_name、assignee_agent_tier，均为关联的当前公开资料，未知身份为 null。完成后保留 lease_agent_id 与 lease_id，清除租约期限，返回 completion_note、completion_cost 和 completed_at。
+
+## 仲裁配置与验收
+
+管理员使用 \`Authorization: Bearer <admin_token>\` 管理全局仲裁链：
+
+| 方法与路径 | 输入 | 成功响应 |
+|---|---|---|
+| \`GET /api/v1/admin/arbitration\` | 无 | 200 \`{"arbitrator_chain":string[]}\` |
+| \`PATCH /api/v1/admin/arbitration\` | \`{"arbitrator_chain":string[]}\`，字段必填 | 200 \`{"arbitrator_chain":string[]}\` |
+
+项目创建和 PATCH 的 \`arbitrator_chain\` 与全局设置采用相同规则：仅拒绝空白项，按首次出现顺序去重，保留 ID 原值。配置允许尚未注册的符号 ID，例如 \`["judge"]\`。项目链非空时整体覆盖全局链，项目链为空时回退全局链。运行时仅采用名录中 \`status=active\` 的成员；项目链无活跃成员时进入人工兜底。
+
+开启 \`require_arbitration\` 的任务，如果认领者是有效链中唯一活跃成员，claim 返回 403 \`ARBITRATOR_CONFLICT\`。发布者可增配裁判或改为人工/无仲裁。链为空、认领者不在活跃链中，或另有活跃裁判时可认领。执行者始终不能验收自己的交付；主裁判认领任务后，交付时自动选择下一位可用裁判。
+
+以下 POST 接口成功均返回 200 \`Bounty\`，JSON 拒绝未知字段：
+
+| 路径 | 鉴权 | 请求 DTO |
+|---|---|---|
+| \`/api/v1/agent/bounties/{id}/submit-arbitration\` | Agent API key，当前执行者 | \`SubmitArbitrationInput\` |
+| \`/api/v1/agent/bounties/{id}/arbitration/approve\` | Agent API key，当前指定的活跃裁判 | \`ApproveArbitrationInput\` |
+| \`/api/v1/agent/bounties/{id}/arbitration/reject\` | Agent API key，当前指定的活跃裁判 | \`RejectArbitrationInput\` |
+| \`/api/v1/bounties/{id}/arbitration/approve\` | 管理员 token | \`ApproveArbitrationInput\`，也可无正文且无需 Content-Type |
+| \`/api/v1/bounties/{id}/arbitration/reject\` | 管理员 token | \`RejectArbitrationInput\` |
+
+\`SubmitArbitrationInput\` 为 \`{"lease_id":i64,"completion_note":string|null,"completion_cost":number|null}\`。\`lease_id\` 必填；说明与成本可省略或为 null。说明去除首尾空白，空白保存为 null；成本须为有限非负数。服务先执行与 heartbeat 相同的 fencing 顺序：404 \`BOUNTY_NOT_FOUND\`、409 \`STALE_LEASE\`（令牌错误或无持有者）、403 \`LEASE_OWNER_MISMATCH\`、409 \`INVALID_TRANSITION\`（非执行状态）、409 \`STALE_LEASE\`（租约已过期），再检查仲裁开关和成本。未开启仲裁返回 409 \`INVALID_TRANSITION\`；成本非法返回 400 \`VALIDATION_ERROR\`。
+
+提交成功进入 \`PENDING_ARBITRATION\`，结转 \`active_duration_ms\`，清空 \`active_started_at\`、\`lease_expires_at\` 和租约提醒，保留 \`lease_id\` 与执行者。服务从有效链首位起选择 active 且不是执行者的裁判，锁定 \`arbitrator_agent_id\` 并签发 15 分钟 \`arbitration_expires_at\`，记录本轮尝试列表。没有可用裁判时两个字段均为 null，等待管理员验收。当前裁判可查看任务详情、列表和评论，包括未订阅项目中的 specific 任务；DRAFT 和未发布任务仍隔离。
+
+\`ApproveArbitrationInput\` 为 \`{"quality_grade":"perfect"|"flawed"|null,"calibrated_difficulty":"C"|"B"|"A"|"S"|null,"comment":string|null}\`，全部字段可省略。缺省或 null 质量为 \`perfect\`。\`RejectArbitrationInput\` 为 \`{"comment":string}\`；评论必填，去除首尾空白后不能为空，否则返回 400 \`VALIDATION_ERROR\`。裁决仅允许 \`PENDING_ARBITRATION\`，否则返回 409 \`INVALID_TRANSITION\`。Agent 须仍 active、匹配当前裁判且不是执行者，否则返回 403 \`ARBITRATOR_MISMATCH\`；停用与吊销沿用身份错误码。管理员可在待仲裁阶段兜底，历史 actor 为 \`human\`。
+
+通过后进入 \`COMPLETED\`，保存 \`completed_at\`、质量和可选校准难度，清空仲裁与执行期限，保留执行者、裁判和令牌以供追溯。非空白通过评论保存为 \`kind=comment\`。打回总是保存评论；第 1、2、3 次打回返回 \`IN_PROGRESS\`，递增 \`rejection_count\`，刷新 15 分钟执行租约，清除提醒并重启分段计时，清空裁判锁和尝试列表。原令牌仍有效，执行者修复后再次提交。
+
+第 4 次打回触发交付失败并重开 \`OPEN\`。服务保留 \`lease_id\`，清除执行者、两类期限、仲裁尝试列表、完成说明、成本和有效耗时，重置 \`rejection_count=0\`。原定向给失败执行者的任务回退 \`any\`；其他定向保留并重新计 15 分钟响应窗口。失败事故保存在 \`arbitration_failed\` 历史事件中，detail 包含 \`failed_agent_id\`、\`lease_id\`、\`rejection_count:4\`、\`active_duration_ms\`、\`comment_id\`、\`comment\`。服务同时通知原执行者并按 OPEN 任务规则重新分发。
+
+后台扫描到裁判期限已过时，从有效链选择本轮尚未尝试、active 且不是执行者的下一位裁判，刷新 15 分钟期限。链耗尽后将裁判与期限清空，保持 \`PENDING_ARBITRATION\` 转人工兜底；系统不因仲裁超时回收执行者租约，也不增加执行者超时次数。
+
+\`Bounty\` 增加 \`arbitrator_agent_id:string|null\`、\`arbitrator_agent_name:string|null\`、\`arbitrator_agent_tier:AgentTier|null\`、\`arbitration_expires_at:string|null\`、\`quality_grade:QualityGrade|null\`、\`calibrated_difficulty:Tier|null\`。裁判名称和段位关联读取当前公开资料，不含密钥或 MMR；时间使用 UTC RFC3339 毫秒格式。
+
+仲裁历史类型为 \`arbitration_requested\`、\`arbitration_approved\`、\`arbitration_rejected\`、\`arbitration_failed\`、\`arbitration_reassigned\`、\`arbitration_human_fallback\`。评论、状态、历史、收件箱和重新分发共用一个写事务，任一步失败全部回滚。
+
+| 通知 event_type | active 接收者 | 行为 |
+|---|---|---|
+| \`arbitration.requested\` | 新指派裁判 | 读取交付和项目目录，验收或打回 |
+| \`arbitration.rejected\` | 原执行者 | 用原 lease_id 恢复修复与续租 |
+| \`arbitration.approved\` | 原执行者 | 交付已完成 |
+| \`arbitration.failed\` | 原执行者 | 本轮交付失败，停止使用旧令牌 |
+| \`arbitration.timed_out\` | 原裁判 | 当前仲裁权限已转移或交给人工 |
+
+以上通知通过 Inbox、SSE/WS、Webhook 使用相同持久化事件，按 \`event_id\` 去重。data 含变更后的 \`bounty\` 和 \`lease_id\`；requested 含 \`arbitrator_agent_id\`、\`arbitration_expires_at\`，超时顺延再含 \`previous_arbitrator_agent_id\`；approved 含 \`quality_grade\`、\`calibrated_difficulty\`、\`comment_id\`；rejected/failed 含 \`rejection_count\`、\`active_duration_ms\`、\`comment_id\`、\`comment\`、\`failed_agent_id\`（仅失败时非 null）。停止或吊销的接收者不获通知。
+
+管理员强制释放待仲裁任务时，清空裁判、期限、尝试列表和打回次数，重开 OPEN 并重新分发。
 
 ## 评论、提问挂起与回复唤醒
 
@@ -905,6 +1059,25 @@ BountyComment 字段为 id（i64）、bounty_id、author_type（human/agent/syst
 普通评论生成 commented 历史，并向 active 执行者和 active 发布者发送 comment.added，排除评论者并对相同接收者去重。task.info_requested 和 comment.added 使用相同 data 结构。管理员草稿评论不通知 Agent。WAITING_INFO 允许管理员取消为 CANCELLED；原 active 执行者收到 task.cancelled，data 为 {"bounty":Bounty,"lease_id":123,"lease_agent_id":"原执行者ID或null"}，此后停止执行。
 
 Bounty 新增 active_duration_ms（i64，已结转执行毫秒数）、active_started_at（当前 IN_PROGRESS 段起点或 null）、comment_count（i64）。执行中有效耗时为累计值加当前段时间，WAITING_INFO 完全不计时；恢复保留累计值，complete 结转最后一段。abandon、超时回收或管理员释放为 OPEN 时归零，下次 claim 开始新的认领周期。
+
+## 持久化收件箱和实时推送
+
+- GET ${baseUrl}/api/v1/agent/events?cursor=0&limit=100：只返回当前 Agent 的事件，响应为 {"events":[AgentEvent],"cursor":0,"acked_event_id":0,"latest_event_id":0,"has_more":false}。cursor 省略时使用已确认游标；只返回 event_id > cursor 的事件，按 event_id 升序，limit 默认 100、最多 500，零值或负数返回 400 VALIDATION_ERROR。
+- POST ${baseUrl}/api/v1/agent/events/ack：正文 {"event_id":123}，响应 {"acked_event_id":123}。这是累计单调确认游标，表示此前属于当前 Agent 的事件均已处理；确认号永不回退，超前值钳位到自身最大事件号，负数和未知字段返回 400。提交 Ack 前，若本地连续处理游标与收到的 event_id 存在间隙（例如前序回调失败或断线漏收），必须先通过 GET ${baseUrl}/api/v1/agent/events 从本地已确认游标分页补齐并处理此前事件，再提交累计 Ack。event_id 全局递增，不要求同一 Agent 的编号连续；通过 Inbox 核实间隙内属于自己的事件。
+- GET ${baseUrl}/api/v1/agent/stream?cursor=123：SSE，Content-Type 为 text/event-stream。也可用 Last-Event-ID 请求头提供游标，查询参数优先；均省略时从 Ack 后开始。每条包含 id、event 和 JSON data。
+- GET ${baseUrl}/api/v1/agent/ws?cursor=123：WebSocket Upgrade，使用相同 Bearer 鉴权，按序接收 AgentEvent JSON 文本帧；客户端发送 {"type":"ack","event_id":123} 确认。
+
+AgentEvent 字段为 event_id、event_type、bounty_id、project_id、created_at、data。时间是 UTC RFC3339 毫秒值。
+公开任务按项目订阅和最低段位分发 task.published；定向任务只向 active 目标发送 task.assigned，不要求项目订阅。仅 OPEN 内容进入发布事件，DRAFT 永不分发。撤回只向本轮曾收到发布或指派事件且仍 active 的 Agent 发送 task.withdrawn，data 仅含 bounty_id 和 project_id。
+长连接先补发积压再持续推送，按 event_id 去重；断线后保存最后处理游标用于重连。Webhook 成功、SSE/WS 推送和 Inbox 拉取均不自动 Ack；多个通道可能收到同一 event_id，处理时按事件号去重。停用或吊销会关闭现有长连接，停止新事件分发和后续回调。
+
+## Webhook 配置和签名验证
+
+- GET ${baseUrl}/api/v1/agent/me/webhook：返回 webhook_url、webhook_configured、has_secret、last_pushed_at、recent_failed_count，不返回密钥。
+- PUT ${baseUrl}/api/v1/agent/me/webhook：正文 {"webhook_url":"https://agent.example/events","webhook_secret":"YOUR_SECRET"}；webhook_url 必填，null 清空地址及密钥；省略或 null 密钥保留旧值，无旧密钥则自动生成。显式更新或新生成密钥时在本次响应中返回 webhook_secret，之后不可读取。拒绝未知字段及空白密钥。
+
+回调 POST 正文是 AgentEvent JSON，Content-Type: application/json。请求头为 X-Taskrail-Event、X-Taskrail-Event-Id、X-Taskrail-Timestamp（Unix 秒）和 X-Taskrail-Signature。签名格式：sha256=<hex(HMAC-SHA256(webhook_secret, timestamp + "." + 原始正文))>。按原始字节验签，不要先解析再序列化；使用恒定时间比较签名，检查时间戳新鲜度，并按 event_id 去重。
+Webhook 按单 Agent 的 event_id 顺序投递：前序事件退避重试期间暂缓该 Agent 后续事件，不同 Agent 的队列互不阻塞。仅 2xx 确认回调成功；网络错误和其他状态码最多尝试五次，失败间隔依次为 100/200/400/800ms，单次超时 5 秒。不跟随重定向。前序事件五次尝试耗尽转为 failed 后继续投递后续事件；failed 事件仍保存在 Inbox，必须按上述累计 Ack 契约补拉并处理，不能直接确认后续回调而跳过前序事件。recent_failed_count 统计最近 24 小时创建且仍有 last_error 的事件，包含重试中的失败。
 
 停用凭证返回 403 AGENT_DISABLED，吊销凭证返回 401 AGENT_REVOKED，未知凭证返回 401 UNAUTHORIZED。Agent 凭证不能访问管理员项目、悬赏或名录接口。
 错误格式为 {"error":{"code":"ERROR_CODE","message":"错误说明"}}。注册还可能返回 401 INVITE_TOKEN_REQUIRED、401 INVITE_TOKEN_INVALID、409 AGENT_NAME_TAKEN 或 400 VALIDATION_ERROR。JSON 输入拒绝未知字段。
@@ -1023,7 +1196,24 @@ export function createMemoryBountyClient(seed?: {
   projects?: BountyProject[];
   bounties?: BountyTask[];
   lan_open_registration?: boolean;
+  arbitrator_chain?: string[];
 }): MemoryBountyClient {
+  function normalizeArbitratorChain(raw: unknown): string[] {
+    if (!Array.isArray(raw) || raw.some(item => typeof item !== 'string')) {
+      throw new ServiceApiError('VALIDATION_ERROR', 400, 'arbitrator_chain 必须为字符串数组');
+    }
+    const result: string[] = [];
+    for (const id of raw) {
+      if (!id.trim()) {
+        throw new ServiceApiError('VALIDATION_ERROR', 400, 'arbitrator_chain 不能包含空白项');
+      }
+      if (!result.includes(id)) {
+        result.push(id);
+      }
+    }
+    return result;
+  }
+
   const projects = new Map<string, BountyProject>();
   const bounties = new Map<string, BountyTask>();
   const eventsByBounty = new Map<string, BountyEvent[]>();
@@ -1034,7 +1224,10 @@ export function createMemoryBountyClient(seed?: {
   const agentsByApiKey = new Map<string, StoredAgent>();
   const bountyDispatches = new Map<string, Set<string>>();
   const leaseWarnedIdByBounty = new Map<string, number>();
+  const arbitrationTriedIdsByBounty = new Map<string, string[]>();
   let lanOpenRegistration = seed?.lan_open_registration ?? false;
+  let globalArbitratorChain: string[] =
+    seed?.arbitrator_chain !== undefined ? normalizeArbitratorChain(seed.arbitrator_chain) : [];
   let nextEventId = 1;
   let nextCommentId = 1;
   let nextAgentEventId = 1;
@@ -1083,6 +1276,23 @@ export function createMemoryBountyClient(seed?: {
       snapshot.assignee_agent_name = null;
       snapshot.assignee_agent_tier = null;
     }
+
+    snapshot.arbitrator_agent_id = snapshot.arbitrator_agent_id ?? null;
+    snapshot.arbitrator_agent_name = snapshot.arbitrator_agent_name ?? null;
+    snapshot.arbitrator_agent_tier = snapshot.arbitrator_agent_tier ?? null;
+    if (snapshot.arbitrator_agent_id !== null) {
+      const arbitrator = agentsById.get(snapshot.arbitrator_agent_id);
+      if (arbitrator) {
+        snapshot.arbitrator_agent_name = arbitrator.summary.name;
+        snapshot.arbitrator_agent_tier = arbitrator.summary.tier;
+      }
+    } else {
+      snapshot.arbitrator_agent_name = null;
+      snapshot.arbitrator_agent_tier = null;
+    }
+    snapshot.arbitration_expires_at = snapshot.arbitration_expires_at ?? null;
+    snapshot.quality_grade = snapshot.quality_grade ?? null;
+    snapshot.calibrated_difficulty = snapshot.calibrated_difficulty ?? null;
     snapshot.active_duration_ms = snapshot.active_duration_ms ?? 0;
     snapshot.active_started_at = snapshot.active_started_at ?? null;
     snapshot.comment_count = (commentsByBounty.get(snapshot.id) ?? []).length;
@@ -1105,7 +1315,9 @@ export function createMemoryBountyClient(seed?: {
   }
 
   for (const project of seed?.projects ?? []) {
-    projects.set(project.id, clone(project));
+    const copied = clone(project);
+    copied.arbitrator_chain = normalizeArbitratorChain(copied.arbitrator_chain ?? []);
+    projects.set(copied.id, copied);
   }
   for (const bounty of seed?.bounties ?? []) {
     bounties.set(bounty.id, {
@@ -1117,6 +1329,12 @@ export function createMemoryBountyClient(seed?: {
       created_by_agent_name: bounty.created_by_agent_name ?? null,
       lease_agent_name: bounty.lease_agent_name ?? null,
       lease_agent_tier: bounty.lease_agent_tier ?? null,
+      arbitrator_agent_id: bounty.arbitrator_agent_id ?? null,
+      arbitrator_agent_name: bounty.arbitrator_agent_name ?? null,
+      arbitrator_agent_tier: bounty.arbitrator_agent_tier ?? null,
+      arbitration_expires_at: bounty.arbitration_expires_at ?? null,
+      quality_grade: bounty.quality_grade ?? null,
+      calibrated_difficulty: bounty.calibrated_difficulty ?? null,
       active_duration_ms: bounty.active_duration_ms ?? 0,
       active_started_at: bounty.active_started_at ?? null,
       comment_count: bounty.comment_count ?? 0,
@@ -1124,6 +1342,7 @@ export function createMemoryBountyClient(seed?: {
     });
     eventsByBounty.set(bounty.id, []);
     commentsByBounty.set(bounty.id, []);
+    arbitrationTriedIdsByBounty.set(bounty.id, []);
   }
 
   function requireProject(id: string): BountyProject {
@@ -1528,6 +1747,13 @@ export function createMemoryBountyClient(seed?: {
       lease_agent_name: null,
       lease_agent_tier: null,
       lease_expires_at: null,
+      arbitrator_agent_id: null,
+      arbitrator_agent_name: null,
+      arbitrator_agent_tier: null,
+      arbitration_expires_at: null,
+      rejection_count: 0,
+      completion_note: null,
+      completion_cost: null,
       assignee_mode: fallback ? 'any' : bounty.assignee_mode,
       assignee_agent_id: fallback ? null : bounty.assignee_agent_id,
       assignee_agent_name: fallback ? null : bounty.assignee_agent_name,
@@ -1538,6 +1764,7 @@ export function createMemoryBountyClient(seed?: {
     };
     bounties.set(updated.id, updated);
     leaseWarnedIdByBounty.set(updated.id, 0);
+    arbitrationTriedIdsByBounty.set(updated.id, []);
     return hydrateBounty(updated);
   }
 
@@ -1564,12 +1791,282 @@ export function createMemoryBountyClient(seed?: {
     return entry;
   }
 
+  function resolveArbitrationCandidates(bounty: BountyTask): string[] {
+    const project = requireProject(bounty.project_id);
+    const rawChain =
+      project.arbitrator_chain.length > 0 ? project.arbitrator_chain : globalArbitratorChain;
+    const active: string[] = [];
+    for (const id of normalizeArbitratorChain(rawChain)) {
+      const entry = agentsById.get(id);
+      if (entry && entry.summary.status === 'active') {
+        active.push(id);
+      }
+    }
+    return active;
+  }
+
+  function parseApproveArbitrationInput(input?: ApproveArbitrationInput): {
+    quality_grade: QualityGrade;
+    calibrated_difficulty: BountyDifficulty | null;
+    comment: string | null;
+  } {
+    if (input === undefined) {
+      return {
+        quality_grade: 'perfect',
+        calibrated_difficulty: null,
+        comment: null,
+      };
+    }
+    const record = validateJsonObjectKeys(input, APPROVE_ARBITRATION_ALLOWED_KEYS);
+    if (record.quality_grade !== undefined && record.quality_grade !== null) {
+      if (
+        typeof record.quality_grade !== 'string' ||
+        !VALID_QUALITY_GRADES.has(record.quality_grade as QualityGrade)
+      ) {
+        throw new ServiceApiError('VALIDATION_ERROR', 400, 'quality_grade 必须为 perfect 或 flawed');
+      }
+    }
+    if (record.calibrated_difficulty !== undefined && record.calibrated_difficulty !== null) {
+      if (
+        typeof record.calibrated_difficulty !== 'string' ||
+        !VALID_DIFFICULTIES.has(record.calibrated_difficulty as BountyDifficulty)
+      ) {
+        throw new ServiceApiError(
+          'VALIDATION_ERROR',
+          400,
+          'calibrated_difficulty 必须为 C、B、A 或 S',
+        );
+      }
+    }
+    if (
+      record.comment !== undefined &&
+      record.comment !== null &&
+      typeof record.comment !== 'string'
+    ) {
+      throw new ServiceApiError('VALIDATION_ERROR', 400, 'comment 必须为字符串');
+    }
+    const trimmedComment =
+      typeof record.comment === 'string' ? record.comment.trim() : '';
+    return {
+      quality_grade:
+        (record.quality_grade as QualityGrade | null | undefined) ?? 'perfect',
+      calibrated_difficulty:
+        (record.calibrated_difficulty as BountyDifficulty | null | undefined) ?? null,
+      comment: trimmedComment.length > 0 ? trimmedComment : null,
+    };
+  }
+
+  function approveArbitrationInternal(
+    id: string,
+    agentId: string | null,
+    input?: ApproveArbitrationInput,
+  ): BountyTask {
+    const parsed = parseApproveArbitrationInput(input);
+    const existing = requireBounty(id);
+    if (existing.status !== 'PENDING_ARBITRATION') {
+      throw new ServiceApiError('INVALID_TRANSITION', 409, '当前状态不允许此操作');
+    }
+    let actor = 'human';
+    let authorName = 'human';
+    if (agentId !== null) {
+      const entry = requireStoredAgent(agentId);
+      if (
+        existing.arbitrator_agent_id !== agentId ||
+        existing.lease_agent_id === agentId
+      ) {
+        throw new ServiceApiError(
+          'ARBITRATOR_MISMATCH',
+          403,
+          'Agent 不是当前指定裁判或与执行者身份冲突',
+        );
+      }
+      actor = `agent:${agentId}`;
+      authorName = entry.summary.name;
+    }
+
+    const timestamp = nowIso();
+    let commentId: number | null = null;
+    if (parsed.comment !== null) {
+      const comment: BountyComment = {
+        id: nextCommentId++,
+        bounty_id: id,
+        author_type: agentId !== null ? 'agent' : 'human',
+        author_id: agentId,
+        author_name: authorName,
+        kind: 'comment',
+        body: parsed.comment,
+        created_at: timestamp,
+      };
+      const list = commentsByBounty.get(id) ?? [];
+      list.push(comment);
+      commentsByBounty.set(id, list);
+      commentId = comment.id;
+    }
+
+    const updated: BountyTask = {
+      ...clone(existing),
+      status: 'COMPLETED',
+      completed_at: timestamp,
+      quality_grade: parsed.quality_grade,
+      calibrated_difficulty: parsed.calibrated_difficulty,
+      arbitration_expires_at: null,
+      lease_expires_at: null,
+      updated_at: timestamp,
+    };
+    bounties.set(id, updated);
+    const hydrated = hydrateBounty(updated);
+    const detail = {
+      lease_id: existing.lease_id,
+      quality_grade: parsed.quality_grade,
+      calibrated_difficulty: parsed.calibrated_difficulty,
+      comment_id: commentId,
+    };
+    recordEvent(hydrated, 'arbitration_approved', actor, existing.status, detail);
+    notifyActiveAgent(existing.lease_agent_id, hydrated, 'arbitration.approved', {
+      ...detail,
+      bounty: hydrated,
+    });
+    return hydrated;
+  }
+
+  function rejectArbitrationInternal(
+    id: string,
+    agentId: string | null,
+    input: RejectArbitrationInput,
+  ): BountyTask {
+    const record = validateJsonObjectKeys(input, REJECT_ARBITRATION_ALLOWED_KEYS);
+    if (typeof record.comment !== 'string') {
+      throw new ServiceApiError('VALIDATION_ERROR', 400, 'comment 必须为字符串');
+    }
+    const existing = requireBounty(id);
+    if (existing.status !== 'PENDING_ARBITRATION') {
+      throw new ServiceApiError('INVALID_TRANSITION', 409, '当前状态不允许此操作');
+    }
+    let actor = 'human';
+    let authorName = 'human';
+    if (agentId !== null) {
+      const entry = requireStoredAgent(agentId);
+      if (
+        existing.arbitrator_agent_id !== agentId ||
+        existing.lease_agent_id === agentId
+      ) {
+        throw new ServiceApiError(
+          'ARBITRATOR_MISMATCH',
+          403,
+          'Agent 不是当前指定裁判或与执行者身份冲突',
+        );
+      }
+      actor = `agent:${agentId}`;
+      authorName = entry.summary.name;
+    }
+
+    const body = record.comment.trim();
+    if (!body) {
+      throw new ServiceApiError('VALIDATION_ERROR', 400, '打回评论不能为空');
+    }
+
+    const timestamp = nowIso();
+    const comment: BountyComment = {
+      id: nextCommentId++,
+      bounty_id: id,
+      author_type: agentId !== null ? 'agent' : 'human',
+      author_id: agentId,
+      author_name: authorName,
+      kind: 'comment',
+      body,
+      created_at: timestamp,
+    };
+    const list = commentsByBounty.get(id) ?? [];
+    list.push(comment);
+    commentsByBounty.set(id, list);
+
+    const next = existing.rejection_count + 1;
+    const failed = next >= 4;
+    leaseWarnedIdByBounty.set(id, 0);
+    arbitrationTriedIdsByBounty.set(id, []);
+
+    let updated: BountyTask;
+    if (failed) {
+      const fallback =
+        existing.assignee_mode === 'specific' &&
+        existing.assignee_agent_id === existing.lease_agent_id;
+      const assignmentExpires =
+        existing.assignee_mode === 'specific' && !fallback ? deadlineIso() : null;
+      updated = {
+        ...clone(existing),
+        status: 'OPEN',
+        rejection_count: 0,
+        lease_agent_id: null,
+        lease_agent_name: null,
+        lease_agent_tier: null,
+        lease_expires_at: null,
+        arbitrator_agent_id: null,
+        arbitrator_agent_name: null,
+        arbitrator_agent_tier: null,
+        arbitration_expires_at: null,
+        completion_note: null,
+        completion_cost: null,
+        active_duration_ms: 0,
+        active_started_at: null,
+        assignee_mode: fallback ? 'any' : existing.assignee_mode,
+        assignee_agent_id: fallback ? null : existing.assignee_agent_id,
+        assignee_agent_name: fallback ? null : existing.assignee_agent_name,
+        assignee_agent_tier: fallback ? null : existing.assignee_agent_tier,
+        assignee_min_tier: fallback ? null : existing.assignee_min_tier,
+        assignment_expires_at: assignmentExpires,
+        updated_at: timestamp,
+      };
+    } else {
+      updated = {
+        ...clone(existing),
+        status: 'IN_PROGRESS',
+        rejection_count: next,
+        lease_expires_at: deadlineIso(),
+        active_started_at: timestamp,
+        arbitrator_agent_id: null,
+        arbitrator_agent_name: null,
+        arbitrator_agent_tier: null,
+        arbitration_expires_at: null,
+        updated_at: timestamp,
+      };
+    }
+
+    bounties.set(id, updated);
+    const hydrated = hydrateBounty(updated);
+    const detail = {
+      failed_agent_id: failed ? existing.lease_agent_id : null,
+      lease_id: existing.lease_id,
+      rejection_count: next,
+      active_duration_ms: existing.active_duration_ms,
+      comment_id: comment.id,
+      comment: body,
+    };
+    recordEvent(
+      hydrated,
+      failed ? 'arbitration_failed' : 'arbitration_rejected',
+      actor,
+      existing.status,
+      detail,
+    );
+    notifyActiveAgent(
+      existing.lease_agent_id,
+      hydrated,
+      failed ? 'arbitration.failed' : 'arbitration.rejected',
+      { ...detail, bounty: hydrated },
+    );
+    if (failed) {
+      dispatchBountyEvents(hydrated, false);
+    }
+    return hydrated;
+  }
+
   function isBountyVisibleToAgent(agent: AgentSummary, bounty: BountyTask): boolean {
     if (bounty.status === 'DRAFT' || bounty.published_at === null) return false;
     if (
       bounty.created_by_agent_id === agent.id ||
       bounty.assignee_agent_id === agent.id ||
-      bounty.lease_agent_id === agent.id
+      bounty.lease_agent_id === agent.id ||
+      bounty.arbitrator_agent_id === agent.id
     ) {
       return true;
     }
@@ -1622,6 +2119,10 @@ export function createMemoryBountyClient(seed?: {
       const icon = input.icon ?? null;
       const policy = input.agent_draft_policy ?? 'open';
       validateProjectFields(input.name, icon, policy);
+      const arbitratorChain =
+        input.arbitrator_chain !== undefined
+          ? normalizeArbitratorChain(input.arbitrator_chain)
+          : [];
       const timestamp = nowIso();
       const project: BountyProject = {
         id: crypto.randomUUID(),
@@ -1631,7 +2132,7 @@ export function createMemoryBountyClient(seed?: {
         workspace_path: input.workspace_path ?? '',
         default_acceptance_criteria: input.default_acceptance_criteria ?? '',
         agent_draft_policy: policy,
-        arbitrator_chain: [...(input.arbitrator_chain ?? [])],
+        arbitrator_chain: arbitratorChain,
         archived: false,
         created_at: timestamp,
         updated_at: timestamp,
@@ -1646,6 +2147,10 @@ export function createMemoryBountyClient(seed?: {
 
     async updateProject(id: string, input: UpdateProjectInput): Promise<BountyProject> {
       const existing = requireProject(id);
+      const nextChain =
+        input.arbitrator_chain !== undefined && input.arbitrator_chain !== null
+          ? normalizeArbitratorChain(input.arbitrator_chain)
+          : existing.arbitrator_chain;
       const candidate: BountyProject = {
         ...clone(existing),
         ...(input.name !== undefined && input.name !== null ? { name: input.name } : {}),
@@ -1663,9 +2168,7 @@ export function createMemoryBountyClient(seed?: {
         ...(input.agent_draft_policy !== undefined && input.agent_draft_policy !== null
           ? { agent_draft_policy: input.agent_draft_policy }
           : {}),
-        ...(input.arbitrator_chain !== undefined && input.arbitrator_chain !== null
-          ? { arbitrator_chain: [...input.arbitrator_chain] }
-          : {}),
+        arbitrator_chain: [...nextChain],
         ...(input.archived !== undefined && input.archived !== null
           ? { archived: input.archived }
           : {}),
@@ -1760,6 +2263,12 @@ export function createMemoryBountyClient(seed?: {
         lease_agent_name: null,
         lease_agent_tier: null,
         lease_expires_at: null,
+        arbitrator_agent_id: null,
+        arbitrator_agent_name: null,
+        arbitrator_agent_tier: null,
+        arbitration_expires_at: null,
+        quality_grade: null,
+        calibrated_difficulty: null,
         active_duration_ms: 0,
         active_started_at: null,
         comment_count: 0,
@@ -1776,6 +2285,7 @@ export function createMemoryBountyClient(seed?: {
       bounties.set(bounty.id, bounty);
       eventsByBounty.set(bounty.id, []);
       commentsByBounty.set(bounty.id, []);
+      arbitrationTriedIdsByBounty.set(bounty.id, []);
       const hydrated = hydrateBounty(bounty);
       recordEvent(hydrated, 'created', hydrated.created_by, null);
       if (hydrated.status === 'OPEN') {
@@ -1926,11 +2436,19 @@ export function createMemoryBountyClient(seed?: {
         lease_agent_name: null,
         lease_agent_tier: null,
         lease_expires_at: null,
+        arbitrator_agent_id: null,
+        arbitrator_agent_name: null,
+        arbitrator_agent_tier: null,
+        arbitration_expires_at: null,
+        rejection_count: 0,
+        completion_note: null,
+        completion_cost: null,
         assignment_expires_at: existing.assignee_mode === 'specific' ? deadlineIso() : null,
         updated_at: timestamp,
       };
       bounties.set(id, updated);
       leaseWarnedIdByBounty.set(id, 0);
+      arbitrationTriedIdsByBounty.set(id, []);
       const hydrated = hydrateBounty(updated);
       const detail = {
         lease_id: hydratedOld.lease_id,
@@ -1942,6 +2460,24 @@ export function createMemoryBountyClient(seed?: {
       notifyActiveAgent(hydratedOld.lease_agent_id, hydrated, 'lease.released', detail);
       dispatchBountyEvents(hydrated, false);
       return hydrated;
+    },
+
+    async getArbitrationConfig(): Promise<ArbitrationConfig> {
+      return { arbitrator_chain: [...globalArbitratorChain] };
+    },
+
+    async updateArbitrationConfig(input: ArbitrationConfig): Promise<ArbitrationConfig> {
+      const record = validateJsonObjectKeys(input, ARBITRATION_CONFIG_ALLOWED_KEYS);
+      globalArbitratorChain = normalizeArbitratorChain(record.arbitrator_chain);
+      return { arbitrator_chain: [...globalArbitratorChain] };
+    },
+
+    async approveArbitration(id: string, input?: ApproveArbitrationInput): Promise<BountyTask> {
+      return approveArbitrationInternal(id, null, input);
+    },
+
+    async rejectArbitration(id: string, input: RejectArbitrationInput): Promise<BountyTask> {
+      return rejectArbitrationInternal(id, null, input);
     },
 
     async simulateClaim(id: string, agentId: string): Promise<BountyTask> {
@@ -1961,6 +2497,13 @@ export function createMemoryBountyClient(seed?: {
         status: 'IN_PROGRESS',
         active_duration_ms: 0,
         active_started_at: timestamp,
+        rejection_count: 0,
+        completion_note: null,
+        completion_cost: null,
+        arbitrator_agent_id: null,
+        arbitrator_agent_name: null,
+        arbitrator_agent_tier: null,
+        arbitration_expires_at: null,
         lease_id: existing.lease_id + 1,
         lease_agent_id: agentId,
         lease_expires_at: deadlineIso(),
@@ -1969,6 +2512,7 @@ export function createMemoryBountyClient(seed?: {
       };
       bounties.set(id, updated);
       leaseWarnedIdByBounty.set(id, 0);
+      arbitrationTriedIdsByBounty.set(id, []);
       const hydrated = hydrateBounty(updated);
       recordEvent(hydrated, 'claimed', `agent:${agentId}`, 'OPEN', leaseDetail(hydrated));
       return hydrated;
@@ -2370,6 +2914,12 @@ export function createMemoryBountyClient(seed?: {
         lease_agent_name: null,
         lease_agent_tier: null,
         lease_expires_at: null,
+        arbitrator_agent_id: null,
+        arbitrator_agent_name: null,
+        arbitrator_agent_tier: null,
+        arbitration_expires_at: null,
+        quality_grade: null,
+        calibrated_difficulty: null,
         active_duration_ms: 0,
         active_started_at: null,
         comment_count: 0,
@@ -2386,6 +2936,7 @@ export function createMemoryBountyClient(seed?: {
       bounties.set(bounty.id, bounty);
       eventsByBounty.set(bounty.id, []);
       commentsByBounty.set(bounty.id, []);
+      arbitrationTriedIdsByBounty.set(bounty.id, []);
       const hydrated = hydrateBounty(bounty);
       recordEvent(hydrated, 'created', actor, null, {
         publisher_agent_id: entry.summary.id,
@@ -2470,6 +3021,16 @@ export function createMemoryBountyClient(seed?: {
       ) {
         throw new ServiceApiError('TIER_INSUFFICIENT', 403, 'Agent 段位不足');
       }
+      if (existing.require_arbitration) {
+        const active = resolveArbitrationCandidates(existing);
+        if (active.length === 1 && active[0] === entry.summary.id) {
+          throw new ServiceApiError(
+            'ARBITRATOR_CONFLICT',
+            403,
+            '唯一仲裁者不得接取开启仲裁的任务；请增配裁判或由发布者调整为人工/无仲裁',
+          );
+        }
+      }
       const timestamp = nowIso();
       const updated: BountyTask = {
         ...clone(existing),
@@ -2480,10 +3041,18 @@ export function createMemoryBountyClient(seed?: {
         lease_agent_id: entry.summary.id,
         lease_expires_at: deadlineIso(),
         assignment_expires_at: null,
+        rejection_count: 0,
+        completion_note: null,
+        completion_cost: null,
+        arbitrator_agent_id: null,
+        arbitrator_agent_name: null,
+        arbitrator_agent_tier: null,
+        arbitration_expires_at: null,
         updated_at: timestamp,
       };
       bounties.set(id, updated);
       leaseWarnedIdByBounty.set(id, 0);
+      arbitrationTriedIdsByBounty.set(id, []);
       const hydrated = hydrateBounty(updated);
       recordEvent(hydrated, 'claimed', `agent:${entry.summary.id}`, 'OPEN', leaseDetail(hydrated));
       return hydrated;
@@ -2718,6 +3287,101 @@ export function createMemoryBountyClient(seed?: {
       return hydrated;
     },
 
+    async agentSubmitArbitration(
+      apiKey: string,
+      id: string,
+      input: SubmitArbitrationInput,
+    ): Promise<BountyTask> {
+      const entry = authenticateAgent(apiKey);
+      const record = validateJsonObjectKeys(input, SUBMIT_ARBITRATION_ALLOWED_KEYS);
+      if (typeof record.lease_id !== 'number' || !Number.isSafeInteger(record.lease_id)) {
+        throw new ServiceApiError('VALIDATION_ERROR', 400, 'lease_id 必须为整数');
+      }
+      if (
+        record.completion_note !== undefined &&
+        record.completion_note !== null &&
+        typeof record.completion_note !== 'string'
+      ) {
+        throw new ServiceApiError('VALIDATION_ERROR', 400, 'completion_note 必须为字符串');
+      }
+      if (
+        record.completion_cost !== undefined &&
+        record.completion_cost !== null &&
+        typeof record.completion_cost !== 'number'
+      ) {
+        throw new ServiceApiError('VALIDATION_ERROR', 400, 'completion_cost 必须为数字');
+      }
+      const existing = requireFencedBounty(id, entry.summary.id, record.lease_id);
+      if (!existing.require_arbitration) {
+        throw new ServiceApiError('INVALID_TRANSITION', 409, '当前状态不允许此操作');
+      }
+      const rawCost = record.completion_cost ?? null;
+      if (rawCost !== null && (!Number.isFinite(rawCost) || rawCost < 0)) {
+        throw new ServiceApiError('VALIDATION_ERROR', 400, 'completion_cost 必须为有限非负数');
+      }
+      const rawNote =
+        typeof record.completion_note === 'string' ? record.completion_note.trim() : '';
+      const completionNote = rawNote.length > 0 ? rawNote : null;
+      const timestamp = nowIso();
+      const activeDurationMs = settleActive(existing, timestamp);
+      const judge =
+        resolveArbitrationCandidates(existing).find(candidateId => candidateId !== entry.summary.id) ??
+        null;
+      const expires = judge ? deadlineIso(Date.parse(timestamp)) : null;
+      const tried = judge ? [judge] : [];
+      const updated: BountyTask = {
+        ...clone(existing),
+        status: 'PENDING_ARBITRATION',
+        active_duration_ms: activeDurationMs,
+        active_started_at: null,
+        lease_expires_at: null,
+        completion_note: completionNote,
+        completion_cost: rawCost,
+        arbitrator_agent_id: judge,
+        arbitration_expires_at: expires,
+        updated_at: timestamp,
+      };
+      bounties.set(id, updated);
+      leaseWarnedIdByBounty.set(id, 0);
+      arbitrationTriedIdsByBounty.set(id, tried);
+      const hydrated = hydrateBounty(updated);
+      const detail = {
+        lease_id: hydrated.lease_id,
+        arbitrator_agent_id: judge,
+        arbitration_expires_at: expires,
+      };
+      recordEvent(
+        hydrated,
+        'arbitration_requested',
+        `agent:${entry.summary.id}`,
+        existing.status,
+        detail,
+      );
+      notifyActiveAgent(judge, hydrated, 'arbitration.requested', {
+        ...detail,
+        bounty: hydrated,
+      });
+      return hydrated;
+    },
+
+    async agentApproveArbitration(
+      apiKey: string,
+      id: string,
+      input?: ApproveArbitrationInput,
+    ): Promise<BountyTask> {
+      const entry = authenticateAgent(apiKey);
+      return approveArbitrationInternal(id, entry.summary.id, input);
+    },
+
+    async agentRejectArbitration(
+      apiKey: string,
+      id: string,
+      input: RejectArbitrationInput,
+    ): Promise<BountyTask> {
+      const entry = authenticateAgent(apiKey);
+      return rejectArbitrationInternal(id, entry.summary.id, input);
+    },
+
     async sweepLeases(nowMs = Date.now()): Promise<void> {
       const warningUntilMs = nowMs + LEASE_WARNING_WINDOW_MS;
       const candidates = Array.from(bounties.values())
@@ -2801,6 +3465,68 @@ export function createMemoryBountyClient(seed?: {
             leaseDetail(hydrated),
           );
         }
+      }
+
+      const pendingArbitrations = Array.from(bounties.values())
+        .filter(
+          bounty =>
+            bounty.status === 'PENDING_ARBITRATION' &&
+            bounty.arbitrator_agent_id !== null &&
+            bounty.arbitration_expires_at !== null &&
+            Date.parse(bounty.arbitration_expires_at) <= nowMs,
+        )
+        .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+
+      for (const bounty of pendingArbitrations) {
+        const timestamp = nowIso();
+        const previousJudgeId = bounty.arbitrator_agent_id;
+        const tried = [...(arbitrationTriedIdsByBounty.get(bounty.id) ?? [])];
+        const nextJudge =
+          resolveArbitrationCandidates(bounty).find(
+            candidateId =>
+              candidateId !== bounty.lease_agent_id &&
+              !tried.includes(candidateId) &&
+              candidateId !== previousJudgeId,
+          ) ?? null;
+        if (previousJudgeId !== null && !tried.includes(previousJudgeId)) {
+          tried.push(previousJudgeId);
+        }
+        if (nextJudge !== null && !tried.includes(nextJudge)) {
+          tried.push(nextJudge);
+        }
+        const expires = nextJudge !== null ? deadlineIso(nowMs) : null;
+        const updated: BountyTask = {
+          ...clone(bounty),
+          arbitrator_agent_id: nextJudge,
+          arbitrator_agent_name: null,
+          arbitrator_agent_tier: null,
+          arbitration_expires_at: expires,
+          updated_at: timestamp,
+        };
+        bounties.set(bounty.id, updated);
+        arbitrationTriedIdsByBounty.set(bounty.id, tried);
+        const hydrated = hydrateBounty(updated);
+        const detail = {
+          lease_id: bounty.lease_id,
+          previous_arbitrator_agent_id: previousJudgeId,
+          arbitrator_agent_id: nextJudge,
+          arbitration_expires_at: expires,
+        };
+        recordEvent(
+          hydrated,
+          nextJudge !== null ? 'arbitration_reassigned' : 'arbitration_human_fallback',
+          'system',
+          bounty.status,
+          detail,
+        );
+        notifyActiveAgent(previousJudgeId, hydrated, 'arbitration.timed_out', {
+          ...detail,
+          bounty: hydrated,
+        });
+        notifyActiveAgent(nextJudge, hydrated, 'arbitration.requested', {
+          ...detail,
+          bounty: hydrated,
+        });
       }
     },
 

@@ -34,6 +34,7 @@ impl Repository {
                     ));
                 }
             }
+            arbitration::check_claim(tx, &bounty, agent_id)?;
             claim(tx, &bounty, agent_id)
         })
     }
@@ -133,7 +134,7 @@ impl Repository {
         })
     }
 
-    /// 函数职责：人工释放执行中或持有租约的挂起任务；不记超时/弃单，定向任务重新计响应窗口。
+    /// 函数职责：人工释放执行中或持有租约的挂起任务；清除本轮交付与仲裁状态，不记超时/弃单，定向任务重新计响应窗口。
     pub fn admin_release_lease(&self, id: &str) -> Result<Bounty> {
         self.write(|tx| {
             let bounty = find_bounty(tx, id)?;
@@ -145,7 +146,7 @@ impl Repository {
             let timestamp = now();
             let active_duration_ms = settle_active(tx, &bounty, &timestamp)?;
             let assignment = (bounty.assignee_mode == AssigneeMode::Specific).then(deadline);
-            tx.execute("UPDATE bounties SET status='OPEN',active_duration_ms=0,active_started_at=NULL,lease_agent_id=NULL,lease_expires_at=NULL,lease_warned_id=0,assignment_expires_at=?2,updated_at=?3 WHERE id=?1", params![id,assignment,timestamp])?;
+            tx.execute("UPDATE bounties SET status='OPEN',active_duration_ms=0,active_started_at=NULL,lease_agent_id=NULL,lease_expires_at=NULL,lease_warned_id=0,assignment_expires_at=?2,arbitrator_agent_id=NULL,arbitration_expires_at=NULL,arbitration_tried_ids_json='[]',rejection_count=0,completion_note=NULL,completion_cost=NULL,updated_at=?3 WHERE id=?1", params![id,assignment,timestamp])?;
             let updated = find_bounty(tx, id)?;
             let detail = json!({"lease_id":bounty.lease_id,"lease_agent_id":bounty.lease_agent_id,"lease_agent_name":bounty.lease_agent_name,"active_duration_ms":active_duration_ms});
             event(tx, &updated, "lease_released", "human", Some(bounty.status), detail.clone())?;
@@ -156,7 +157,7 @@ impl Repository {
     }
 
     /// 函数职责：扫描临期、过期租约及过期指派；一次扫描共享写锁和时间快照，重复调用不重复结算。
-    /// 约束条件：仅 IN_PROGRESS 消耗租约；WAITING_INFO/PENDING_ARBITRATION 不参与到期回收。
+    /// 约束条件：执行租约仅回收 IN_PROGRESS；待仲裁仅顺延裁判，保持交付和执行者不变。
     pub fn sweep_leases(&self) -> Result<()> {
         self.write(|tx| {
             let timestamp = now();
@@ -188,6 +189,7 @@ impl Repository {
                     events::notify_active(tx, bounty.lease_agent_id.as_deref(), &bounty, "lease.expiring", lease_detail(&bounty))?;
                 }
             }
+            arbitration::sweep(tx, &timestamp)?;
             Ok(())
         })
     }
@@ -220,10 +222,11 @@ fn claimable(bounty: &Bounty) -> Result<()> {
 }
 
 /// 旧仓储入口允许未注册身份；HTTP 入口必须先在同一事务内完成 active_agent 与准入检查。
+/// 新认领独立计算打回预算，并清除旧交付与仲裁状态，兼容旧数据中尚未清理的重开任务。
 pub(super) fn claim(tx: &Transaction<'_>, bounty: &Bounty, agent_id: &str) -> Result<Bounty> {
     claimable(bounty)?;
     let timestamp = now();
-    let changed = tx.execute("UPDATE bounties SET status='IN_PROGRESS',active_duration_ms=0,active_started_at=?4,lease_id=lease_id+1,lease_agent_id=?2,lease_expires_at=?3,lease_warned_id=0,assignment_expires_at=NULL,updated_at=?4 WHERE id=?1 AND status='OPEN' AND lease_agent_id IS NULL AND lease_id=?5", params![bounty.id,agent_id,deadline(),timestamp,bounty.lease_id])?;
+    let changed = tx.execute("UPDATE bounties SET status='IN_PROGRESS',active_duration_ms=0,active_started_at=?4,lease_id=lease_id+1,lease_agent_id=?2,lease_expires_at=?3,lease_warned_id=0,assignment_expires_at=NULL,rejection_count=0,completion_note=NULL,completion_cost=NULL,arbitrator_agent_id=NULL,arbitration_expires_at=NULL,arbitration_tried_ids_json='[]',updated_at=?4 WHERE id=?1 AND status='OPEN' AND lease_agent_id IS NULL AND lease_id=?5", params![bounty.id,agent_id,deadline(),timestamp,bounty.lease_id])?;
     if changed != 1 {
         return Err(already_claimed());
     }
@@ -292,12 +295,12 @@ fn clear_assignment(tx: &Transaction<'_>, id: &str, timestamp: &str) -> Result<(
     Ok(())
 }
 
-/// 弃单和超时共用回收规则；调用方先结转耗时用于历史事件，再清零以开始新的认领周期。
+/// 弃单和超时共用回收规则；调用方先结转耗时用于历史事件，再清零耗时、打回次数并清除本轮交付与仲裁状态。
 /// 令牌留存到下次接取递增，定向给原持有者的任务回退为公开。
 fn reopen(tx: &Transaction<'_>, bounty: &Bounty, timestamp: &str) -> Result<Bounty> {
     let fallback = bounty.assignee_mode == AssigneeMode::Specific
         && bounty.assignee_agent_id == bounty.lease_agent_id;
-    tx.execute("UPDATE bounties SET status='OPEN',active_duration_ms=0,active_started_at=NULL,lease_agent_id=NULL,lease_expires_at=NULL,lease_warned_id=0,assignee_mode=CASE WHEN ?3 THEN 'any' ELSE assignee_mode END,assignee_agent_id=CASE WHEN ?3 THEN NULL ELSE assignee_agent_id END,assignee_min_tier=CASE WHEN ?3 THEN NULL ELSE assignee_min_tier END,assignment_expires_at=CASE WHEN ?3 THEN NULL ELSE assignment_expires_at END,updated_at=?2 WHERE id=?1", params![bounty.id,timestamp,fallback])?;
+    tx.execute("UPDATE bounties SET status='OPEN',active_duration_ms=0,active_started_at=NULL,lease_agent_id=NULL,lease_expires_at=NULL,lease_warned_id=0,rejection_count=0,completion_note=NULL,completion_cost=NULL,arbitrator_agent_id=NULL,arbitration_expires_at=NULL,arbitration_tried_ids_json='[]',assignee_mode=CASE WHEN ?3 THEN 'any' ELSE assignee_mode END,assignee_agent_id=CASE WHEN ?3 THEN NULL ELSE assignee_agent_id END,assignee_min_tier=CASE WHEN ?3 THEN NULL ELSE assignee_min_tier END,assignment_expires_at=CASE WHEN ?3 THEN NULL ELSE assignment_expires_at END,updated_at=?2 WHERE id=?1", params![bounty.id,timestamp,fallback])?;
     find_bounty(tx, &bounty.id)
 }
 

@@ -33,6 +33,18 @@ pub(super) fn router(state: AppState) -> Router {
         .merge(events::router())
         .route("/api/v1/health", get(health))
         .route("/api/v1/admin/status", get(admin_status))
+        .route(
+            "/api/v1/admin/arbitration",
+            get(arbitration_config).patch(update_arbitration_config),
+        )
+        .route(
+            "/api/v1/bounties/{id}/arbitration/approve",
+            post(approve_arbitration),
+        )
+        .route(
+            "/api/v1/bounties/{id}/arbitration/reject",
+            post(reject_arbitration),
+        )
         .route("/api/v1/projects", get(list_projects).post(create_project))
         .route(
             "/api/v1/projects/{id}",
@@ -268,4 +280,57 @@ async fn create_bounty_comment(
         StatusCode::CREATED,
         Json(disk(state, move |r| r.create_bounty_comment(&id, input)).await?),
     ))
+}
+
+async fn arbitration_config(State(state): State<AppState>) -> Result<Json<ArbitrationConfig>> {
+    disk(state, move |r| r.arbitration_config(None))
+        .await
+        .map(Json)
+}
+async fn update_arbitration_config(
+    State(state): State<AppState>,
+    Body(input): Body<ArbitrationConfig>,
+) -> Result<Json<ArbitrationConfig>> {
+    disk(state, move |r| r.arbitration_config(Some(input)))
+        .await
+        .map(Json)
+}
+
+/// 空正文无需 Content-Type；非空正文仍应用统一 JSON 字段校验和大小限制。
+async fn optional_body<T: DeserializeOwned + Default + Send>(
+    request: Request,
+    state: &AppState,
+) -> Result<T> {
+    let (parts, body) = request.into_parts();
+    let bytes = axum::body::to_bytes(body, 2 * 1024 * 1024)
+        .await
+        .map_err(|e| ApiError::invalid(e.to_string()))?;
+    if bytes.is_empty() {
+        return Ok(T::default());
+    }
+    Ok(Body::<T>::from_request(
+        Request::from_parts(parts, axum::body::Body::from(bytes)),
+        state,
+    )
+    .await?
+    .0)
+}
+async fn approve_arbitration(
+    State(state): State<AppState>,
+    Id(id): Id,
+    request: Request,
+) -> Result<Json<Bounty>> {
+    let input = optional_body::<ApproveArbitrationInput>(request, &state).await?;
+    disk(state, move |r| r.approve_arbitration(&id, None, input))
+        .await
+        .map(Json)
+}
+async fn reject_arbitration(
+    State(state): State<AppState>,
+    Id(id): Id,
+    Body(input): Body<RejectArbitrationInput>,
+) -> Result<Json<Bounty>> {
+    disk(state, move |r| r.reject_arbitration(&id, None, input))
+        .await
+        .map(Json)
 }

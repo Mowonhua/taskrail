@@ -75,6 +75,12 @@ export type BountyStatus =
 
 export type AssigneeMode = 'any' | 'min_tier' | 'specific';
 
+export type QualityGrade = 'perfect' | 'flawed';
+
+export interface ArbitrationConfig {
+  arbitrator_chain: string[];
+}
+
 export interface BountyTask {
   id: string;
   project_id: string;
@@ -98,9 +104,15 @@ export interface BountyTask {
   lease_agent_name: string | null;
   lease_agent_tier: AgentTier | null;
   lease_expires_at: string | null;
+  arbitrator_agent_id: string | null;
+  arbitrator_agent_name: string | null;
+  arbitrator_agent_tier: AgentTier | null;
+  arbitration_expires_at: string | null;
   rejection_count: number;
   completion_note: string | null;
   completion_cost: number | null;
+  quality_grade: QualityGrade | null;
+  calibrated_difficulty: BountyDifficulty | null;
   active_duration_ms: number;
   active_started_at: string | null;
   comment_count: number;
@@ -221,6 +233,22 @@ export interface CompleteBountyInput {
   completion_cost?: number | null;
 }
 
+export interface SubmitArbitrationInput {
+  lease_id: number;
+  completion_note?: string | null;
+  completion_cost?: number | null;
+}
+
+export interface ApproveArbitrationInput {
+  quality_grade?: QualityGrade | null;
+  calibrated_difficulty?: BountyDifficulty | null;
+  comment?: string | null;
+}
+
+export interface RejectArbitrationInput {
+  comment: string;
+}
+
 export type AgentTier = 'Unranked' | 'C' | 'B' | 'A' | 'S';
 export type AgentStatus = 'active' | 'disabled' | 'revoked';
 export type AgentActivity = 'idle' | 'busy';
@@ -334,6 +362,11 @@ export type AgentEventType =
   | 'comment.replied'
   | 'task.resumed'
   | 'task.cancelled'
+  | 'arbitration.requested'
+  | 'arbitration.rejected'
+  | 'arbitration.approved'
+  | 'arbitration.failed'
+  | 'arbitration.timed_out'
   | string;
 
 export interface AgentEvent {
@@ -381,6 +414,8 @@ export type ServiceErrorCode =
   | 'ASSIGNEE_MISMATCH'
   | 'TIER_INSUFFICIENT'
   | 'LEASE_OWNER_MISMATCH'
+  | 'ARBITRATOR_CONFLICT'
+  | 'ARBITRATOR_MISMATCH'
   | 'PROJECT_NOT_FOUND'
   | 'BOUNTY_NOT_FOUND'
   | 'AGENT_NOT_FOUND'

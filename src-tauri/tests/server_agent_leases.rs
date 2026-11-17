@@ -1366,7 +1366,7 @@ fn v4_open_specific_assignments_gain_deadlines_and_expire_after_upgrade() {
         conn.query_row("SELECT MAX(version) FROM schema_migrations", [], |r| r
             .get::<_, i64>(0))
             .unwrap(),
-        6
+        7
     );
     let id = "OPEN-specific";
     let assigned = repo.get_bounty_detail(id).unwrap().bounty;
@@ -1502,7 +1502,7 @@ fn v5_upgrade_preserves_v4_data_and_rolls_back_earlier_steps_on_failure() {
                 conn.query_row("SELECT MAX(version) FROM schema_migrations", [], |r| r
                     .get::<_, i64>(0))
                     .unwrap(),
-                6
+                7
             );
         }
         assert_eq!(

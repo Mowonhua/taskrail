@@ -255,3 +255,64 @@
 | S-03 | 并发 | 多个回复并发提交时仅一次完成状态恢复与双通知唤醒并完整保留全部评论；评论、状态、事件与通知写入任一步失败均同一事务原子回滚 | src-tauri/tests/server_agent_comments.rs::concurrent_replies_resume_once_and_preserve_all_comments, src-tauri/tests/server_agent_comments.rs::comment_history_and_notifications_fail_as_one_transaction, src/lib/api/bounty-client.test.ts::Issue 07 评论区、提问挂起与回复唤醒 > MemoryBountyClient 严格遵循 fencing、租约冻结、T_active 分段剔除等待、唤醒推送与取消/隔离规则 |
 | S-04 | 正常 | 悬赏卡片显示评论数与冻结状态（无过期告警），左侧「待我处理」自动实时聚合 `WAITING_INFO` 并同步未处理角标；详情抽屉高亮渲染 Markdown+KaTeX 待回答提问、分段 `T_active`、评论流并在后台 2 秒刷新时保留未提交草稿，支持人工回复唤醒与 `WAITING_INFO` 取消 | src/lib/session/app-integration.test.ts::悬赏板工作台外壳集成测试 > 支持任务评论区、Agent 提问挂起冻结租约与有效耗时、待我处理实时聚合、人工回复唤醒与挂起取消, src/lib/api/bounty-client.test.ts::Issue 07 评论区、提问挂起与回复唤醒 > helpers 正确计算与格式化 T_active、评论类型/角色与新流转事件（含双语且无中点） |
 | S-05 | 约束 | `request-info` 严格遵循租约防脑裂错误顺序（非持有人 `403 LEASE_OWNER_MISMATCH`、过期或旧令牌 `409 STALE_LEASE`、空白问题 `400 VALIDATION_ERROR`）；`CANCELLED` 任务拒绝评论（`409 INVALID_TRANSITION`），草稿评论严格对 Agent 隔离且已停用/吊销参与者不收通知；在 `WAITING_INFO` 取消保留 `lease_id`、`lease_agent_id` 与已累计 `active_duration_ms` 并推送 `task.cancelled` | src-tauri/tests/server_agent_comments.rs::fencing_order_and_invalid_questions_leave_all_writes_unchanged, src-tauri/tests/server_agent_comments.rs::cancellation_preserves_fencing_and_active_total_but_clears_deadline, src-tauri/tests/server_agent_comments.rs::http_contracts_auth_validation_details_and_draft_privacy, src-tauri/tests/server_agent_comments.rs::failed_second_wakeup_or_publisher_notification_rolls_back_every_write, src/lib/api/bounty-client.test.ts::Issue 07 评论区、提问挂起与回复唤醒 > HttpBountyClient 与 HttpAgentClient 透传空白正文和有限整数令牌并保持与内存客户端错误优先级一致, src/lib/api/bounty-client.test.ts::Issue 07 评论区、提问挂起与回复唤醒 > MemoryBountyClient 严格遵循 fencing、租约冻结、T_active 分段剔除等待、唤醒推送与取消/隔离规则 |
+
+## F-BNT-006 仲裁顺位配置、裁判回避与仲裁验收闭环
+
+管理员可在「设置」配置全局 `arbitrator_chain`（`GET/PATCH /api/v1/admin/arbitration`）及在「设置 → 项目管理」按项目配置覆盖链（项目非空链整体覆盖全局，空链回退全局；仅拒绝空白项，按首次出现顺序去重并保留原值，允许尚未注册的符号 ID）。开启 `require_arbitration` 的悬赏严守裁判回避原则：若认领者是有效活跃链中的唯一活跃裁判，接取返回 `403 ARBITRATOR_CONFLICT`；若链中存在备选裁判则允许认领并在执行者调用 `POST /api/v1/agent/bounties/{id}/submit-arbitration`（严格按 `heartbeat` 同序校验 `lease_id`）进入 `PENDING_ARBITRATION` 时冻结累计执行耗时 `T_active`、清空执行租约期限，自动顺延锁定首位活跃且非执行者的裁判（签发 15 分钟 `arbitration_expires_at` 并推送 `arbitration.requested`，无可用裁判时保持 `arbitrator_agent_id=null` 转人工兜底）。当前指定活跃裁判或人类管理员可通过 `arbitration/approve`（附带 `quality_grade` `perfect`/`flawed`、可选 `calibrated_difficulty` 与可选评语）验收为 `COMPLETED`，或通过 `arbitration/reject`（必填非空评语）打回：第 1 至 3 次打回返回 `IN_PROGRESS`、递增 `rejection_count`、刷新 15 分钟租约并重启 `T_active` 分段计时（推送 `arbitration.rejected`）；第 4 次打回触发熔断重开 `OPEN`、清零 `rejection_count`/`active_duration_ms`、写入 `arbitration_failed` 事故并推送 `arbitration.failed` 且重新分发。后台调度器在仲裁期限超时后自动顺延本轮未尝试且非执行者的下一位活跃裁判（向原裁判发 `arbitration.timed_out`、向新裁判发 `arbitration.requested`），候选耗尽后清空裁判锁与期限转交人工兜底且不回收执行者租约或计入超时次数。桌面端在卡片与详情抽屉实时展示 `PENDING_ARBITRATION` 仲裁倒计时/人工兜底徽章、打回轮次（3 次后展示第 4 次熔断警示）、质量与校准难度评定，以及管理员人工验收/打回控制面板（界面与事件均不泄漏凭证或 `mmr`，且禁用中点 `·`）。
+
+创建提交：-
+
+### 功能关系
+
+| 类型 | 功能编号 |
+|---|---|
+| 依赖 | F-SRV-001 |
+| 依赖 | F-BNT-001 |
+| 依赖 | F-BNT-002 |
+| 依赖 | F-BNT-004 |
+| 依赖 | F-BNT-005 |
+| 依赖 | F-AGT-002 |
+| 依赖 | F-AGT-003 |
+
+### 实现
+
+| 角色 | 代码符号 |
+|---|---|
+| 主入口 | src-tauri/src/server/routes.rs::arbitration_config |
+| 主入口 | src-tauri/src/server/routes.rs::update_arbitration_config |
+| 主入口 | src-tauri/src/server/routes.rs::approve_arbitration |
+| 主入口 | src-tauri/src/server/routes.rs::reject_arbitration |
+| 主入口 | src-tauri/src/server/routes/agents.rs::submit_arbitration |
+| 主入口 | src-tauri/src/server/routes/agents.rs::approve_arbitration |
+| 主入口 | src-tauri/src/server/routes/agents.rs::reject_arbitration |
+| 关键实现 | src-tauri/src/server/schema_v7.sql::<module> |
+| 关键实现 | src-tauri/src/server/db/arbitration.rs::Repository::arbitration_config |
+| 关键实现 | src-tauri/src/server/db/arbitration.rs::Repository::agent_submit_arbitration |
+| 关键实现 | src-tauri/src/server/db/arbitration.rs::Repository::approve_arbitration |
+| 关键实现 | src-tauri/src/server/db/arbitration.rs::Repository::reject_arbitration |
+| 关键实现 | src-tauri/src/server/db/arbitration.rs::check_claim |
+| 关键实现 | src-tauri/src/server/db/arbitration.rs::sweep |
+| 关键实现 | src/lib/api/bounty-client.ts::HttpBountyClient |
+| 关键实现 | src/lib/api/bounty-client.ts::HttpAgentClient |
+| 关键实现 | src/lib/api/bounty-client.ts::createMemoryBountyClient |
+| 关键实现 | src/lib/bounty/helpers.ts::formatBountyArbitrator |
+| 关键实现 | src/lib/bounty/helpers.ts::formatQualityGrade |
+| 关键实现 | src/lib/bounty/helpers.ts::formatEventLabel |
+| 关键实现 | src/lib/bounty/helpers.ts::formatEventActor |
+| 关键实现 | src/lib/bounty/helpers.ts::formatServiceError |
+| 关键实现 | src/lib/bounty/ArbitratorChainEditor.svelte::<module> |
+| 关键实现 | src/lib/SettingsPanel.svelte::<module> |
+| 关键实现 | src/lib/bounty/ProjectManagementPanel.svelte::<module> |
+| 关键实现 | src/lib/bounty/BountyCard.svelte::<module> |
+| 关键实现 | src/lib/bounty/BountyDetailDrawer.svelte::<module> |
+| 关键实现 | src/App.svelte::<module> |
+
+### 行为场景
+
+| 编号 | 类型 | 场景与预期 | 测试 |
+|---|---|---|---|
+| S-01 | 正常 | 全局与项目仲裁顺位链仅拒绝空白项、按首次出现去重、保留原值并允许未注册符号 ID；项目非空链整体覆盖全局链、空链回退全局；前端「设置」与「设置 → 项目管理」始终基于未筛选全量 Agent 名录支持选择/符号 ID 保留原值输入/上下移/删除，名录加载中或失败时不误标未注册符号 ID，并展示项目覆盖标签与 `?` 气泡（无 `·`） | src-tauri/tests/server_agent_arbitration.rs::chains_preserve_order_allow_symbol_ids_and_use_project_override, src/lib/api/bounty-client.test.ts::Issue 08 仲裁顺位配置、裁判回避与仲裁验收闭环 > MemoryBountyClient 与后端 1:1 对齐仲裁链覆盖、唯一裁判回避、3 次打回与第 4 次熔断重开, src/lib/session/app-integration.test.ts::悬赏板工作台外壳集成测试 > Issue 08 设置页支持配置全局仲裁顺位链（含未注册符号 ID 与排序）及项目覆盖链并渲染零中点标记, src/lib/session/app-integration.test.ts::悬赏板工作台外壳集成测试 > Issue 08 Agent 名录启用 busy 筛选后切换设置页时已注册空闲裁判仍正确识别且下拉框可用且名录未就绪或失败时不误标未注册符号 ID, src/lib/session/app-integration.test.ts::悬赏板工作台外壳集成测试 > Issue 08 仲裁链手动输入带前后空格的符号 ID 时保留原值并透传给 API |
+| S-02 | 约束 | 开启 `require_arbitration` 的任务，若认领者是有效活跃链唯一活跃成员，抢单返回 `403 ARBITRATOR_CONFLICT`；主裁判认领且另有活跃备选裁判时允许认领，交稿时自动顺延指派首位非执行者活跃裁判；非当前指定裁判裁决返回 `403 ARBITRATOR_MISMATCH` | src-tauri/tests/server_agent_arbitration.rs::sole_active_judge_cannot_claim_and_primary_worker_uses_backup, src-tauri/tests/server_agent_arbitration.rs::http_contracts_admin_config_strict_dtos_agent_permissions_and_human_fallback, src/lib/api/bounty-client.test.ts::Issue 08 仲裁顺位配置、裁判回避与仲裁验收闭环 > MemoryBountyClient 与后端 1:1 对齐仲裁链覆盖、唯一裁判回避、3 次打回与第 4 次熔断重开 |
+| S-03 | 正常 | `submit-arbitration` 冻结累计 `active_duration_ms` 并进入 `PENDING_ARBITRATION`，裁判可读取未订阅的定向任务，通过验收记录 `quality_grade`、`calibrated_difficulty` 与可选评语（无凭证或 `mmr` 泄漏）；前 3 次打回恢复 `IN_PROGRESS` 并刷新执行租约与分段计时，第 4 次打回熔断重开 `OPEN` 并重置计数与分发 | src-tauri/tests/server_agent_arbitration.rs::submission_freezes_timer_and_approval_records_quality_without_leaks, src-tauri/tests/server_agent_arbitration.rs::three_rejections_resume_then_fourth_reopens_and_redispatches, src/lib/api/bounty-client.test.ts::Issue 08 仲裁顺位配置、裁判回避与仲裁验收闭环 > MemoryBountyClient 与后端 1:1 对齐仲裁链覆盖、唯一裁判回避、3 次打回与第 4 次熔断重开, src/lib/session/app-integration.test.ts::悬赏板工作台外壳集成测试 > Issue 08 悬赏卡片与详情抽屉完整呈现 PENDING_ARBITRATION 倒计时、人工兜底、3 次打回与第 4 次熔断重开及质量校准验收 |
+| S-04 | 正常 | 仲裁 15 分钟超时后调度器自动顺延至本轮尚未尝试的非执行者活跃裁判并推送 `arbitration.timed_out` / `arbitration.requested`，候选耗尽后转交人工兜底（`arbitrator_agent_id=null`）等待管理员验收或打回；管理员强制释放待仲裁任务及执行者主动弃单或租约超时重开 `OPEN` 时均清空裁判状态并清零打回计数；前端卡片与详情抽屉实时同步倒计时、人工兜底与裁决结果 | src-tauri/tests/server_agent_arbitration.rs::timeout_skips_inactive_worker_and_tried_then_human_can_approve_or_reject, src-tauri/tests/server_agent_arbitration.rs::submit_fencing_validation_and_release_clear_arbitration_state, src-tauri/tests/server_agent_arbitration.rs::abandon_resets_rejection_count_for_next_worker, src-tauri/tests/server_agent_arbitration.rs::lease_expiry_resets_rejection_count_for_next_worker, src/lib/api/bounty-client.test.ts::Issue 08 仲裁顺位配置、裁判回避与仲裁验收闭环 > MemoryBountyClient 仲裁 15 分钟超时顺延改派、人工兜底与 releaseLease 重置, src/lib/api/bounty-client.test.ts::Issue 08 仲裁顺位配置、裁判回避与仲裁验收闭环 > MemoryBountyClient 在 A 被打回 3 次后弃单或租约超时重开时清零 rejection_count 且 B 接单首次打回返回 IN_PROGRESS, src/lib/session/app-integration.test.ts::悬赏板工作台外壳集成测试 > Issue 08 悬赏卡片与详情抽屉完整呈现 PENDING_ARBITRATION 倒计时、人工兜底、3 次打回与第 4 次熔断重开及质量校准验收 |
+| S-05 | 约束 | 仲裁提交严格保持 `heartbeat` 同序 fencing 错误优先级（前端 HTTP 客户端不抢先校验空白文本，仅拦截非有限/负数 `completion_cost`）；历史、评论、通知与重新分发共用同一写事务失败整体回滚；停用/吊销接收者不获通知且 `SKILL.md` 与后端逐字 1:1 对齐、双语辅助函数无中点 | src-tauri/tests/server_agent_arbitration.rs::submit_fencing_validation_and_release_clear_arbitration_state, src-tauri/tests/server_agent_arbitration.rs::arbitration_writes_roll_back_when_history_comments_or_notifications_fail, src-tauri/tests/server_agent_arbitration.rs::failed_delivery_preserves_other_assignment_window_and_inactive_agents_get_no_notification, src-tauri/tests/server_agent_arbitration.rs::timeout_notification_failure_rolls_back_reassignment_and_all_inboxes, src/lib/api/bounty-client.test.ts::Issue 08 仲裁顺位配置、裁判回避与仲裁验收闭环 > HttpBountyClient / HttpAgentClient 正确对接仲裁配置与裁决接口并保持服务端错误优先级, src/lib/api/bounty-client.test.ts::Issue 08 仲裁顺位配置、裁判回避与仲裁验收闭环 > SKILL.md 与 helpers.ts 完整包含仲裁协议说明与双语格式化（零中点）, src/lib/api/bounty-client.test.ts::Issue 08 仲裁顺位配置、裁判回避与仲裁验收闭环 > SKILL.md 与后端 src-tauri/src/server/routes/agents.rs 模板逐字 1:1 对齐（开放/邀请策略、令牌与自定义 baseUrl） |
