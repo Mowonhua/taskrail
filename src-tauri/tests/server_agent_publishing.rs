@@ -497,6 +497,18 @@ async fn draft_policy_isolates_all_agents_until_admin_publish_or_cancel() {
                 .await;
             assert_eq!(status, StatusCode::NOT_FOUND);
             assert_eq!(error["error"]["code"], "BOUNTY_NOT_FOUND");
+            for method in [Method::GET, Method::POST] {
+                let (status, error) = f
+                    .request(
+                        method,
+                        &format!("/agent/bounties/{id}/comments"),
+                        Some(&agent.api_key),
+                        Some(json!({"body":"private draft"})),
+                    )
+                    .await;
+                assert_eq!(status, StatusCode::NOT_FOUND);
+                assert_eq!(error["error"]["code"], "BOUNTY_NOT_FOUND");
+            }
         }
         assert!(f
             .repo
@@ -650,6 +662,18 @@ async fn draft_policy_isolates_all_agents_until_admin_publish_or_cancel() {
                 .await;
             assert_eq!(status, StatusCode::NOT_FOUND);
             assert_eq!(error["error"]["code"], "BOUNTY_NOT_FOUND");
+            for method in [Method::GET, Method::POST] {
+                let (status, error) = f
+                    .request(
+                        method,
+                        &format!("/agent/bounties/{id}/comments"),
+                        Some(&agent.api_key),
+                        Some(json!({"body":"discarded draft"})),
+                    )
+                    .await;
+                assert_eq!(status, StatusCode::NOT_FOUND);
+                assert_eq!(error["error"]["code"], "BOUNTY_NOT_FOUND");
+            }
         }
     }
     f.server.shutdown().await.unwrap();
@@ -725,7 +749,7 @@ fn v3_upgrade_preserves_data_identity_defaults_foreign_key_and_index() {
             |r| r.get::<_, String>(0)
         )
         .unwrap(),
-        "1,2,3,4,5"
+        "1,2,3,4,5,6"
     );
     assert_eq!(
         conn.query_row(
@@ -798,14 +822,14 @@ fn v4_failure_rolls_back_all_prior_migrations_and_future_schema_is_untouched() {
     let path = dir.path().join("future.db");
     Repository::open(&path).unwrap();
     let conn = Connection::open(&path).unwrap();
-    conn.execute("INSERT INTO schema_migrations VALUES(6,'future')", [])
+    conn.execute("INSERT INTO schema_migrations VALUES(7,'future')", [])
         .unwrap();
     assert_eq!(Repository::open(&path).unwrap_err().code, "INTERNAL_ERROR");
     assert_eq!(
         conn.query_row("SELECT MAX(version) FROM schema_migrations", [], |r| r
             .get::<_, i64>(0))
             .unwrap(),
-        6
+        7
     );
     assert_eq!(count(&conn, "schema_migrations"), 2);
 }

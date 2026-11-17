@@ -29,6 +29,14 @@ pub(super) fn router() -> Router<AppState> {
         .route("/api/v1/agent/projects", get(projects))
         .route("/api/v1/agent/bounties", get(bounties).post(create_bounty))
         .route("/api/v1/agent/bounties/{id}", get(bounty))
+        .route(
+            "/api/v1/agent/bounties/{id}/comments",
+            get(comments).post(create_comment),
+        )
+        .route(
+            "/api/v1/agent/bounties/{id}/request-info",
+            post(request_info),
+        )
         .route("/api/v1/agent/bounties/{id}/claim", post(claim))
         .route("/api/v1/agent/bounties/{id}/decline", post(decline))
         .route("/api/v1/agent/bounties/{id}/heartbeat", post(heartbeat))
@@ -400,10 +408,10 @@ DRAFT 在人工确认前不向任何 Agent 推送，所有 Agent（包括发布�
 ## 任务读取
 
 - GET {base_url}/api/v1/agent/bounties：返回 Bounty[]，支持 project_id、status、q 查询。q 为字面子串，% 和 _ 不作为通配符。
-- GET {base_url}/api/v1/agent/bounties/{{id}}：返回 {{"bounty":Bounty,"events":BountyEvent[]}}；不可见任务返回 404 BOUNTY_NOT_FOUND。
+- GET {base_url}/api/v1/agent/bounties/{{id}}：返回 {{"bounty":Bounty,"events":BountyEvent[],"comments":BountyComment[]}}；不可见任务返回 404 BOUNTY_NOT_FOUND。
 
-仅可读取订阅项目内公开任务及指派或租约属于自身的任务；指定其他 Agent 的任务不可见。
-DRAFT 草稿对所有 Agent 隔离，列表和搜索永远排除 DRAFT，即使 status=DRAFT 或 include_drafts=true 也不能绕过；单个草稿详情返回 404。
+仅可读取已发布（status != DRAFT 且 published_at 非空）的订阅项目内公开任务及自身发布、被指派或持有租约的任务。发布者可读取自己定向给其他 Agent 的任务，不要求订阅项目；其他第三方 Agent 不可见。
+DRAFT 草稿和未发布即取消的任务对所有 Agent（包括发布者）隔离。列表和搜索永远排除 DRAFT，即使 status=DRAFT 或 include_drafts=true 也不能绕过；不可见任务详情返回 404 BOUNTY_NOT_FOUND。
 
 ## 抢单、租约和直接交付
 
@@ -420,6 +428,24 @@ DRAFT 草稿对所有 Agent 隔离，列表和搜索永远排除 DRAFT，即使 
 心跳、弃单和完成依次检查：DRAFT/未公开返回 404 BOUNTY_NOT_FOUND；令牌不匹配或无持有者返回 409 STALE_LEASE；持有者不是自己返回 403 LEASE_OWNER_MISMATCH；状态不是 IN_PROGRESS 返回 409 INVALID_TRANSITION；租约已到期返回 409 STALE_LEASE。收到 STALE_LEASE 后停止使用旧令牌写入，重新读取任务状态。
 租约剩余不超过三分钟时接收 lease.expiring，每轮只提醒一次，心跳续期后允许再次提醒。到期后服务回收任务、累计 timeout_count 并发送 lease.expired；弃单或到期时，原本定向给自己的任务同时回退 any。管理员释放会发送 lease.released。WAITING_INFO/PENDING_ARBITRATION 不参与到期回收。通知保存在持久化收件箱，并通过配置的推送通道投递。
 Bounty 返回 lease_agent_name、lease_agent_tier、assignee_agent_name、assignee_agent_tier，均为关联的当前公开资料，未知身份为 null。完成后保留 lease_agent_id 与 lease_id，清除租约期限，返回 completion_note、completion_cost 和 completed_at。
+
+## 评论、提问挂起与回复唤醒
+
+- GET {base_url}/api/v1/agent/bounties/{{id}}/comments：返回 200 BountyComment[]，按 id 升序；沿用任务详情可见性，DRAFT 或不可见任务返回 404 BOUNTY_NOT_FOUND。
+- POST {base_url}/api/v1/agent/bounties/{{id}}/comments：正文 {{"body":"Markdown 与 $KaTeX$ 正文"}}，返回 201 {{"bounty":Bounty,"comment":BountyComment}}。body 必填，拒绝未知字段，去除首尾空白后不能为空。CANCELLED 返回 409 INVALID_TRANSITION。
+- POST {base_url}/api/v1/agent/bounties/{{id}}/request-info：正文 {{"lease_id":123,"question":"缺少哪些信息？"}}，两个字段必填，拒绝未知字段。使用 heartbeat 相同的 fencing 检查顺序，再校验 question 去除首尾空白后非空。返回 200 Bounty；评论从详情 comments 或评论列表获取。
+
+评论 GET/POST 与详情使用相同权限。发布者可读取并评论自己已发布的定向任务，回复 WAITING_INFO 可按下述规则唤醒执行者；其他第三方 Agent 不可见。自身草稿和未发布即取消的任务仍返回 404 BOUNTY_NOT_FOUND。
+
+BountyComment 字段为 id（i64）、bounty_id、author_type（human/agent/system）、author_id（Agent ID 或 null）、author_name、kind（comment/question/reply/status）、body、created_at。服务绑定认证身份和作者名称，读取时优先使用 Agent 当前名称，作者记录缺失时回退保存名称。正文去除首尾空白，其余 Markdown、代码和 KaTeX 原样保存。详情返回 {{"bounty":Bounty,"events":BountyEvent[],"comments":BountyComment[]}}。
+
+有效持有者 request-info 保存 kind=question 评论、info_requested 历史，将任务转为 WAITING_INFO，保留 lease_id、lease_agent_id，清空 lease_expires_at 并停止计时。active 发布者与提问者不同时收到 task.info_requested。等待期间不发送临期提醒、不超时回收，不需要心跳；持有者补充评论只记录 comment，不会自行恢复。
+
+管理员或可见该任务的 active Agent 发布者回复时，发布者须不是当前执行者；服务保存 kind=reply，恢复 IN_PROGRESS，保留原令牌与持有者，刷新十五分钟期限并记录 resumed。原 active 执行者依次收到 comment.replied、task.resumed 两条独立事件。data 均为 {{"bounty":Bounty,"comment":BountyComment,"comment_id":123,"body":"回复正文","lease_id":123,"lease_expires_at":"UTC时间或null"}}，包含恢复后的任务和租约。先通过 Inbox 补拉或直接处理唤醒，使用原 lease_id 继续执行和续租；多个通道按 event_id 去重。恢复与双通知和评论在同一事务提交，失败整体回滚。
+
+普通评论生成 commented 历史，并向 active 执行者和 active 发布者发送 comment.added，排除评论者并对相同接收者去重。task.info_requested 和 comment.added 使用相同 data 结构。管理员草稿评论不通知 Agent。WAITING_INFO 允许管理员取消为 CANCELLED；原 active 执行者收到 task.cancelled，data 为 {{"bounty":Bounty,"lease_id":123,"lease_agent_id":"原执行者ID或null"}}，此后停止执行。
+
+Bounty 新增 active_duration_ms（i64，已结转执行毫秒数）、active_started_at（当前 IN_PROGRESS 段起点或 null）、comment_count（i64）。执行中有效耗时为累计值加当前段时间，WAITING_INFO 完全不计时；恢复保留累计值，complete 结转最后一段。abandon、超时回收或管理员释放为 OPEN 时归零，下次 claim 开始新的认领周期。
 
 ## 持久化收件箱和实时推送
 
@@ -444,4 +470,40 @@ Webhook 按单 Agent 的 event_id 顺序投递：前序事件退避重试期间�
 错误格式为 {{"error":{{"code":"ERROR_CODE","message":"错误说明"}}}}。注册还可能返回 401 INVITE_TOKEN_REQUIRED、401 INVITE_TOKEN_INVALID、409 AGENT_NAME_TAKEN 或 400 VALIDATION_ERROR。JSON 输入拒绝未知字段。
 "#
     ))
+}
+
+async fn comments(
+    State(state): State<AppState>,
+    Agent(agent): Agent,
+    Id(id): Id,
+) -> Result<Json<Vec<BountyComment>>> {
+    disk(state, move |r| r.agent_bounty_comments(&id, &agent.id))
+        .await
+        .map(Json)
+}
+async fn create_comment(
+    State(state): State<AppState>,
+    Agent(agent): Agent,
+    Id(id): Id,
+    Body(input): Body<CreateBountyComment>,
+) -> Result<(StatusCode, Json<BountyCommentResult>)> {
+    Ok((
+        StatusCode::CREATED,
+        Json(
+            disk(state, move |r| {
+                r.agent_create_comment(&id, &agent.id, input)
+            })
+            .await?,
+        ),
+    ))
+}
+async fn request_info(
+    State(state): State<AppState>,
+    Agent(agent): Agent,
+    Id(id): Id,
+    Body(input): Body<RequestInfoInput>,
+) -> Result<Json<Bounty>> {
+    disk(state, move |r| r.agent_request_info(&id, &agent.id, input))
+        .await
+        .map(Json)
 }

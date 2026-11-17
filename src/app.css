@@ -407,6 +407,22 @@ button.danger-text {
   white-space: nowrap;
 }
 
+.workspace-nav-badge {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
 /* 右侧主工作区 */
 .workspace {
   display: flex;
@@ -1426,7 +1442,9 @@ button.danger-text {
 .detail-meta-pill,
 .bounty-publisher-pill,
 .bounty-executor-pill,
-.bounty-lease-pill {
+.bounty-lease-pill,
+.bounty-frozen-pill,
+.bounty-comment-pill {
   display: inline-flex;
   align-items: center;
   padding: 2px 8px;
@@ -1438,7 +1456,8 @@ button.danger-text {
   font-weight: 500;
 }
 
-.bounty-lease-pill {
+.bounty-lease-pill,
+.detail-active-timer {
   font-variant-numeric: tabular-nums;
 }
 
@@ -1449,10 +1468,22 @@ button.danger-text {
 }
 
 .bounty-lease-pill[data-lease-state="expiring"],
-.bounty-lease-pill[data-lease-state="expired"] {
+.bounty-lease-pill[data-lease-state="expired"],
+.bounty-frozen-pill {
   border-color: var(--danger);
   color: var(--danger);
   font-weight: 600;
+}
+
+.detail-active-timer[data-timer-state="running"] {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.detail-active-timer[data-timer-state="frozen"] {
+  border-color: var(--danger);
+  color: var(--danger);
 }
 
 .bounty-publisher-pill[data-publisher-kind="agent"],
@@ -2002,6 +2033,152 @@ button.danger-text {
 .detail-empty-hint {
   margin: 0;
   font-size: 12.5px;
+  color: var(--muted);
+}
+
+.detail-pending-question {
+  padding: 12px 14px;
+  border: 1px solid var(--danger);
+  border-radius: var(--field-radius, 8px);
+  background: var(--field-background, var(--canvas));
+}
+
+.detail-pending-question-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.detail-pending-question .detail-section-title {
+  color: var(--danger);
+}
+
+.detail-comments-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 360px;
+  overflow-y: auto;
+}
+
+.detail-comment-item {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--field-border, var(--line));
+  border-radius: var(--field-radius, 8px);
+  background: var(--field-background, var(--canvas));
+}
+
+.detail-comment-item.is-question {
+  border-color: var(--danger);
+}
+
+.detail-comment-item.is-reply {
+  border-color: var(--accent);
+}
+
+.detail-comment-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 12px;
+}
+
+.detail-comment-author {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.detail-comment-author-name {
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.detail-comment-role,
+.detail-comment-kind {
+  padding: 1px 6px;
+  border-radius: var(--control-radius, 4px);
+  border: 1px solid var(--field-border, var(--line));
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.detail-comment-kind[data-kind="question"] {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.detail-comment-kind[data-kind="reply"] {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.detail-comment-body {
+  min-height: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+}
+
+.detail-comment-composer {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 4px;
+}
+
+.detail-comment-input {
+  width: 100%;
+  min-height: 76px;
+  padding: 8px 10px;
+  border: 1px solid var(--field-border, var(--line));
+  border-radius: var(--field-radius, 8px);
+  background: var(--field-background, var(--canvas));
+  box-shadow: var(--field-shadow, none);
+  color: var(--ink);
+  font-family: var(--font-body);
+  font-size: 13px;
+  line-height: 1.55;
+  resize: vertical;
+}
+
+.detail-comment-input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.detail-comment-error {
+  margin: 0;
+  font-size: 12px;
+  color: var(--danger);
+}
+
+.detail-comment-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.detail-comment-disabled {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px dashed var(--field-border, var(--line));
+  border-radius: var(--field-radius, 8px);
+  font-size: 12px;
   color: var(--muted);
 }
 

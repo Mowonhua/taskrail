@@ -244,7 +244,7 @@ impl Repository {
         self.list_projects(false)
     }
 
-    /// 函数职责：返回订阅范围内公开任务及自身指派/持有任务；任何参数都不能显示 DRAFT。
+    /// 函数职责：返回已发布的订阅范围内公开任务及自身发布/指派/持有任务；任何参数都不能显示 DRAFT。
     pub fn agent_bounties(&self, id: &str, mut filter: BountyFilter) -> Result<Vec<Bounty>> {
         let agent = active_agent(&self.connect()?, id)?;
         filter.include_drafts = false;
@@ -397,7 +397,8 @@ fn find_agent(conn: &Connection, id: &str) -> Result<AgentSummary> {
     agent.project_ids = stmt
         .query_map([id], |r| r.get(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    agent.active_lease_count = conn.query_row("SELECT COUNT(*) FROM bounties WHERE lease_agent_id=?1 AND status IN ('IN_PROGRESS','WAITING_INFO','PENDING_ARBITRATION') AND lease_expires_at>?2", params![id,now()], |r| r.get(0))?;
+    // 冻结状态保留租约持有者，期限可为空；只有执行中的租约需要校验期限。
+    agent.active_lease_count = conn.query_row("SELECT COUNT(*) FROM bounties WHERE lease_agent_id=?1 AND ((status='IN_PROGRESS' AND lease_expires_at>?2) OR status IN ('WAITING_INFO','PENDING_ARBITRATION'))", params![id,now()], |r| r.get(0))?;
     Ok(agent)
 }
 pub(super) fn active_agent(conn: &Connection, id: &str) -> Result<AgentSummary> {
@@ -416,10 +417,12 @@ pub(super) fn active_agent(conn: &Connection, id: &str) -> Result<AgentSummary> 
         )),
     }
 }
-fn visible(agent: &AgentSummary, bounty: &Bounty) -> bool {
+pub(super) fn visible(agent: &AgentSummary, bounty: &Bounty) -> bool {
+    // 发布者权限同样受发布门槛约束，不能读取草稿或未发布即取消的任务。
     bounty.status != BountyStatus::Draft
         && bounty.published_at.is_some()
-        && (bounty.assignee_agent_id.as_deref() == Some(&agent.id)
+        && (bounty.created_by_agent_id.as_deref() == Some(&agent.id)
+            || bounty.assignee_agent_id.as_deref() == Some(&agent.id)
             || bounty.lease_agent_id.as_deref() == Some(&agent.id)
             || (bounty.assignee_mode != AssigneeMode::Specific
                 && (agent.subscribe_all_projects

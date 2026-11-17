@@ -7,10 +7,14 @@
   import { locale, t } from '../i18n';
   import ProjectIcon from '../ProjectIcon.svelte';
   import {
+    computeActiveDurationMs,
+    formatActiveDuration,
     formatAssigneeConstraint,
     formatBountyExecutor,
     formatBountyPublisher,
     formatBountyStatus,
+    formatCommentAuthorRole,
+    formatCommentKind,
     formatCompletionCost,
     formatEventActor,
     formatEventLabel,
@@ -29,6 +33,7 @@
     onWithdraw: (bountyId: string) => Promise<void>;
     onCancel: (bountyId: string) => Promise<void>;
     onReleaseLease: (bountyId: string) => Promise<void>;
+    onCreateComment?: (bountyId: string, body: string) => Promise<void>;
   }
 
   let {
@@ -40,24 +45,37 @@
     onWithdraw,
     onCancel,
     onReleaseLease,
+    onCreateComment,
   }: Props = $props();
 
   let busy = $state(false);
   let actionError = $state('');
   let nowMs = $state(Date.now());
+  let commentDraft = $state('');
+  let commentSubmitting = $state(false);
+  let commentError = $state('');
+  let lastBountyId = '';
 
   const bounty = $derived(detail.bounty);
   const events = $derived(detail.events);
+  const comments = $derived(detail.comments ?? []);
 
   $effect(() => {
-    const activeCountdownTarget =
-      bounty.status === 'IN_PROGRESS'
-        ? bounty.lease_expires_at
-        : bounty.status === 'OPEN' && bounty.assignee_mode === 'specific'
-          ? bounty.assignment_expires_at
-          : null;
+    if (bounty.id !== lastBountyId) {
+      lastBountyId = bounty.id;
+      commentDraft = '';
+      commentError = '';
+    }
+  });
+
+  $effect(() => {
+    const needsLiveTimer =
+      bounty.status === 'IN_PROGRESS' ||
+      (bounty.status === 'OPEN' &&
+        bounty.assignee_mode === 'specific' &&
+        Boolean(bounty.assignment_expires_at));
     nowMs = Date.now();
-    if (!activeCountdownTarget) return;
+    if (!needsLiveTimer) return;
     const timer = setInterval(() => {
       nowMs = Date.now();
     }, 1000);
@@ -96,6 +114,22 @@
     return formatLeaseCountdown(bounty.assignment_expires_at, nowMs);
   });
 
+  const activeDurationMs = $derived(computeActiveDurationMs(bounty, nowMs));
+
+  const showActiveDuration = $derived(
+    bounty.status === 'IN_PROGRESS' ||
+      bounty.status === 'WAITING_INFO' ||
+      activeDurationMs > 0,
+  );
+
+  const activeDurationLabel = $derived(formatActiveDuration(activeDurationMs));
+
+  const pendingQuestion = $derived(
+    bounty.status === 'WAITING_INFO'
+      ? ([...comments].reverse().find(item => item.kind === 'question') ?? null)
+      : null,
+  );
+
   const completionCostLabel = $derived.by(() => {
     const _lang = $locale;
     return formatCompletionCost(bounty.completion_cost);
@@ -123,6 +157,25 @@
       actionError = formatServiceError(error);
     } finally {
       busy = false;
+    }
+  }
+
+  async function submitComment(): Promise<void> {
+    if (!onCreateComment || commentSubmitting) return;
+    const trimmed = commentDraft.trim();
+    if (!trimmed) {
+      commentError = $t('请输入评论内容。');
+      return;
+    }
+    commentError = '';
+    commentSubmitting = true;
+    try {
+      await onCreateComment(bounty.id, trimmed);
+      commentDraft = '';
+    } catch (error) {
+      commentError = formatServiceError(error);
+    } finally {
+      commentSubmitting = false;
     }
   }
 
@@ -199,7 +252,15 @@
             {$t('执行者: {agent}', { agent: executor.label })}
           </span>
         {/if}
-        {#if leaseCountdown}
+        {#if bounty.status === 'WAITING_INFO'}
+          <span
+            class="detail-meta-pill bounty-frozen-pill"
+            data-slot="detail-lease-frozen"
+            data-lease-state="frozen"
+          >
+            {$t('租约已冻结（等待回复）')}
+          </span>
+        {:else if leaseCountdown}
           <span
             class="detail-meta-pill bounty-lease-pill"
             data-slot="detail-lease-countdown"
@@ -226,6 +287,21 @@
             {assignmentCountdown.expired
               ? $t('指派窗口已超时待回退')
               : $t('指派响应剩余 {countdown}', { countdown: assignmentCountdown.label })}
+          </span>
+        {/if}
+        {#if showActiveDuration}
+          <span
+            class="detail-meta-pill detail-active-timer"
+            data-slot="detail-active-duration"
+            data-timer-state={bounty.status === 'WAITING_INFO'
+              ? 'frozen'
+              : bounty.status === 'IN_PROGRESS'
+                ? 'running'
+                : 'settled'}
+          >
+            {bounty.status === 'WAITING_INFO'
+              ? $t('有效耗时已冻结 {duration}', { duration: activeDurationLabel })
+              : $t('有效耗时 {duration}', { duration: activeDurationLabel })}
           </span>
         {/if}
         <span class="detail-meta-time">
@@ -315,6 +391,30 @@
     </header>
 
     <div class="detail-drawer-body">
+      {#if bounty.status === 'WAITING_INFO'}
+        <section class="detail-section detail-pending-question" data-slot="detail-pending-question">
+          <div class="detail-pending-question-header">
+            <h3 class="detail-section-title">
+              {pendingQuestion
+                ? $t('待回答提问（{author}）', { author: pendingQuestion.author_name })
+                : $t('待回答问题')}
+            </h3>
+            {#if pendingQuestion}
+              <time class="detail-timeline-time" datetime={pendingQuestion.created_at}>
+                {formatTimestamp(pendingQuestion.created_at)}
+              </time>
+            {/if}
+          </div>
+          {#if pendingQuestion}
+            <div
+              class="bounty-detail-markdown"
+              data-slot="detail-pending-question-body"
+              use:renderMarkdownAction={pendingQuestion.body}
+            ></div>
+          {/if}
+        </section>
+      {/if}
+
       {#if hasCompletionSection}
         <section class="detail-section detail-completion-card" data-slot="detail-completion">
           <div class="detail-completion-header">
@@ -353,6 +453,109 @@
           data-slot="detail-criteria"
           use:renderMarkdownAction={bounty.acceptance_criteria || $t('暂无验收条件')}
         ></div>
+      </section>
+
+      <section class="detail-section detail-comments-section" data-slot="detail-comments">
+        <h3 class="detail-section-title">
+          {$t('评论与讨论 ({count})', { count: comments.length })}
+        </h3>
+        {#if comments.length === 0}
+          <p class="detail-empty-hint">{$t('暂无评论或澄清记录')}</p>
+        {:else}
+          <ol class="detail-comments-list" data-slot="detail-comments-list">
+            {#each comments as comment (comment.id)}
+              {@const kindLabel = (() => {
+                const _lang = $locale;
+                return formatCommentKind(comment.kind);
+              })()}
+              {@const roleLabel = (() => {
+                const _lang = $locale;
+                return formatCommentAuthorRole(comment.author_type);
+              })()}
+              <li
+                class="detail-comment-item"
+                class:is-question={comment.kind === 'question'}
+                class:is-reply={comment.kind === 'reply'}
+                data-comment-id={comment.id}
+                data-comment-kind={comment.kind}
+                data-author-type={comment.author_type}
+              >
+                <div class="detail-comment-header">
+                  <div class="detail-comment-author">
+                    <span class="detail-comment-author-name">{comment.author_name}</span>
+                    <span class="detail-comment-role">{roleLabel}</span>
+                    <span class="detail-comment-kind" data-kind={comment.kind}>{kindLabel}</span>
+                  </div>
+                  <time class="detail-timeline-time" datetime={comment.created_at}>
+                    {formatTimestamp(comment.created_at)}
+                  </time>
+                </div>
+                <div
+                  class="bounty-detail-markdown detail-comment-body"
+                  data-slot="comment-body"
+                  use:renderMarkdownAction={comment.body}
+                ></div>
+              </li>
+            {/each}
+          </ol>
+        {/if}
+
+        {#if onCreateComment}
+          {#if bounty.status === 'CANCELLED'}
+            <p class="detail-comment-disabled" data-slot="comment-disabled-notice">
+              {$t('任务已取消，无法继续发表评论')}
+            </p>
+          {:else}
+            <form
+              class="detail-comment-composer"
+              data-slot="comment-composer"
+              onsubmit={event => {
+                event.preventDefault();
+                void submitComment();
+              }}
+            >
+              <textarea
+                class="detail-comment-input"
+                data-slot="comment-input"
+                rows="3"
+                aria-label={$t('评论内容')}
+                placeholder={bounty.status === 'WAITING_INFO'
+                  ? $t('补充回复以恢复任务执行…')
+                  : $t('发表评论（支持 Markdown 与 KaTeX 公式）…')}
+                bind:value={commentDraft}
+                disabled={commentSubmitting}
+                onkeydown={event => {
+                  if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
+                    event.preventDefault();
+                    void submitComment();
+                  }
+                }}
+              ></textarea>
+              {#if commentError}
+                <p class="detail-comment-error" role="alert" data-status="comment-error">
+                  {commentError}
+                </p>
+              {/if}
+              <div class="detail-comment-actions">
+                <button
+                  type="submit"
+                  class="primary"
+                  data-action="submit-comment"
+                  title={bounty.status === 'WAITING_INFO'
+                    ? $t('回复后任务将自动恢复为执行中，并刷新 15 分钟租约。')
+                    : undefined}
+                  disabled={commentSubmitting || !commentDraft.trim()}
+                >
+                  {commentSubmitting
+                    ? $t('正在发送…')
+                    : bounty.status === 'WAITING_INFO'
+                      ? $t('回复并恢复执行')
+                      : $t('发送评论')}
+                </button>
+              </div>
+            </form>
+          {/if}
+        {/if}
       </section>
 
       <section class="detail-section" data-slot="detail-events">

@@ -101,6 +101,9 @@ export interface BountyTask {
   rejection_count: number;
   completion_note: string | null;
   completion_cost: number | null;
+  active_duration_ms: number;
+  active_started_at: string | null;
+  comment_count: number;
   published_at: string | null;
   withdrawn_at: string | null;
   cancelled_at: string | null;
@@ -120,9 +123,38 @@ export interface BountyEvent {
   created_at: string;
 }
 
+export type BountyCommentAuthorType = 'human' | 'agent' | 'system';
+export type BountyCommentKind = 'comment' | 'question' | 'reply' | 'status';
+
+export interface BountyComment {
+  id: number;
+  bounty_id: string;
+  author_type: BountyCommentAuthorType;
+  author_id: string | null;
+  author_name: string;
+  kind: BountyCommentKind;
+  body: string;
+  created_at: string;
+}
+
+export interface CreateBountyCommentInput {
+  body: string;
+}
+
+export interface RequestInfoInput {
+  lease_id: number;
+  question: string;
+}
+
+export interface BountyCommentMutationResult {
+  bounty: BountyTask;
+  comment: BountyComment;
+}
+
 export interface BountyDetail {
   bounty: BountyTask;
   events: BountyEvent[];
+  comments: BountyComment[];
 }
 
 export interface CreateBountyInput {
@@ -297,6 +329,11 @@ export type AgentEventType =
   | 'lease.expiring'
   | 'lease.expired'
   | 'lease.released'
+  | 'task.info_requested'
+  | 'comment.added'
+  | 'comment.replied'
+  | 'task.resumed'
+  | 'task.cancelled'
   | string;
 
 export interface AgentEvent {

@@ -154,7 +154,15 @@
             {$t('执行者: {agent}', { agent: executor.label })}
           </span>
         {/if}
-        {#if leaseCountdown}
+        {#if bounty.status === 'WAITING_INFO'}
+          <span
+            class="bounty-frozen-pill"
+            data-slot="card-lease-frozen"
+            data-lease-state="frozen"
+          >
+            {$t('租约已冻结（等待回复）')}
+          </span>
+        {:else if leaseCountdown}
           <span
             class="bounty-lease-pill"
             data-slot="card-lease-countdown"
@@ -167,6 +175,11 @@
             {leaseCountdown.expired
               ? leaseCountdown.label
               : $t('租约剩余 {countdown}', { countdown: leaseCountdown.label })}
+          </span>
+        {/if}
+        {#if (bounty.comment_count ?? 0) > 0}
+          <span class="bounty-comment-pill" data-slot="card-comment-count">
+            {$t('评论 {count}', { count: bounty.comment_count })}
           </span>
         {/if}
         <span class="bounty-card-constraint">{assigneeLabel}</span>

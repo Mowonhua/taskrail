@@ -45,6 +45,10 @@ pub(super) fn router(state: AppState) -> Router {
             "/api/v1/bounties/{id}",
             get(bounty_detail).patch(update_bounty),
         )
+        .route(
+            "/api/v1/bounties/{id}/comments",
+            get(bounty_comments).post(create_bounty_comment),
+        )
         .route("/api/v1/bounties/{id}/publish", post(publish_bounty))
         .route("/api/v1/bounties/{id}/withdraw", post(withdraw_bounty))
         .route("/api/v1/bounties/{id}/cancel", post(cancel_bounty))
@@ -247,4 +251,21 @@ async fn cancel_bounty(State(state): State<AppState>, Id(id): Id) -> Result<Json
     disk(state, move |r| r.cancel_bounty(&id, "human"))
         .await
         .map(Json)
+}
+
+async fn bounty_comments(
+    State(state): State<AppState>,
+    Id(id): Id,
+) -> Result<Json<Vec<BountyComment>>> {
+    disk(state, move |r| r.bounty_comments(&id)).await.map(Json)
+}
+async fn create_bounty_comment(
+    State(state): State<AppState>,
+    Id(id): Id,
+    Body(input): Body<CreateBountyComment>,
+) -> Result<(StatusCode, Json<BountyCommentResult>)> {
+    Ok((
+        StatusCode::CREATED,
+        Json(disk(state, move |r| r.create_bounty_comment(&id, input)).await?),
+    ))
 }

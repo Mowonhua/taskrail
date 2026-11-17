@@ -1251,6 +1251,37 @@
     }
   }
 
+  async function handleCreateCommentFromDrawer(bountyId: string, body: string): Promise<void> {
+    const detailSeq = ++detailRequestSeq;
+    const serviceSeq = serviceReconnectSeq;
+    const api = activeBountyApi;
+    if (typeof api.createBountyComment !== 'function') {
+      throw new Error('Comment API is unavailable');
+    }
+    const previousStatus = activeDetail?.bounty.status ?? null;
+    detailInFlightCount += 1;
+    try {
+      const result = await api.createBountyComment(bountyId, { body });
+      const refreshedDetail = await api.getBountyDetail(bountyId);
+      if (
+        detailSeq === detailRequestSeq &&
+        serviceSeq === serviceReconnectSeq &&
+        api === activeBountyApi &&
+        activeDetail?.bounty.id === bountyId
+      ) {
+        activeDetail = refreshedDetail;
+      }
+      await refreshBountyWorkspace();
+      const resumed = previousStatus === 'WAITING_INFO' && result.bounty.status === 'IN_PROGRESS';
+      showToast(resumed ? $t('已回复并恢复任务') : $t('评论已发送'));
+    } catch (error) {
+      showToast(formatServiceError(error));
+      throw error;
+    } finally {
+      detailInFlightCount -= 1;
+    }
+  }
+
   function openCreateComposer(): void {
     editingBounty = null;
     composerOpen = true;
@@ -1824,6 +1855,11 @@
           <rect x="2.2" y="3" width="11.6" height="10" rx="2" />
         </svg>
         <span class="workspace-nav-label">{$t('待我处理')}</span>
+        {#if actionableBounties.length > 0}
+          <span class="workspace-nav-badge" data-slot="inbox-count">
+            {actionableBounties.length}
+          </span>
+        {/if}
       </button>
 
       <button
@@ -2292,6 +2328,7 @@
       onWithdraw={handleWithdrawFromDrawer}
       onCancel={handleCancelFromDrawer}
       onReleaseLease={handleReleaseLeaseFromDrawer}
+      onCreateComment={handleCreateCommentFromDrawer}
     />
   {/if}
 

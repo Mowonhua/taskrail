@@ -767,6 +767,9 @@ describe('悬赏板工作台外壳集成测试', () => {
       lease_id: 0,
       lease_agent_id: null,
       lease_expires_at: null,
+      active_duration_ms: 0,
+      active_started_at: null,
+      comment_count: 0,
       rejection_count: 0,
       completion_note: null,
       published_at: '2026-11-16T12:05:00.000Z',
@@ -3706,5 +3709,209 @@ describe('悬赏板工作台外壳集成测试', () => {
     expect(
       alphaCard.querySelector('[data-slot="agent-lease-incidents"]')?.textContent?.trim(),
     ).toContain('超时 0 次 弃单 1 次');
+  });
+
+  it('支持任务评论区、Agent 提问挂起冻结租约与有效耗时、待我处理实时聚合、人工回复唤醒与挂起取消', async () => {
+    vi.useFakeTimers({
+      toFake: ['Date', 'setInterval', 'clearInterval'],
+    });
+    const baseTime = new Date('2026-11-17T12:00:00.000Z');
+    vi.setSystemTime(baseTime);
+
+    const { port } = createMemoryPort({
+      preferences: { ...emptyAppConfig().preferences, workspaceSection: 'bounties' },
+    });
+    const bountyApi = createMemoryBountyClient({ lan_open_registration: true });
+    const project = await bountyApi.createProject({ name: '评论与冻结联调项目' });
+
+    const alpha = await bountyApi.registerAgent({ name: '提问工兵 Alpha' });
+    await bountyApi.simulateAgentTier(alpha.agent.id, 'A');
+
+    const task = await bountyApi.createBounty({
+      project_id: project.id,
+      title: '需要补充环境变量与迁移版本的任务',
+      description: '验证挂起冻结、有效耗时分段与 Markdown+KaTeX 评论恢复',
+      acceptance_criteria: '- [ ] 澄清问题后继续执行',
+      difficulty: 'A',
+      assignee_mode: 'any',
+      require_arbitration: false,
+      status: 'OPEN',
+    });
+    const cancelTask = await bountyApi.createBounty({
+      project_id: project.id,
+      title: '挂起后取消的任务',
+      difficulty: 'B',
+      assignee_mode: 'any',
+      require_arbitration: false,
+      status: 'OPEN',
+    });
+
+    // 1. Agent 接单后先执行 90 秒，再调用 request-info 提问挂起
+    await vi.advanceTimersByTimeAsync(100);
+    const claimed = await bountyApi.agentClaimBounty(alpha.api_key, task.id);
+    await vi.advanceTimersByTimeAsync(90_000);
+    await bountyApi.agentRequestInfo(alpha.api_key, task.id, {
+      lease_id: claimed.lease_id,
+      question: '请确认 **PostgreSQL 版本** 与并发阈值 $N \\ge 3$？',
+    });
+
+    instance = mount(App, { target, props: { files: port, bountyApi } });
+    await flush();
+
+    // 左栏「待我处理」角标实时显示 1，卡片显示冻结状态与评论数 1（无倒计时、无 · 分隔符）
+    const inboxBtn = target.querySelector<HTMLButtonElement>('[data-nav-section="inbox"]')!;
+    expect(inboxBtn.querySelector('[data-slot="inbox-count"]')?.textContent?.trim()).toBe('1');
+
+    const card = target.querySelector<HTMLElement>(`[data-bounty-id="${task.id}"]`)!;
+    expect(card.dataset.bountyStatus).toBe('WAITING_INFO');
+    expect(card.querySelector('[data-slot="card-lease-frozen"]')?.textContent?.trim()).toBe(
+      '租约已冻结（等待回复）',
+    );
+    expect(card.querySelector('[data-slot="card-lease-countdown"]')).toBeNull();
+    expect(card.querySelector('[data-slot="card-comment-count"]')?.textContent?.trim()).toBe(
+      '评论 1',
+    );
+    expect(card.textContent).not.toContain('·');
+
+    // 2. 长时间停留在 WAITING_INFO（推进 25 分钟并运行 sweepLeases）不得触发租约超时，T_active 保持 01:30
+    await vi.advanceTimersByTimeAsync(25 * 60 * 1000);
+    await bountyApi.sweepLeases(Date.now());
+    await flush();
+    expect(card.dataset.bountyStatus).toBe('WAITING_INFO');
+    expect(card.querySelector('[data-slot="card-lease-countdown"]')).toBeNull();
+
+    // 3. 切入「待我处理」视图，确认自动聚合 WAITING_INFO 任务
+    inboxBtn.click();
+    await flush();
+    const inboxCards = [...target.querySelectorAll<HTMLElement>('.bounty-card')];
+    expect(inboxCards).toHaveLength(1);
+    expect(inboxCards[0].dataset.bountyId).toBe(task.id);
+
+    // 4. 打开详情抽屉，检查冻结的 T_active、高亮待回答提问（Markdown+KaTeX）及评论时间线
+    inboxCards[0].querySelector<HTMLButtonElement>('.bounty-card-button')!.click();
+    await flush();
+
+    const drawer = target.querySelector<HTMLElement>('[data-dialog="bounty-detail"]')!;
+    expect(drawer.dataset.bountyStatus).toBe('WAITING_INFO');
+    expect(drawer.querySelector('[data-slot="detail-lease-frozen"]')?.textContent?.trim()).toBe(
+      '租约已冻结（等待回复）',
+    );
+    expect(drawer.querySelector('[data-slot="detail-lease-countdown"]')).toBeNull();
+
+    const activeTimer = drawer.querySelector<HTMLElement>('[data-slot="detail-active-duration"]')!;
+    expect(activeTimer.dataset.timerState).toBe('frozen');
+    expect(activeTimer.textContent?.trim()).toBe('有效耗时已冻结 01:30');
+
+    const pendingBanner = drawer.querySelector<HTMLElement>('[data-slot="detail-pending-question"]')!;
+    expect(pendingBanner).not.toBeNull();
+    const pendingBody = pendingBanner.querySelector<HTMLElement>(
+      '[data-slot="detail-pending-question-body"]',
+    )!;
+    expect(pendingBody.querySelector('strong')?.textContent).toBe('PostgreSQL 版本');
+    expect(pendingBody.querySelector('.katex')).not.toBeNull();
+
+    const commentItems = [...drawer.querySelectorAll<HTMLElement>('[data-comment-id]')];
+    expect(commentItems).toHaveLength(1);
+    expect(commentItems[0].dataset.commentKind).toBe('question');
+    expect(drawer.querySelector('.detail-pending-question-hint')).toBeNull();
+    expect(drawer.querySelector('.detail-comment-resume-hint')).toBeNull();
+    expect(drawer.textContent).not.toContain('租约倒计时与有效耗时已冻结，等待回复后恢复为执行中');
+    expect(
+      drawer.querySelector<HTMLButtonElement>('[data-action="submit-comment"]')?.getAttribute('title'),
+    ).toContain('15 分钟租约');
+    expect(drawer.textContent).not.toContain('·');
+
+    // 5. 人类管理员在输入框输入草稿期间触发后台 2s 同步，草稿不得被清空
+    const commentInput = drawer.querySelector<HTMLTextAreaElement>('[data-slot="comment-input"]')!;
+    commentInput.value = '确认使用 **PostgreSQL 16**，阈值 `$N = 4$`。';
+    commentInput.dispatchEvent(new Event('input', { bubbles: true }));
+    await flush();
+
+    await vi.advanceTimersByTimeAsync(2000);
+    await flush();
+    expect(
+      drawer.querySelector<HTMLTextAreaElement>('[data-slot="comment-input"]')?.value,
+    ).toBe('确认使用 **PostgreSQL 16**，阈值 `$N = 4$`。');
+
+    // 提交回复后自动唤醒为 IN_PROGRESS、刷新 15:00 租约、T_active 恢复计时，且执行者收到双通知
+    drawer.querySelector<HTMLButtonElement>('[data-action="submit-comment"]')!.click();
+    await flush();
+
+    expect(target.querySelector('.toast-bar')?.textContent).toContain('已回复并恢复任务');
+    expect(drawer.dataset.bountyStatus).toBe('IN_PROGRESS');
+    expect(drawer.querySelector('[data-slot="detail-pending-question"]')).toBeNull();
+    expect(drawer.querySelector('[data-slot="detail-lease-countdown"]')?.textContent?.trim()).toBe(
+      '租约剩余 15:00',
+    );
+    expect(
+      drawer.querySelector<HTMLElement>('[data-slot="detail-active-duration"]')?.dataset.timerState,
+    ).toBe('running');
+    expect(
+      drawer.querySelector('[data-slot="detail-active-duration"]')?.textContent?.trim(),
+    ).toBe('有效耗时 01:30');
+    expect(commentInput.value).toBe('');
+
+    const updatedComments = [...drawer.querySelectorAll<HTMLElement>('[data-comment-id]')];
+    expect(updatedComments).toHaveLength(2);
+    expect(updatedComments[1].dataset.commentKind).toBe('reply');
+    expect(
+      drawer.querySelector('.detail-timeline-item[data-event-type="resumed"]'),
+    ).not.toBeNull();
+
+    // 推进 15 秒验证有效耗时恢复推进而 WAITING_INFO 的 25 分钟不计入
+    await vi.advanceTimersByTimeAsync(15_000);
+    await flush();
+    expect(
+      drawer.querySelector('[data-slot="detail-active-duration"]')?.textContent?.trim(),
+    ).toBe('有效耗时 01:45');
+
+    // 「待我处理」角标清零隐藏
+    expect(inboxBtn.querySelector('[data-slot="inbox-count"]')).toBeNull();
+
+    const executorEvents = await bountyApi.agentListEvents(alpha.api_key);
+    expect(
+      executorEvents.events
+        .filter(item => item.bounty_id === task.id && item.event_type !== 'task.published')
+        .map(item => item.event_type),
+    ).toEqual(['comment.replied', 'task.resumed']);
+
+    drawer.querySelector<HTMLButtonElement>('[aria-label="关闭对话框"]')!.click();
+    await flush();
+
+    // 6. 挂起中的任务被管理员取消 -> 转为 CANCELLED、通知 task.cancelled 且禁用评论输入框
+    const cancelClaim = await bountyApi.agentClaimBounty(alpha.api_key, cancelTask.id);
+    await bountyApi.agentRequestInfo(alpha.api_key, cancelTask.id, {
+      lease_id: cancelClaim.lease_id,
+      question: '需要确认后才能继续',
+    });
+
+    target.querySelector<HTMLButtonElement>('[data-nav-section="bounties"]')!.click();
+    await flush();
+
+    await vi.advanceTimersByTimeAsync(2000);
+    await flush();
+    expect(inboxBtn.querySelector('[data-slot="inbox-count"]')?.textContent?.trim()).toBe('1');
+
+    target
+      .querySelector<HTMLButtonElement>(`[data-bounty-id="${cancelTask.id}"] .bounty-card-button`)!
+      .click();
+    await flush();
+
+    const cancelDrawer = target.querySelector<HTMLElement>('[data-dialog="bounty-detail"]')!;
+    expect(cancelDrawer.dataset.bountyStatus).toBe('WAITING_INFO');
+    cancelDrawer.querySelector<HTMLButtonElement>('[data-action="cancel-bounty"]')!.click();
+    await flush();
+
+    expect(cancelDrawer.dataset.bountyStatus).toBe('CANCELLED');
+    expect(cancelDrawer.querySelector('[data-slot="comment-input"]')).toBeNull();
+    expect(
+      cancelDrawer.querySelector('[data-slot="comment-disabled-notice"]')?.textContent?.trim(),
+    ).toBe('任务已取消，无法继续发表评论');
+    expect(inboxBtn.querySelector('[data-slot="inbox-count"]')).toBeNull();
+
+    const cancelEvents = await bountyApi.agentListEvents(alpha.api_key, {
+      cursor: executorEvents.latest_event_id,
+    });
+    expect(cancelEvents.events.map(item => item.event_type)).toContain('task.cancelled');
   });
 });

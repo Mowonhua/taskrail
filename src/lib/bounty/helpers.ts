@@ -10,6 +10,8 @@ import {
   type AgentStatus,
   type AgentSummary,
   type AgentTier,
+  type BountyCommentAuthorType,
+  type BountyCommentKind,
   type BountyProject,
   type BountyStatus,
   type BountyTask,
@@ -191,11 +193,61 @@ export function formatLeaseCountdown(
   };
 }
 
+export function computeActiveDurationMs(
+  bounty: Pick<BountyTask, 'status' | 'active_duration_ms' | 'active_started_at'>,
+  nowMs = Date.now(),
+): number {
+  const base = Math.max(0, Number.isFinite(bounty.active_duration_ms) ? bounty.active_duration_ms : 0);
+  if (bounty.status === 'IN_PROGRESS' && bounty.active_started_at) {
+    const startMs = Date.parse(bounty.active_started_at);
+    if (!Number.isNaN(startMs)) {
+      return base + Math.max(0, nowMs - startMs);
+    }
+  }
+  return base;
+}
+
+export function formatActiveDuration(durationMs: number): string {
+  const totalSeconds = Math.max(0, Math.floor(durationMs / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return hours > 0
+    ? `${hours}:${pad(minutes)}:${pad(seconds)}`
+    : `${pad(minutes)}:${pad(seconds)}`;
+}
+
 export function formatCompletionCost(cost: number | null | undefined): string | null {
   if (cost === null || cost === undefined || !Number.isFinite(cost) || cost < 0) {
     return null;
   }
   return Number.isInteger(cost) ? String(cost) : Number(cost.toFixed(4)).toString();
+}
+
+export function formatCommentKind(kind: BountyCommentKind): string {
+  switch (kind) {
+    case 'question':
+      return translate('提问阻塞');
+    case 'reply':
+      return translate('恢复回复');
+    case 'status':
+      return translate('状态记录');
+    case 'comment':
+    default:
+      return translate('评论');
+  }
+}
+
+export function formatCommentAuthorRole(authorType: BountyCommentAuthorType): string {
+  switch (authorType) {
+    case 'human':
+      return translate('人类管理员');
+    case 'agent':
+      return 'Agent';
+    case 'system':
+      return translate('系统');
+  }
 }
 
 export function formatEventLabel(eventType: string): string {
@@ -218,6 +270,12 @@ export function formatEventLabel(eventType: string): string {
       return translate('主动弃单');
     case 'completed':
       return translate('完成交付');
+    case 'info_requested':
+      return translate('提问挂起');
+    case 'resumed':
+      return translate('回复并恢复');
+    case 'commented':
+      return translate('发表评论');
     case 'lease_released':
       return translate('释放租约');
     case 'lease_expired':

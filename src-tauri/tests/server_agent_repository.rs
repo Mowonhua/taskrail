@@ -55,7 +55,7 @@ fn v1_upgrade_preserves_projects_bounties_and_events_and_rolls_back_failure() {
             |r| r.get::<_, String>(0)
         )
         .unwrap(),
-        "1,2,3,4,5"
+        "1,2,3,4,5,6"
     );
     repo.onboarding(Some(UpdateOnboarding {
         lan_open_registration: true,

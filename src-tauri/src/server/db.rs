@@ -15,6 +15,7 @@ use std::{
 use uuid::Uuid;
 
 mod agents;
+mod comments;
 mod events;
 mod leases;
 
@@ -27,7 +28,7 @@ pub struct Repository {
 }
 
 const PROJECT_COLUMNS: &str = "id,name,icon,description,workspace_path,default_acceptance_criteria,agent_draft_policy,arbitrator_chain_json,archived,created_at,updated_at";
-const BOUNTY_COLUMNS: &str = "b.id,b.project_id,b.title,b.description,b.acceptance_criteria,b.difficulty,b.assignee_mode,b.assignee_min_tier,b.assignee_agent_id,b.require_arbitration,b.status,b.created_by,b.lease_id,b.lease_agent_id,b.lease_expires_at,b.rejection_count,b.completion_note,b.published_at,b.withdrawn_at,b.cancelled_at,b.completed_at,b.created_at,b.updated_at,b.created_by_agent_id,a.name,la.name,la.tier,aa.name,aa.tier,b.assignment_expires_at,b.completion_cost";
+const BOUNTY_COLUMNS: &str = "b.id,b.project_id,b.title,b.description,b.acceptance_criteria,b.difficulty,b.assignee_mode,b.assignee_min_tier,b.assignee_agent_id,b.require_arbitration,b.status,b.created_by,b.lease_id,b.lease_agent_id,b.lease_expires_at,b.rejection_count,b.completion_note,b.published_at,b.withdrawn_at,b.cancelled_at,b.completed_at,b.created_at,b.updated_at,b.created_by_agent_id,a.name,la.name,la.tier,aa.name,aa.tier,b.assignment_expires_at,b.completion_cost,b.active_duration_ms,b.active_started_at,(SELECT COUNT(*) FROM bounty_comments c WHERE c.bounty_id=b.id)";
 const BOUNTY_SOURCE: &str = "bounties b LEFT JOIN agents a ON a.id=b.created_by_agent_id LEFT JOIN agents la ON la.id=b.lease_agent_id LEFT JOIN agents aa ON aa.id=b.assignee_agent_id";
 
 impl Repository {
@@ -54,13 +55,13 @@ impl Repository {
             [],
             |r| r.get(0),
         )?;
-        if version > 5 {
+        if version > 6 {
             return Err(ApiError::internal("数据库版本高于当前服务支持版本"));
         }
         if version == 0 {
             tx.execute_batch(include_str!("schema.sql"))?;
             tx.execute(
-                "INSERT INTO schema_migrations(version,applied_at) VALUES(5,?1)",
+                "INSERT INTO schema_migrations(version,applied_at) VALUES(6,?1)",
                 [now()],
             )?;
         } else {
@@ -70,6 +71,7 @@ impl Repository {
                 (3, include_str!("schema_v3.sql")),
                 (4, include_str!("schema_v4.sql")),
                 (5, include_str!("schema_v5.sql")),
+                (6, include_str!("schema_v6.sql")),
             ] {
                 if version < target {
                     tx.execute_batch(schema)?;
@@ -79,6 +81,10 @@ impl Repository {
                             "UPDATE bounties SET assignment_expires_at=?1 WHERE status='OPEN' AND assignee_mode='specific' AND assignment_expires_at IS NULL",
                             [leases::deadline()],
                         )?;
+                    }
+                    if target == 6 {
+                        // 旧版没有分段起点，从迁移时开始计时，避免把历史等待时间计为执行耗时。
+                        tx.execute("UPDATE bounties SET active_started_at=?1 WHERE status='IN_PROGRESS' AND active_started_at IS NULL", [now()])?;
                     }
                     tx.execute(
                         "INSERT INTO schema_migrations(version,applied_at) VALUES(?1,?2)",
@@ -275,8 +281,13 @@ impl Repository {
             })?;
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         };
+        let comments = comments::list(&tx, id)?;
         tx.commit()?;
-        Ok(BountyDetail { bounty, events })
+        Ok(BountyDetail {
+            bounty,
+            events,
+            comments,
+        })
     }
 
     pub fn update_bounty(&self, id: &str, patch: UpdateBounty, actor: &str) -> Result<Bounty> {
@@ -351,7 +362,13 @@ impl Repository {
                 tx.execute(&format!("UPDATE bounties SET status=?2,{column}=?3,assignment_expires_at=?6,updated_at=?3 WHERE id=?1 AND status=?4 AND lease_id=?5"),params![id,to.as_str(),timestamp,b.status.as_str(),b.lease_id,assignment])?
             };
             if changed != 1 { return Err(invalid_transition()); }
+            if matches!(action, Transition::Cancel) {
+                tx.execute("UPDATE bounties SET active_started_at=NULL,lease_expires_at=NULL,lease_warned_id=0 WHERE id=?1", [id])?;
+            }
             let updated = find_bounty(tx,id)?;
+            if matches!(action, Transition::Cancel) && b.status == BountyStatus::WaitingInfo {
+                events::notify_active(tx, b.lease_agent_id.as_deref(), &updated, "task.cancelled", json!({"bounty":updated,"lease_id":b.lease_id,"lease_agent_id":b.lease_agent_id}))?;
+            }
             if matches!(action, Transition::Publish | Transition::Withdraw) {
                 events::dispatch(tx, &updated, matches!(action, Transition::Withdraw))?;
             }
@@ -546,6 +563,9 @@ fn bounty_row(r: &Row<'_>) -> rusqlite::Result<Bounty> {
         assignee_agent_tier: optional_enum(r, 28)?,
         assignment_expires_at: r.get(29)?,
         completion_cost: r.get(30)?,
+        active_duration_ms: r.get(31)?,
+        active_started_at: r.get(32)?,
+        comment_count: r.get(33)?,
     })
 }
 
@@ -580,7 +600,7 @@ mod tests {
         Repository::open(&path).unwrap();
         let conn = Connection::open(&path).unwrap();
         conn.execute(
-            "INSERT INTO schema_migrations(version,applied_at) VALUES(6,'future')",
+            "INSERT INTO schema_migrations(version,applied_at) VALUES(7,'future')",
             [],
         )
         .unwrap();
@@ -589,7 +609,117 @@ mod tests {
             conn.query_row("SELECT MAX(version) FROM schema_migrations", [], |r| r
                 .get::<_, i64>(0))
                 .unwrap(),
+            7
+        );
+    }
+
+    fn legacy_v5(path: &Path) -> Connection {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(include_str!("../../tests/fixtures/server_v1.sql"))
+            .unwrap();
+        for schema in [
+            include_str!("schema_v2.sql"),
+            include_str!("schema_v3.sql"),
+            include_str!("schema_v4.sql"),
+            include_str!("schema_v5.sql"),
+        ] {
+            conn.execute_batch(schema).unwrap();
+        }
+        conn.execute_batch("CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY,applied_at TEXT NOT NULL); INSERT INTO schema_migrations VALUES(5,'old'); INSERT INTO projects(id,name,created_at,updated_at) VALUES('p','project','old','old'); INSERT INTO bounties(id,project_id,title,difficulty,assignee_mode,status,created_at,updated_at,published_at,lease_id,lease_agent_id) VALUES('b','p','legacy','C','any','IN_PROGRESS','old','old','old',42,'legacy-worker'); INSERT INTO bounty_events(bounty_id,event_type,actor,to_status,created_at) VALUES('b','created','human','IN_PROGRESS','old');").unwrap();
+        conn
+    }
+
+    #[test]
+    fn v5_to_v6_migration_initializes_timer_and_comments_and_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v5.db");
+        let conn = legacy_v5(&path);
+        let before = Utc::now();
+        let repo = Repository::open(&path).unwrap();
+        let detail = repo.get_bounty_detail("b").unwrap();
+        assert_eq!(detail.bounty.title, "legacy");
+        assert_eq!(detail.bounty.lease_id, 42);
+        assert_eq!(detail.bounty.active_duration_ms, 0);
+        assert_eq!(detail.bounty.comment_count, 0);
+        let start = chrono::DateTime::parse_from_rfc3339(
+            detail.bounty.active_started_at.as_deref().unwrap(),
+        )
+        .unwrap()
+        .with_timezone(&Utc);
+        assert!(start.timestamp_millis() >= before.timestamp_millis());
+        assert!(start <= Utc::now());
+        assert_eq!(detail.events.len(), 1);
+        assert!(detail.comments.is_empty());
+        assert_eq!(
+            conn.query_row("SELECT MAX(version) FROM schema_migrations", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
             6
         );
+        repo.create_bounty_comment(
+            "b",
+            CreateBountyComment {
+                body: "keep comment".into(),
+            },
+        )
+        .unwrap();
+        let reopened = Repository::open(&path)
+            .unwrap()
+            .get_bounty_detail("b")
+            .unwrap();
+        assert_eq!(
+            reopened.bounty.active_started_at,
+            detail.bounty.active_started_at
+        );
+        assert_eq!(reopened.comments.len(), 1);
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM pragma_index_info('bounty_comments_order') WHERE name IN ('bounty_id','id')",[],|r|r.get::<_,i64>(0)).unwrap(),2);
+        conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+        for sql in [
+            "INSERT INTO bounty_comments(bounty_id,author_type,author_name,kind,body,created_at) VALUES('b','invalid','x','comment','x','now')",
+            "INSERT INTO bounty_comments(bounty_id,author_type,author_name,kind,body,created_at) VALUES('b','human','x','invalid','x','now')",
+            "INSERT INTO bounty_comments(bounty_id,author_type,author_name,kind,body,created_at) VALUES('missing','human','x','comment','x','now')",
+        ] { assert!(conn.execute(sql,[]).is_err()); }
+        conn.execute("DELETE FROM bounties WHERE id='b'", [])
+            .unwrap();
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM bounty_comments", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn v6_failure_rolls_back_ddl_timer_and_version_record() {
+        for failure in ["index", "timer", "version"] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("broken.db");
+            let conn = legacy_v5(&path);
+            conn.execute_batch(match failure {
+                "index" => "CREATE TABLE bounty_comments_order(conflict TEXT);",
+                "timer" => "CREATE TRIGGER fail_timer BEFORE UPDATE ON bounties BEGIN SELECT RAISE(ABORT,'timer'); END;",
+                _ => "CREATE TRIGGER fail_version BEFORE INSERT ON schema_migrations WHEN NEW.version=6 BEGIN SELECT RAISE(ABORT,'version'); END;",
+            }).unwrap();
+            let snapshot = || {
+                conn.query_row("SELECT group_concat(sql,';') FROM (SELECT sql FROM sqlite_master ORDER BY name)",[],|r|r.get::<_,String>(0)).unwrap()
+            };
+            let before = snapshot();
+            assert!(Repository::open(&path).is_err());
+            assert_eq!(snapshot(), before);
+            assert_eq!(
+                conn.query_row("SELECT MAX(version) FROM schema_migrations", [], |r| r
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                5
+            );
+            assert_eq!(conn.query_row("SELECT COUNT(*) FROM pragma_table_info('bounties') WHERE name IN ('active_duration_ms','active_started_at')",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+            assert_eq!(
+                conn.query_row("SELECT updated_at FROM bounties WHERE id='b'", [], |r| {
+                    r.get::<_, String>(0)
+                })
+                .unwrap(),
+                "old"
+            );
+        }
     }
 }

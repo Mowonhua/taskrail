@@ -91,6 +91,7 @@ impl Repository {
             agents::active_agent(tx, agent_id)?;
             let timestamp = now();
             let bounty = fenced_bounty(tx, id, agent_id, input.lease_id, &timestamp)?;
+            let active_duration_ms = settle_active(tx, &bounty, &timestamp)?;
             let updated = reopen(tx, &bounty, &timestamp)?;
             incident(tx, &bounty, "abandon", &timestamp)?;
             event(
@@ -99,7 +100,7 @@ impl Repository {
                 "abandoned",
                 &format!("agent:{agent_id}"),
                 Some(bounty.status),
-                json!({"lease_id":bounty.lease_id,"lease_agent_id":agent_id,"reason":input.reason}),
+                json!({"lease_id":bounty.lease_id,"lease_agent_id":agent_id,"reason":input.reason,"active_duration_ms":active_duration_ms}),
             )?;
             events::dispatch(tx, &updated, false)?;
             Ok(updated)
@@ -123,6 +124,7 @@ impl Repository {
             if input.completion_cost.is_some_and(|cost| !cost.is_finite() || cost < 0.0) {
                 return Err(ApiError::invalid("completion_cost 必须为有限非负数"));
             }
+            settle_active(tx, &bounty, &timestamp)?;
             let note = input.completion_note.map(|note| note.trim().to_owned()).filter(|note| !note.is_empty());
             tx.execute("UPDATE bounties SET status='COMPLETED',completion_note=?2,completion_cost=?3,completed_at=?4,lease_expires_at=NULL,lease_warned_id=0,updated_at=?4 WHERE id=?1", params![id,note,input.completion_cost,timestamp])?;
             let updated = find_bounty(tx, id)?;
@@ -141,10 +143,11 @@ impl Repository {
                 return Err(invalid_transition());
             }
             let timestamp = now();
+            let active_duration_ms = settle_active(tx, &bounty, &timestamp)?;
             let assignment = (bounty.assignee_mode == AssigneeMode::Specific).then(deadline);
-            tx.execute("UPDATE bounties SET status='OPEN',lease_agent_id=NULL,lease_expires_at=NULL,lease_warned_id=0,assignment_expires_at=?2,updated_at=?3 WHERE id=?1", params![id,assignment,timestamp])?;
+            tx.execute("UPDATE bounties SET status='OPEN',active_duration_ms=0,active_started_at=NULL,lease_agent_id=NULL,lease_expires_at=NULL,lease_warned_id=0,assignment_expires_at=?2,updated_at=?3 WHERE id=?1", params![id,assignment,timestamp])?;
             let updated = find_bounty(tx, id)?;
-            let detail = json!({"lease_id":bounty.lease_id,"lease_agent_id":bounty.lease_agent_id,"lease_agent_name":bounty.lease_agent_name});
+            let detail = json!({"lease_id":bounty.lease_id,"lease_agent_id":bounty.lease_agent_id,"lease_agent_name":bounty.lease_agent_name,"active_duration_ms":active_duration_ms});
             event(tx, &updated, "lease_released", "human", Some(bounty.status), detail.clone())?;
             events::notify_active(tx, bounty.lease_agent_id.as_deref(), &updated, "lease.released", detail)?;
             events::dispatch(tx, &updated, false)?;
@@ -172,9 +175,11 @@ impl Repository {
                     events::notify_active(tx, bounty.created_by_agent_id.as_deref(), &updated, "task.assignment_expired", detail)?;
                     events::dispatch(tx, &updated, false)?;
                 } else if bounty.lease_expires_at.as_deref().is_some_and(|expires| expires <= timestamp.as_str()) {
+                    let active_duration_ms = settle_active(tx, &bounty, &timestamp)?;
                     let updated = reopen(tx, &bounty, &timestamp)?;
                     incident(tx, &bounty, "timeout", &timestamp)?;
-                    let detail = lease_detail(&bounty);
+                    let mut detail = lease_detail(&bounty);
+                    detail["active_duration_ms"] = json!(active_duration_ms);
                     event(tx, &updated, "lease_expired", "system", Some(bounty.status), detail.clone())?;
                     events::notify_active(tx, bounty.lease_agent_id.as_deref(), &updated, "lease.expired", detail)?;
                     events::dispatch(tx, &updated, false)?;
@@ -218,7 +223,7 @@ fn claimable(bounty: &Bounty) -> Result<()> {
 pub(super) fn claim(tx: &Transaction<'_>, bounty: &Bounty, agent_id: &str) -> Result<Bounty> {
     claimable(bounty)?;
     let timestamp = now();
-    let changed = tx.execute("UPDATE bounties SET status='IN_PROGRESS',lease_id=lease_id+1,lease_agent_id=?2,lease_expires_at=?3,lease_warned_id=0,assignment_expires_at=NULL,updated_at=?4 WHERE id=?1 AND status='OPEN' AND lease_agent_id IS NULL AND lease_id=?5", params![bounty.id,agent_id,deadline(),timestamp,bounty.lease_id])?;
+    let changed = tx.execute("UPDATE bounties SET status='IN_PROGRESS',active_duration_ms=0,active_started_at=?4,lease_id=lease_id+1,lease_agent_id=?2,lease_expires_at=?3,lease_warned_id=0,assignment_expires_at=NULL,updated_at=?4 WHERE id=?1 AND status='OPEN' AND lease_agent_id IS NULL AND lease_id=?5", params![bounty.id,agent_id,deadline(),timestamp,bounty.lease_id])?;
     if changed != 1 {
         return Err(already_claimed());
     }
@@ -235,7 +240,7 @@ pub(super) fn claim(tx: &Transaction<'_>, bounty: &Bounty, agent_id: &str) -> Re
 }
 
 /// 校验顺序属于错误契约：先隐藏未公开任务，再拒绝旧令牌、错误持有者、非执行状态及到期租约。
-fn fenced_bounty(
+pub(super) fn fenced_bounty(
     conn: &Connection,
     id: &str,
     agent_id: &str,
@@ -287,11 +292,12 @@ fn clear_assignment(tx: &Transaction<'_>, id: &str, timestamp: &str) -> Result<(
     Ok(())
 }
 
-/// 弃单和超时共用回收规则；令牌留存到下次接取递增，定向给原持有者的任务回退为公开。
+/// 弃单和超时共用回收规则；调用方先结转耗时用于历史事件，再清零以开始新的认领周期。
+/// 令牌留存到下次接取递增，定向给原持有者的任务回退为公开。
 fn reopen(tx: &Transaction<'_>, bounty: &Bounty, timestamp: &str) -> Result<Bounty> {
     let fallback = bounty.assignee_mode == AssigneeMode::Specific
         && bounty.assignee_agent_id == bounty.lease_agent_id;
-    tx.execute("UPDATE bounties SET status='OPEN',lease_agent_id=NULL,lease_expires_at=NULL,lease_warned_id=0,assignee_mode=CASE WHEN ?3 THEN 'any' ELSE assignee_mode END,assignee_agent_id=CASE WHEN ?3 THEN NULL ELSE assignee_agent_id END,assignee_min_tier=CASE WHEN ?3 THEN NULL ELSE assignee_min_tier END,assignment_expires_at=CASE WHEN ?3 THEN NULL ELSE assignment_expires_at END,updated_at=?2 WHERE id=?1", params![bounty.id,timestamp,fallback])?;
+    tx.execute("UPDATE bounties SET status='OPEN',active_duration_ms=0,active_started_at=NULL,lease_agent_id=NULL,lease_expires_at=NULL,lease_warned_id=0,assignee_mode=CASE WHEN ?3 THEN 'any' ELSE assignee_mode END,assignee_agent_id=CASE WHEN ?3 THEN NULL ELSE assignee_agent_id END,assignee_min_tier=CASE WHEN ?3 THEN NULL ELSE assignee_min_tier END,assignment_expires_at=CASE WHEN ?3 THEN NULL ELSE assignment_expires_at END,updated_at=?2 WHERE id=?1", params![bounty.id,timestamp,fallback])?;
     find_bounty(tx, &bounty.id)
 }
 
@@ -313,4 +319,23 @@ fn incident(tx: &Transaction<'_>, bounty: &Bounty, kind: &str, timestamp: &str) 
         tx.execute("INSERT INTO lease_incidents(bounty_id,agent_id,lease_id,kind,created_at) VALUES(?1,?2,?3,?4,?5)", params![bounty.id,agent_id,bounty.lease_id,kind,timestamp])?;
     }
     Ok(())
+}
+
+/// 只结转执行段。使用同一事务的时间快照；等待回复期间起点为空，重复结转不会增加耗时。
+pub(super) fn settle_active(tx: &Transaction<'_>, bounty: &Bounty, timestamp: &str) -> Result<i64> {
+    let elapsed = match bounty.active_started_at.as_deref() {
+        Some(start) if bounty.status == BountyStatus::InProgress => {
+            let start = chrono::DateTime::parse_from_rfc3339(start).map_err(ApiError::internal)?;
+            let end =
+                chrono::DateTime::parse_from_rfc3339(timestamp).map_err(ApiError::internal)?;
+            (end - start).num_milliseconds().max(0)
+        }
+        _ => 0,
+    };
+    let total = bounty.active_duration_ms.saturating_add(elapsed);
+    tx.execute(
+        "UPDATE bounties SET active_duration_ms=?2,active_started_at=NULL WHERE id=?1",
+        params![bounty.id, total],
+    )?;
+    Ok(total)
 }

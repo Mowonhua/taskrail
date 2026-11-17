@@ -306,6 +306,10 @@ pub struct Bounty {
     pub lease_agent_name: Option<String>,
     pub lease_agent_tier: Option<AgentTier>,
     pub lease_expires_at: Option<String>,
+    /// 已结转的执行毫秒数；当前段由 active_started_at 起算，等待回复期间不增长。
+    pub active_duration_ms: i64,
+    pub active_started_at: Option<String>,
+    pub comment_count: i64,
     pub rejection_count: i64,
     pub completion_note: Option<String>,
     pub completion_cost: Option<f64>,
@@ -375,6 +379,7 @@ pub struct BountyEvent {
 pub struct BountyDetail {
     pub bounty: Bounty,
     pub events: Vec<BountyEvent>,
+    pub comments: Vec<BountyComment>,
 }
 
 /// 结构职责：提供给桌面前端的当前会话连接信息；token 不写入磁盘或日志。
@@ -425,4 +430,40 @@ pub struct WebhookConfig {
     pub recent_failed_count: i64,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub webhook_secret: Option<String>,
+}
+
+/// 结构职责：评论作者身份由认证上下文确定；读取 Agent 当前名称，缺失时回退写入快照。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BountyComment {
+    pub id: i64,
+    pub bounty_id: String,
+    pub author_type: String,
+    pub author_id: Option<String>,
+    pub author_name: String,
+    pub kind: String,
+    pub body: String,
+    pub created_at: String,
+}
+
+/// 结构职责：评论输入；服务确定作者与类型，正文去除首尾空白后应非空。
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreateBountyComment {
+    pub body: String,
+}
+
+/// 结构职责：当前租约持有者的提问；先校验令牌，再校验非空问题正文。
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RequestInfoInput {
+    pub lease_id: i64,
+    pub question: String,
+}
+
+/// 结构职责：评论写入结果；任务快照包含本条评论计数以及回复恢复后的租约。
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BountyCommentResult {
+    pub bounty: Bounty,
+    pub comment: BountyComment,
 }

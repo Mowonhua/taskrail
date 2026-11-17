@@ -20,6 +20,8 @@ import {
   type AgentTier,
   type AgentWebhookConfig,
   type AssigneeMode,
+  type BountyComment,
+  type BountyCommentMutationResult,
   type BountyDetail,
   type BountyDifficulty,
   type BountyEvent,
@@ -28,6 +30,7 @@ import {
   type BountyStatus,
   type BountyTask,
   type CompleteBountyInput,
+  type CreateBountyCommentInput,
   type CreatedInviteToken,
   type CreateBountyInput,
   type CreateInviteTokenInput,
@@ -39,6 +42,7 @@ import {
   type OnboardingSettings,
   type RegisterAgentInput,
   type RegisteredAgentResult,
+  type RequestInfoInput,
   type ServerHealth,
   type SkillDocument,
   type UpdateAgentInput,
@@ -66,12 +70,9 @@ const DECLINE_ALLOWED_KEYS = new Set(['reason']);
 const HEARTBEAT_ALLOWED_KEYS = new Set(['lease_id']);
 const ABANDON_ALLOWED_KEYS = new Set(['lease_id', 'reason']);
 const COMPLETE_ALLOWED_KEYS = new Set(['lease_id', 'completion_note', 'completion_cost']);
+const CREATE_COMMENT_ALLOWED_KEYS = new Set(['body']);
+const REQUEST_INFO_ALLOWED_KEYS = new Set(['lease_id', 'question']);
 const CANCELLABLE_STATUSES = new Set<BountyStatus>(['DRAFT', 'OPEN', 'WAITING_INFO']);
-const ACTIVE_LEASE_STATUSES = new Set<BountyStatus>([
-  'IN_PROGRESS',
-  'WAITING_INFO',
-  'PENDING_ARBITRATION',
-]);
 const DEFAULT_SKILL_BASE_URL = 'http://127.0.0.1:8420';
 const LEASE_TTL_MS = 15 * 60 * 1000;
 const LEASE_WARNING_WINDOW_MS = 3 * 60 * 1000;
@@ -86,6 +87,11 @@ export interface BountyApiPort {
   deleteProject(id: string): Promise<void>;
   listBounties(query?: BountyQuery): Promise<BountyTask[]>;
   getBountyDetail(id: string): Promise<BountyDetail>;
+  listBountyComments?(id: string): Promise<BountyComment[]>;
+  createBountyComment?(
+    id: string,
+    input: CreateBountyCommentInput,
+  ): Promise<BountyCommentMutationResult>;
   createBounty(input: CreateBountyInput): Promise<BountyTask>;
   updateBounty(id: string, input: UpdateBountyInput): Promise<BountyTask>;
   publishBounty(id: string): Promise<BountyTask>;
@@ -121,9 +127,15 @@ export interface AgentApiPort {
   createBounty(input: AgentCreateBountyInput): Promise<BountyTask>;
   listBounties(query?: BountyQuery): Promise<BountyTask[]>;
   getBountyDetail(id: string): Promise<BountyDetail>;
+  listComments(id: string): Promise<BountyComment[]>;
+  createComment(
+    id: string,
+    input: CreateBountyCommentInput,
+  ): Promise<BountyCommentMutationResult>;
   claimBounty(id: string): Promise<BountyTask>;
   declineBounty(id: string, input?: DeclineBountyInput): Promise<BountyTask>;
   heartbeatBounty(id: string, input: LeaseHeartbeatInput): Promise<BountyTask>;
+  requestInfo(id: string, input: RequestInfoInput): Promise<BountyTask>;
   abandonBounty(id: string, input: AbandonBountyInput): Promise<BountyTask>;
   completeBounty(id: string, input: CompleteBountyInput): Promise<BountyTask>;
   getWebhookConfig(): Promise<AgentWebhookConfig>;
@@ -133,6 +145,11 @@ export interface AgentApiPort {
 }
 
 export interface MemoryBountyClient extends BountyApiPort {
+  listBountyComments(id: string): Promise<BountyComment[]>;
+  createBountyComment(
+    id: string,
+    input: CreateBountyCommentInput,
+  ): Promise<BountyCommentMutationResult>;
   simulateClaim(id: string, agentId: string): Promise<BountyTask>;
   registerAgent(
     input: RegisterAgentInput,
@@ -153,6 +170,12 @@ export interface MemoryBountyClient extends BountyApiPort {
   agentCreateBounty(apiKey: string, input: AgentCreateBountyInput): Promise<BountyTask>;
   agentListBounties(apiKey: string, query?: BountyQuery): Promise<BountyTask[]>;
   agentGetBountyDetail(apiKey: string, id: string): Promise<BountyDetail>;
+  agentListComments(apiKey: string, id: string): Promise<BountyComment[]>;
+  agentCreateComment(
+    apiKey: string,
+    id: string,
+    input: CreateBountyCommentInput,
+  ): Promise<BountyCommentMutationResult>;
   agentClaimBounty(apiKey: string, id: string): Promise<BountyTask>;
   agentDeclineBounty(
     apiKey: string,
@@ -163,6 +186,11 @@ export interface MemoryBountyClient extends BountyApiPort {
     apiKey: string,
     id: string,
     input: LeaseHeartbeatInput,
+  ): Promise<BountyTask>;
+  agentRequestInfo(
+    apiKey: string,
+    id: string,
+    input: RequestInfoInput,
   ): Promise<BountyTask>;
   agentAbandonBounty(
     apiKey: string,
@@ -296,6 +324,24 @@ export class HttpBountyClient implements BountyApiPort {
 
   async getBountyDetail(id: string): Promise<BountyDetail> {
     return await this.request<BountyDetail>('GET', `/api/v1/bounties/${encodeURIComponent(id)}`);
+  }
+
+  async listBountyComments(id: string): Promise<BountyComment[]> {
+    return await this.request<BountyComment[]>(
+      'GET',
+      `/api/v1/bounties/${encodeURIComponent(id)}/comments`,
+    );
+  }
+
+  async createBountyComment(
+    id: string,
+    input: CreateBountyCommentInput,
+  ): Promise<BountyCommentMutationResult> {
+    return await this.request<BountyCommentMutationResult>(
+      'POST',
+      `/api/v1/bounties/${encodeURIComponent(id)}/comments`,
+      { body: input },
+    );
   }
 
   async createBounty(input: CreateBountyInput): Promise<BountyTask> {
@@ -530,6 +576,24 @@ export class HttpAgentClient implements AgentApiPort {
     );
   }
 
+  async listComments(id: string): Promise<BountyComment[]> {
+    return await this.request<BountyComment[]>(
+      'GET',
+      `/api/v1/agent/bounties/${encodeURIComponent(id)}/comments`,
+    );
+  }
+
+  async createComment(
+    id: string,
+    input: CreateBountyCommentInput,
+  ): Promise<BountyCommentMutationResult> {
+    return await this.request<BountyCommentMutationResult>(
+      'POST',
+      `/api/v1/agent/bounties/${encodeURIComponent(id)}/comments`,
+      { body: input },
+    );
+  }
+
   async claimBounty(id: string): Promise<BountyTask> {
     return await this.request<BountyTask>(
       'POST',
@@ -549,6 +613,17 @@ export class HttpAgentClient implements AgentApiPort {
     return await this.request<BountyTask>(
       'POST',
       `/api/v1/agent/bounties/${encodeURIComponent(id)}/heartbeat`,
+      { body: input },
+    );
+  }
+
+  async requestInfo(id: string, input: RequestInfoInput): Promise<BountyTask> {
+    if (typeof input?.lease_id === 'number' && !Number.isFinite(input.lease_id)) {
+      throw new ServiceApiError('VALIDATION_ERROR', 400, 'lease_id 必须为有限整数');
+    }
+    return await this.request<BountyTask>(
+      'POST',
+      `/api/v1/agent/bounties/${encodeURIComponent(id)}/request-info`,
       { body: input },
     );
   }
@@ -792,10 +867,10 @@ DRAFT 在人工确认前不向任何 Agent 推送，所有 Agent（包括发布�
 ## 任务读取
 
 - GET ${baseUrl}/api/v1/agent/bounties：返回 Bounty[]，支持 project_id、status、q 查询。q 为字面子串，% 和 _ 不作为通配符。
-- GET ${baseUrl}/api/v1/agent/bounties/{id}：返回 {"bounty":Bounty,"events":BountyEvent[]}；不可见任务返回 404 BOUNTY_NOT_FOUND。
+- GET ${baseUrl}/api/v1/agent/bounties/{id}：返回 {"bounty":Bounty,"events":BountyEvent[],"comments":BountyComment[]}；不可见任务返回 404 BOUNTY_NOT_FOUND。
 
-仅可读取订阅项目内公开任务及指派或租约属于自身的任务；指定其他 Agent 的任务不可见。
-DRAFT 草稿对所有 Agent 隔离，列表和搜索永远排除 DRAFT，即使 status=DRAFT 或 include_drafts=true 也不能绕过；单个草稿详情返回 404。
+仅可读取已发布（status != DRAFT 且 published_at 非空）的订阅项目内公开任务及自身发布、被指派或持有租约的任务。发布者可读取自己定向给其他 Agent 的任务，不要求订阅项目；其他第三方 Agent 不可见。
+DRAFT 草稿和未发布即取消的任务对所有 Agent（包括发布者）隔离。列表和搜索永远排除 DRAFT，即使 status=DRAFT 或 include_drafts=true 也不能绕过；不可见任务详情返回 404 BOUNTY_NOT_FOUND。
 
 ## 抢单、租约和直接交付
 
@@ -812,6 +887,24 @@ DRAFT 草稿对所有 Agent 隔离，列表和搜索永远排除 DRAFT，即使 
 心跳、弃单和完成依次检查：DRAFT/未公开返回 404 BOUNTY_NOT_FOUND；令牌不匹配或无持有者返回 409 STALE_LEASE；持有者不是自己返回 403 LEASE_OWNER_MISMATCH；状态不是 IN_PROGRESS 返回 409 INVALID_TRANSITION；租约已到期返回 409 STALE_LEASE。收到 STALE_LEASE 后停止使用旧令牌写入，重新读取任务状态。
 租约剩余不超过三分钟时接收 lease.expiring，每轮只提醒一次，心跳续期后允许再次提醒。到期后服务回收任务、累计 timeout_count 并发送 lease.expired；弃单或到期时，原本定向给自己的任务同时回退 any。管理员释放会发送 lease.released。WAITING_INFO/PENDING_ARBITRATION 不参与到期回收。通知保存在持久化收件箱，并通过配置的推送通道投递。
 Bounty 返回 lease_agent_name、lease_agent_tier、assignee_agent_name、assignee_agent_tier，均为关联的当前公开资料，未知身份为 null。完成后保留 lease_agent_id 与 lease_id，清除租约期限，返回 completion_note、completion_cost 和 completed_at。
+
+## 评论、提问挂起与回复唤醒
+
+- GET ${baseUrl}/api/v1/agent/bounties/{id}/comments：返回 200 BountyComment[]，按 id 升序；沿用任务详情可见性，DRAFT 或不可见任务返回 404 BOUNTY_NOT_FOUND。
+- POST ${baseUrl}/api/v1/agent/bounties/{id}/comments：正文 {"body":"Markdown 与 $KaTeX$ 正文"}，返回 201 {"bounty":Bounty,"comment":BountyComment}。body 必填，拒绝未知字段，去除首尾空白后不能为空。CANCELLED 返回 409 INVALID_TRANSITION。
+- POST ${baseUrl}/api/v1/agent/bounties/{id}/request-info：正文 {"lease_id":123,"question":"缺少哪些信息？"}，两个字段必填，拒绝未知字段。使用 heartbeat 相同的 fencing 检查顺序，再校验 question 去除首尾空白后非空。返回 200 Bounty；评论从详情 comments 或评论列表获取。
+
+评论 GET/POST 与详情使用相同权限。发布者可读取并评论自己已发布的定向任务，回复 WAITING_INFO 可按下述规则唤醒执行者；其他第三方 Agent 不可见。自身草稿和未发布即取消的任务仍返回 404 BOUNTY_NOT_FOUND。
+
+BountyComment 字段为 id（i64）、bounty_id、author_type（human/agent/system）、author_id（Agent ID 或 null）、author_name、kind（comment/question/reply/status）、body、created_at。服务绑定认证身份和作者名称，读取时优先使用 Agent 当前名称，作者记录缺失时回退保存名称。正文去除首尾空白，其余 Markdown、代码和 KaTeX 原样保存。详情返回 {"bounty":Bounty,"events":BountyEvent[],"comments":BountyComment[]}。
+
+有效持有者 request-info 保存 kind=question 评论、info_requested 历史，将任务转为 WAITING_INFO，保留 lease_id、lease_agent_id，清空 lease_expires_at 并停止计时。active 发布者与提问者不同时收到 task.info_requested。等待期间不发送临期提醒、不超时回收，不需要心跳；持有者补充评论只记录 comment，不会自行恢复。
+
+管理员或可见该任务的 active Agent 发布者回复时，发布者须不是当前执行者；服务保存 kind=reply，恢复 IN_PROGRESS，保留原令牌与持有者，刷新十五分钟期限并记录 resumed。原 active 执行者依次收到 comment.replied、task.resumed 两条独立事件。data 均为 {"bounty":Bounty,"comment":BountyComment,"comment_id":123,"body":"回复正文","lease_id":123,"lease_expires_at":"UTC时间或null"}，包含恢复后的任务和租约。先通过 Inbox 补拉或直接处理唤醒，使用原 lease_id 继续执行和续租；多个通道按 event_id 去重。恢复与双通知和评论在同一事务提交，失败整体回滚。
+
+普通评论生成 commented 历史，并向 active 执行者和 active 发布者发送 comment.added，排除评论者并对相同接收者去重。task.info_requested 和 comment.added 使用相同 data 结构。管理员草稿评论不通知 Agent。WAITING_INFO 允许管理员取消为 CANCELLED；原 active 执行者收到 task.cancelled，data 为 {"bounty":Bounty,"lease_id":123,"lease_agent_id":"原执行者ID或null"}，此后停止执行。
+
+Bounty 新增 active_duration_ms（i64，已结转执行毫秒数）、active_started_at（当前 IN_PROGRESS 段起点或 null）、comment_count（i64）。执行中有效耗时为累计值加当前段时间，WAITING_INFO 完全不计时；恢复保留累计值，complete 结转最后一段。abandon、超时回收或管理员释放为 OPEN 时归零，下次 claim 开始新的认领周期。
 
 停用凭证返回 403 AGENT_DISABLED，吊销凭证返回 401 AGENT_REVOKED，未知凭证返回 401 UNAUTHORIZED。Agent 凭证不能访问管理员项目、悬赏或名录接口。
 错误格式为 {"error":{"code":"ERROR_CODE","message":"错误说明"}}。注册还可能返回 401 INVITE_TOKEN_REQUIRED、401 INVITE_TOKEN_INVALID、409 AGENT_NAME_TAKEN 或 400 VALIDATION_ERROR。JSON 输入拒绝未知字段。
@@ -934,6 +1027,7 @@ export function createMemoryBountyClient(seed?: {
   const projects = new Map<string, BountyProject>();
   const bounties = new Map<string, BountyTask>();
   const eventsByBounty = new Map<string, BountyEvent[]>();
+  const commentsByBounty = new Map<string, BountyComment[]>();
   const inviteTokensById = new Map<string, StoredInviteToken>();
   const inviteTokensByRaw = new Map<string, StoredInviteToken>();
   const agentsById = new Map<string, StoredAgent>();
@@ -942,6 +1036,7 @@ export function createMemoryBountyClient(seed?: {
   const leaseWarnedIdByBounty = new Map<string, number>();
   let lanOpenRegistration = seed?.lan_open_registration ?? false;
   let nextEventId = 1;
+  let nextCommentId = 1;
   let nextAgentEventId = 1;
   let nextStreamConnectionId = 1;
   let lastTimestampMs = 0;
@@ -988,7 +1083,25 @@ export function createMemoryBountyClient(seed?: {
       snapshot.assignee_agent_name = null;
       snapshot.assignee_agent_tier = null;
     }
+    snapshot.active_duration_ms = snapshot.active_duration_ms ?? 0;
+    snapshot.active_started_at = snapshot.active_started_at ?? null;
+    snapshot.comment_count = (commentsByBounty.get(snapshot.id) ?? []).length;
     return snapshot;
+  }
+
+  function listHydratedComments(id: string): BountyComment[] {
+    return (commentsByBounty.get(id) ?? [])
+      .map(comment => {
+        const copy = clone(comment);
+        if (copy.author_type === 'agent' && copy.author_id) {
+          const agent = agentsById.get(copy.author_id);
+          if (agent) {
+            copy.author_name = agent.summary.name;
+          }
+        }
+        return copy;
+      })
+      .sort((a, b) => a.id - b.id);
   }
 
   for (const project of seed?.projects ?? []) {
@@ -1004,9 +1117,13 @@ export function createMemoryBountyClient(seed?: {
       created_by_agent_name: bounty.created_by_agent_name ?? null,
       lease_agent_name: bounty.lease_agent_name ?? null,
       lease_agent_tier: bounty.lease_agent_tier ?? null,
+      active_duration_ms: bounty.active_duration_ms ?? 0,
+      active_started_at: bounty.active_started_at ?? null,
+      comment_count: bounty.comment_count ?? 0,
       completion_cost: bounty.completion_cost ?? null,
     });
     eventsByBounty.set(bounty.id, []);
+    commentsByBounty.set(bounty.id, []);
   }
 
   function requireProject(id: string): BountyProject {
@@ -1092,11 +1209,13 @@ export function createMemoryBountyClient(seed?: {
   function computeActiveLeaseCount(agentId: string, nowMs = Date.now()): number {
     let count = 0;
     for (const bounty of bounties.values()) {
+      if (bounty.lease_agent_id !== agentId) continue;
       if (
-        bounty.lease_agent_id === agentId &&
-        ACTIVE_LEASE_STATUSES.has(bounty.status) &&
-        bounty.lease_expires_at !== null &&
-        Date.parse(bounty.lease_expires_at) > nowMs
+        (bounty.status === 'IN_PROGRESS' &&
+          bounty.lease_expires_at !== null &&
+          Date.parse(bounty.lease_expires_at) > nowMs) ||
+        bounty.status === 'WAITING_INFO' ||
+        bounty.status === 'PENDING_ARBITRATION'
       ) {
         count += 1;
       }
@@ -1285,12 +1404,126 @@ export function createMemoryBountyClient(seed?: {
     return bounty;
   }
 
+  function settleActive(bounty: BountyTask, timestamp: string): number {
+    let elapsed = 0;
+    if (bounty.status === 'IN_PROGRESS' && bounty.active_started_at !== null) {
+      const startMs = Date.parse(bounty.active_started_at);
+      const endMs = Date.parse(timestamp);
+      if (!Number.isNaN(startMs) && !Number.isNaN(endMs)) {
+        elapsed = Math.max(0, endMs - startMs);
+      }
+    }
+    const total = (bounty.active_duration_ms ?? 0) + elapsed;
+    const stored = bounties.get(bounty.id);
+    if (stored) {
+      stored.active_duration_ms = total;
+      stored.active_started_at = null;
+    }
+    return total;
+  }
+
+  function commentPayload(bounty: BountyTask, comment: BountyComment): Record<string, unknown> {
+    return {
+      bounty: clone(bounty),
+      comment: clone(comment),
+      comment_id: comment.id,
+      body: comment.body,
+      lease_id: bounty.lease_id,
+      lease_expires_at: bounty.lease_expires_at,
+    };
+  }
+
+  function addComment(
+    bounty: BountyTask,
+    authorId: string | null,
+    authorName: string,
+    body: string,
+  ): BountyCommentMutationResult {
+    if (bounty.status === 'CANCELLED') {
+      throw new ServiceApiError('INVALID_TRANSITION', 409, '当前状态不允许此操作');
+    }
+    const trimmedBody = body.trim();
+    if (!trimmedBody) {
+      throw new ServiceApiError('VALIDATION_ERROR', 400, '评论或问题正文不能为空');
+    }
+    const resume =
+      bounty.status === 'WAITING_INFO' &&
+      (authorId === null ||
+        (authorId === bounty.created_by_agent_id && authorId !== bounty.lease_agent_id));
+    const timestamp = nowIso();
+    const kind: BountyComment['kind'] = resume ? 'reply' : 'comment';
+    const comment: BountyComment = {
+      id: nextCommentId++,
+      bounty_id: bounty.id,
+      author_type: authorId !== null ? 'agent' : 'human',
+      author_id: authorId,
+      author_name: authorName,
+      kind,
+      body: trimmedBody,
+      created_at: timestamp,
+    };
+    const existingComments = commentsByBounty.get(bounty.id) ?? [];
+    existingComments.push(comment);
+    commentsByBounty.set(bounty.id, existingComments);
+
+    const updated: BountyTask = resume
+      ? {
+          ...clone(bounty),
+          status: 'IN_PROGRESS',
+          lease_expires_at: deadlineIso(Date.parse(timestamp)),
+          active_started_at: timestamp,
+          updated_at: timestamp,
+        }
+      : {
+          ...clone(bounty),
+          updated_at: timestamp,
+        };
+    bounties.set(bounty.id, updated);
+    if (resume) {
+      leaseWarnedIdByBounty.set(bounty.id, 0);
+    }
+    const hydrated = hydrateBounty(updated);
+    const actor = authorId !== null ? `agent:${authorId}` : 'human';
+    const detail = resume
+      ? {
+          lease_id: hydrated.lease_id,
+          lease_agent_id: hydrated.lease_agent_id,
+          comment_id: comment.id,
+          lease_expires_at: hydrated.lease_expires_at,
+        }
+      : { comment_id: comment.id };
+    recordEvent(hydrated, resume ? 'resumed' : 'commented', actor, bounty.status, detail);
+    const data = commentPayload(hydrated, comment);
+    if (resume) {
+      notifyActiveAgent(hydrated.lease_agent_id, hydrated, 'comment.replied', data);
+      notifyActiveAgent(hydrated.lease_agent_id, hydrated, 'task.resumed', data);
+    } else if (hydrated.status !== 'DRAFT' && hydrated.published_at !== null) {
+      const targets = new Set<string>();
+      for (const candidate of [hydrated.lease_agent_id, hydrated.created_by_agent_id]) {
+        if (candidate !== null && candidate !== authorId) {
+          targets.add(candidate);
+        }
+      }
+      for (const target of targets) {
+        notifyActiveAgent(target, hydrated, 'comment.added', data);
+      }
+    }
+    const hydratedComment =
+      listHydratedComments(bounty.id).find(item => item.id === comment.id) ?? clone(comment);
+    return {
+      bounty: hydrated,
+      comment: hydratedComment,
+    };
+  }
+
   function reopenFromLease(bounty: BountyTask, timestamp: string): BountyTask {
     const fallback =
       bounty.assignee_mode === 'specific' && bounty.assignee_agent_id === bounty.lease_agent_id;
     const updated: BountyTask = {
       ...clone(bounty),
       status: 'OPEN',
+      active_duration_ms: 0,
+      active_started_at: null,
       lease_agent_id: null,
       lease_agent_name: null,
       lease_agent_tier: null,
@@ -1333,7 +1566,11 @@ export function createMemoryBountyClient(seed?: {
 
   function isBountyVisibleToAgent(agent: AgentSummary, bounty: BountyTask): boolean {
     if (bounty.status === 'DRAFT' || bounty.published_at === null) return false;
-    if (bounty.assignee_agent_id === agent.id || bounty.lease_agent_id === agent.id) {
+    if (
+      bounty.created_by_agent_id === agent.id ||
+      bounty.assignee_agent_id === agent.id ||
+      bounty.lease_agent_id === agent.id
+    ) {
       return true;
     }
     if (bounty.assignee_mode === 'specific') {
@@ -1464,7 +1701,25 @@ export function createMemoryBountyClient(seed?: {
       return {
         bounty: hydrateBounty(bounty),
         events: clone(events),
+        comments: listHydratedComments(id),
       };
+    },
+
+    async listBountyComments(id: string): Promise<BountyComment[]> {
+      requireBounty(id);
+      return listHydratedComments(id);
+    },
+
+    async createBountyComment(
+      id: string,
+      input: CreateBountyCommentInput,
+    ): Promise<BountyCommentMutationResult> {
+      const record = validateJsonObjectKeys(input, CREATE_COMMENT_ALLOWED_KEYS);
+      if (typeof record.body !== 'string') {
+        throw new ServiceApiError('VALIDATION_ERROR', 400, 'body 必须为字符串');
+      }
+      const existing = requireBounty(id);
+      return addComment(existing, null, 'human', record.body);
     },
 
     async createBounty(input: CreateBountyInput): Promise<BountyTask> {
@@ -1505,6 +1760,9 @@ export function createMemoryBountyClient(seed?: {
         lease_agent_name: null,
         lease_agent_tier: null,
         lease_expires_at: null,
+        active_duration_ms: 0,
+        active_started_at: null,
+        comment_count: 0,
         rejection_count: 0,
         completion_note: null,
         completion_cost: null,
@@ -1517,6 +1775,7 @@ export function createMemoryBountyClient(seed?: {
       };
       bounties.set(bounty.id, bounty);
       eventsByBounty.set(bounty.id, []);
+      commentsByBounty.set(bounty.id, []);
       const hydrated = hydrateBounty(bounty);
       recordEvent(hydrated, 'created', hydrated.created_by, null);
       if (hydrated.status === 'OPEN') {
@@ -1626,12 +1885,22 @@ export function createMemoryBountyClient(seed?: {
       const updated: BountyTask = {
         ...clone(existing),
         status: 'CANCELLED',
+        active_started_at: null,
+        lease_expires_at: null,
         cancelled_at: timestamp,
         assignment_expires_at: null,
         updated_at: timestamp,
       };
       bounties.set(id, updated);
+      leaseWarnedIdByBounty.set(id, 0);
       const hydrated = hydrateBounty(updated);
+      if (existing.status === 'WAITING_INFO') {
+        notifyActiveAgent(existing.lease_agent_id, hydrated, 'task.cancelled', {
+          bounty: hydrated,
+          lease_id: existing.lease_id,
+          lease_agent_id: existing.lease_agent_id,
+        });
+      }
       recordEvent(hydrated, 'cancelled', 'human', existing.status);
       return hydrated;
     },
@@ -1647,9 +1916,12 @@ export function createMemoryBountyClient(seed?: {
       }
       const hydratedOld = hydrateBounty(existing);
       const timestamp = nowIso();
+      const activeDurationMs = settleActive(existing, timestamp);
       const updated: BountyTask = {
         ...clone(existing),
         status: 'OPEN',
+        active_duration_ms: 0,
+        active_started_at: null,
         lease_agent_id: null,
         lease_agent_name: null,
         lease_agent_tier: null,
@@ -1664,6 +1936,7 @@ export function createMemoryBountyClient(seed?: {
         lease_id: hydratedOld.lease_id,
         lease_agent_id: hydratedOld.lease_agent_id,
         lease_agent_name: hydratedOld.lease_agent_name,
+        active_duration_ms: activeDurationMs,
       };
       recordEvent(hydrated, 'lease_released', 'human', existing.status, detail);
       notifyActiveAgent(hydratedOld.lease_agent_id, hydrated, 'lease.released', detail);
@@ -1686,6 +1959,8 @@ export function createMemoryBountyClient(seed?: {
       const updated: BountyTask = {
         ...clone(existing),
         status: 'IN_PROGRESS',
+        active_duration_ms: 0,
+        active_started_at: timestamp,
         lease_id: existing.lease_id + 1,
         lease_agent_id: agentId,
         lease_expires_at: deadlineIso(),
@@ -2095,6 +2370,9 @@ export function createMemoryBountyClient(seed?: {
         lease_agent_name: null,
         lease_agent_tier: null,
         lease_expires_at: null,
+        active_duration_ms: 0,
+        active_started_at: null,
+        comment_count: 0,
         rejection_count: 0,
         completion_note: null,
         completion_cost: null,
@@ -2107,6 +2385,7 @@ export function createMemoryBountyClient(seed?: {
       };
       bounties.set(bounty.id, bounty);
       eventsByBounty.set(bounty.id, []);
+      commentsByBounty.set(bounty.id, []);
       const hydrated = hydrateBounty(bounty);
       recordEvent(hydrated, 'created', actor, null, {
         publisher_agent_id: entry.summary.id,
@@ -2140,7 +2419,34 @@ export function createMemoryBountyClient(seed?: {
       return {
         bounty: hydrateBounty(bounty),
         events: clone(events),
+        comments: listHydratedComments(id),
       };
+    },
+
+    async agentListComments(apiKey: string, id: string): Promise<BountyComment[]> {
+      const entry = authenticateAgent(apiKey);
+      const bounty = requireBounty(id);
+      if (!isBountyVisibleToAgent(entry.summary, bounty)) {
+        throw new ServiceApiError('BOUNTY_NOT_FOUND', 404, '悬赏不存在');
+      }
+      return listHydratedComments(id);
+    },
+
+    async agentCreateComment(
+      apiKey: string,
+      id: string,
+      input: CreateBountyCommentInput,
+    ): Promise<BountyCommentMutationResult> {
+      const entry = authenticateAgent(apiKey);
+      const record = validateJsonObjectKeys(input, CREATE_COMMENT_ALLOWED_KEYS);
+      if (typeof record.body !== 'string') {
+        throw new ServiceApiError('VALIDATION_ERROR', 400, 'body 必须为字符串');
+      }
+      const bounty = requireBounty(id);
+      if (!isBountyVisibleToAgent(entry.summary, bounty)) {
+        throw new ServiceApiError('BOUNTY_NOT_FOUND', 404, '悬赏不存在');
+      }
+      return addComment(bounty, entry.summary.id, entry.summary.name, record.body);
     },
 
     async agentClaimBounty(apiKey: string, id: string): Promise<BountyTask> {
@@ -2168,6 +2474,8 @@ export function createMemoryBountyClient(seed?: {
       const updated: BountyTask = {
         ...clone(existing),
         status: 'IN_PROGRESS',
+        active_duration_ms: 0,
+        active_started_at: timestamp,
         lease_id: existing.lease_id + 1,
         lease_agent_id: entry.summary.id,
         lease_expires_at: deadlineIso(),
@@ -2255,6 +2563,67 @@ export function createMemoryBountyClient(seed?: {
       return hydrateBounty(updated);
     },
 
+    async agentRequestInfo(
+      apiKey: string,
+      id: string,
+      input: RequestInfoInput,
+    ): Promise<BountyTask> {
+      const entry = authenticateAgent(apiKey);
+      const record = validateJsonObjectKeys(input, REQUEST_INFO_ALLOWED_KEYS);
+      if (typeof record.lease_id !== 'number' || !Number.isSafeInteger(record.lease_id)) {
+        throw new ServiceApiError('VALIDATION_ERROR', 400, 'lease_id 必须为整数');
+      }
+      if (typeof record.question !== 'string') {
+        throw new ServiceApiError('VALIDATION_ERROR', 400, 'question 必须为字符串');
+      }
+      const existing = requireFencedBounty(id, entry.summary.id, record.lease_id);
+      const body = record.question.trim();
+      if (!body) {
+        throw new ServiceApiError('VALIDATION_ERROR', 400, '评论或问题正文不能为空');
+      }
+      const timestamp = nowIso();
+      const activeDurationMs = settleActive(existing, timestamp);
+      const updated: BountyTask = {
+        ...clone(existing),
+        status: 'WAITING_INFO',
+        active_duration_ms: activeDurationMs,
+        active_started_at: null,
+        lease_expires_at: null,
+        updated_at: timestamp,
+      };
+      bounties.set(id, updated);
+      leaseWarnedIdByBounty.set(id, 0);
+      const comment: BountyComment = {
+        id: nextCommentId++,
+        bounty_id: id,
+        author_type: 'agent',
+        author_id: entry.summary.id,
+        author_name: entry.summary.name,
+        kind: 'question',
+        body,
+        created_at: timestamp,
+      };
+      const existingComments = commentsByBounty.get(id) ?? [];
+      existingComments.push(comment);
+      commentsByBounty.set(id, existingComments);
+
+      const hydrated = hydrateBounty(updated);
+      recordEvent(hydrated, 'info_requested', `agent:${entry.summary.id}`, existing.status, {
+        lease_id: hydrated.lease_id,
+        comment_id: comment.id,
+        question: body,
+      });
+      if (hydrated.created_by_agent_id !== entry.summary.id) {
+        notifyActiveAgent(
+          hydrated.created_by_agent_id,
+          hydrated,
+          'task.info_requested',
+          commentPayload(hydrated, comment),
+        );
+      }
+      return hydrated;
+    },
+
     async agentAbandonBounty(
       apiKey: string,
       id: string,
@@ -2274,6 +2643,7 @@ export function createMemoryBountyClient(seed?: {
       }
       const existing = requireFencedBounty(id, entry.summary.id, record.lease_id);
       const timestamp = nowIso();
+      const activeDurationMs = settleActive(existing, timestamp);
       const updated = reopenFromLease(existing, timestamp);
       entry.summary.abandon_count += 1;
       entry.summary.updated_at = timestamp;
@@ -2281,6 +2651,7 @@ export function createMemoryBountyClient(seed?: {
         lease_id: existing.lease_id,
         lease_agent_id: entry.summary.id,
         reason,
+        active_duration_ms: activeDurationMs,
       });
       dispatchBountyEvents(updated, false);
       return updated;
@@ -2322,9 +2693,12 @@ export function createMemoryBountyClient(seed?: {
         typeof record.completion_note === 'string' ? record.completion_note.trim() : '';
       const completionNote = rawNote.length > 0 ? rawNote : null;
       const timestamp = nowIso();
+      const activeDurationMs = settleActive(existing, timestamp);
       const updated: BountyTask = {
         ...clone(existing),
         status: 'COMPLETED',
+        active_duration_ms: activeDurationMs,
+        active_started_at: null,
         completion_note: completionNote,
         completion_cost: rawCost,
         completed_at: timestamp,
@@ -2401,6 +2775,7 @@ export function createMemoryBountyClient(seed?: {
           Date.parse(bounty.lease_expires_at) <= nowMs
         ) {
           const oldLease = hydrateBounty(bounty);
+          const activeDurationMs = settleActive(bounty, timestamp);
           const updated = reopenFromLease(bounty, timestamp);
           if (oldLease.lease_agent_id) {
             const holder = agentsById.get(oldLease.lease_agent_id);
@@ -2409,7 +2784,10 @@ export function createMemoryBountyClient(seed?: {
               holder.summary.updated_at = timestamp;
             }
           }
-          const detail = leaseDetail(oldLease);
+          const detail = {
+            ...leaseDetail(oldLease),
+            active_duration_ms: activeDurationMs,
+          };
           recordEvent(updated, 'lease_expired', 'system', bounty.status, detail);
           notifyActiveAgent(oldLease.lease_agent_id, updated, 'lease.expired', detail);
           dispatchBountyEvents(updated, false);

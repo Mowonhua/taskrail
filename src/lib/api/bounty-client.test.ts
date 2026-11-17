@@ -14,6 +14,8 @@ import {
   registerAgent,
 } from './bounty-client';
 import {
+  computeActiveDurationMs,
+  formatActiveDuration,
   formatAgentChannelStatus,
   formatAgentDraftPolicy,
   formatAgentStatus,
@@ -22,6 +24,8 @@ import {
   formatAssigneeConstraint,
   formatBountyExecutor,
   formatBountyPublisher,
+  formatCommentAuthorRole,
+  formatCommentKind,
   formatCompletionCost,
   formatEventActor,
   formatEventLabel,
@@ -415,6 +419,9 @@ describe('createMemoryBountyClient', () => {
       lease_agent_name: null,
       lease_agent_tier: null,
       lease_expires_at: null,
+      active_duration_ms: 0,
+      active_started_at: null,
+      comment_count: 0,
       rejection_count: 0,
       completion_note: null,
       completion_cost: null,
@@ -1322,6 +1329,9 @@ describe('Issue 05 Agent 自动发单与项目级草稿审核策略', () => {
           lease_id: 0,
           lease_agent_id: null,
           lease_expires_at: null,
+          active_duration_ms: 0,
+          active_started_at: null,
+          comment_count: 0,
           rejection_count: 0,
           completion_note: null,
           published_at: null,
@@ -2113,6 +2123,604 @@ describe('Issue 06: 租约令牌、并发抢单、指派婉拒、超时回收与
       formatServiceError(new ServiceApiError('STALE_LEASE', 409, 'raw')),
     ]) {
       expect(sample).not.toContain('·');
+    }
+    setLocalePreference('zh-CN');
+  });
+});
+
+describe('Issue 07 评论区、提问挂起与回复唤醒', () => {
+  it('HttpBountyClient 与 HttpAgentClient 透传空白正文和有限整数令牌并保持与内存客户端错误优先级一致', async () => {
+    const calls: Array<{ url: string; method?: string; headers: Record<string, string>; body?: string }> = [];
+    const sampleComment = {
+      id: 1,
+      bounty_id: 'b-7',
+      author_type: 'agent',
+      author_id: 'ag-exec',
+      author_name: 'worker',
+      kind: 'question',
+      body: '请确认上界 $O(n \\log n)$ 约束。',
+      created_at: '2026-11-17T12:01:00.000Z',
+    };
+    const sampleBounty = {
+      id: 'b-7',
+      project_id: 'p1',
+      title: 'Issue 07 Task',
+      description: '',
+      acceptance_criteria: '',
+      difficulty: 'B',
+      assignee_mode: 'any',
+      assignee_min_tier: null,
+      assignee_agent_id: null,
+      require_arbitration: false,
+      status: 'WAITING_INFO',
+      created_by: 'human',
+      created_by_agent_id: null,
+      created_by_agent_name: null,
+      lease_id: 1,
+      lease_agent_id: 'ag-exec',
+      lease_agent_name: 'worker',
+      lease_agent_tier: 'A',
+      lease_expires_at: null,
+      active_duration_ms: 12000,
+      active_started_at: null,
+      comment_count: 1,
+      rejection_count: 0,
+      completion_note: null,
+      completion_cost: null,
+      published_at: '2026-11-17T12:00:00.000Z',
+      withdrawn_at: null,
+      cancelled_at: null,
+      completed_at: null,
+      created_at: '2026-11-17T12:00:00.000Z',
+      updated_at: '2026-11-17T12:01:00.000Z',
+    };
+
+    const fetchMock: typeof fetch = async (input, init) => {
+      const url = String(input);
+      const bodyStr = typeof init?.body === 'string' ? init.body : undefined;
+      calls.push({
+        url,
+        method: init?.method,
+        headers: (init?.headers ?? {}) as Record<string, string>,
+        body: bodyStr,
+      });
+      if (url.includes('/bounties/b-cancelled/comments') && init?.method === 'POST') {
+        return jsonResponse(
+          { error: { code: 'INVALID_TRANSITION', message: '当前状态不允许此操作' } },
+          409,
+        );
+      }
+      if (url.includes('/request-info')) {
+        const parsed = bodyStr ? (JSON.parse(bodyStr) as { lease_id?: number }) : {};
+        if (parsed.lease_id !== 1) {
+          return jsonResponse(
+            { error: { code: 'STALE_LEASE', message: '租约令牌已失效或租约已到期' } },
+            409,
+          );
+        }
+        return jsonResponse(sampleBounty);
+      }
+      if (url.endsWith('/comments') && init?.method === 'POST') {
+        return jsonResponse(
+          { bounty: { ...sampleBounty, status: 'IN_PROGRESS' }, comment: sampleComment },
+          201,
+        );
+      }
+      return jsonResponse([sampleComment]);
+    };
+
+    const admin = new HttpBountyClient('http://127.0.0.1:8420/', 'admin-tok', fetchMock);
+    const agent = new HttpAgentClient('http://127.0.0.1:8420/', 'tr_ag_worker', fetchMock);
+
+    // 仅拦截会被 JSON.stringify 破坏为 null 的非有限数字 lease_id（不触发网络）
+    for (const invalidLease of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+      await expect(
+        agent.requestInfo('b-7', { lease_id: invalidLease, question: 'valid?' }),
+      ).rejects.toMatchObject({
+        code: 'VALIDATION_ERROR',
+        status: 400,
+      });
+    }
+    expect(calls).toHaveLength(0);
+
+    // 与 MemoryBountyClient 一致：错误 lease_id + 空白 question 必须到达服务端并透传 409 STALE_LEASE
+    const mem = createMemoryBountyClient({ lan_open_registration: true });
+    const proj = await mem.createProject({ name: 'Parity Project' });
+    const worker = await mem.registerAgent({ name: 'parity-worker' });
+    const activeTask = await mem.createBounty({
+      project_id: proj.id,
+      title: 'Active Task',
+      difficulty: 'C',
+      assignee_mode: 'any',
+      status: 'OPEN',
+    });
+    const claimed = await mem.agentClaimBounty(worker.api_key, activeTask.id);
+    const cancelledTask = await mem.createBounty({
+      project_id: proj.id,
+      title: 'Cancelled Task',
+      difficulty: 'C',
+      assignee_mode: 'any',
+      status: 'OPEN',
+    });
+    await mem.cancelBounty(cancelledTask.id);
+
+    for (const staleLeaseId of [0, claimed.lease_id + 99]) {
+      await expect(
+        agent.requestInfo('b-7', { lease_id: staleLeaseId, question: '   ' }),
+      ).rejects.toMatchObject({
+        code: 'STALE_LEASE',
+        status: 409,
+      });
+      await expect(
+        mem.agentRequestInfo(worker.api_key, activeTask.id, {
+          lease_id: staleLeaseId,
+          question: '   ',
+        }),
+      ).rejects.toMatchObject({
+        code: 'STALE_LEASE',
+        status: 409,
+      });
+    }
+
+    // 与 MemoryBountyClient 一致：CANCELLED 任务 + 空白 body 必须到达服务端并透传 409 INVALID_TRANSITION
+    await expect(
+      admin.createBountyComment('b-cancelled', { body: '   ' }),
+    ).rejects.toMatchObject({
+      code: 'INVALID_TRANSITION',
+      status: 409,
+    });
+    await expect(
+      agent.createComment('b-cancelled', { body: '\n\t' }),
+    ).rejects.toMatchObject({
+      code: 'INVALID_TRANSITION',
+      status: 409,
+    });
+    await expect(
+      mem.createBountyComment(cancelledTask.id, { body: '   ' }),
+    ).rejects.toMatchObject({
+      code: 'INVALID_TRANSITION',
+      status: 409,
+    });
+    await expect(
+      mem.agentCreateComment(worker.api_key, cancelledTask.id, { body: '\n\t' }),
+    ).rejects.toMatchObject({
+      code: 'INVALID_TRANSITION',
+      status: 409,
+    });
+
+    const errorCallsCount = calls.length;
+    expect(errorCallsCount).toBe(4);
+    expect(JSON.parse(calls[0].body!)).toEqual({ lease_id: 0, question: '   ' });
+    expect(JSON.parse(calls[1].body!)).toEqual({ lease_id: 100, question: '   ' });
+    expect(JSON.parse(calls[2].body!)).toEqual({ body: '   ' });
+    expect(JSON.parse(calls[3].body!)).toEqual({ body: '\n\t' });
+
+    const adminList = await admin.listBountyComments('b-7');
+    expect(adminList).toHaveLength(1);
+    const adminCreated = await admin.createBountyComment('b-7', { body: '已补充约束说明' });
+    expect(adminCreated.bounty.status).toBe('IN_PROGRESS');
+
+    const agentList = await agent.listComments('b-7');
+    expect(agentList).toHaveLength(1);
+    await agent.createComment('b-7', { body: '收到，继续执行' });
+    const reqInfoResult = await agent.requestInfo('b-7', { lease_id: 1, question: '确认输入范围？' });
+    expect(reqInfoResult.status).toBe('WAITING_INFO');
+
+    expect(calls.slice(errorCallsCount).map(c => `${c.method} ${c.url}`)).toEqual([
+      'GET http://127.0.0.1:8420/api/v1/bounties/b-7/comments',
+      'POST http://127.0.0.1:8420/api/v1/bounties/b-7/comments',
+      'GET http://127.0.0.1:8420/api/v1/agent/bounties/b-7/comments',
+      'POST http://127.0.0.1:8420/api/v1/agent/bounties/b-7/comments',
+      'POST http://127.0.0.1:8420/api/v1/agent/bounties/b-7/request-info',
+    ]);
+  });
+
+  it('MemoryBountyClient 允许定向任务发布者查看与回复唤醒，且冻结租约计入 active_lease_count 保持名录 busy', async () => {
+    const client = createMemoryBountyClient({ lan_open_registration: true });
+    const openProj = await client.createProject({ name: 'Specific Open', agent_draft_policy: 'open' });
+    const draftProj = await client.createProject({ name: 'Specific Draft', agent_draft_policy: 'draft' });
+
+    // 发布者 A 不订阅任何项目，仍应对自己发布的已公开定向任务具备可见性与回复唤醒权
+    const agentA = await client.registerAgent({
+      name: 'publisher-A',
+      subscribe_all_projects: false,
+      project_ids: [],
+    });
+    const agentB = await client.registerAgent({ name: 'assignee-B' });
+    const agentC = await client.registerAgent({ name: 'outsider-C' });
+
+    const specific = await client.agentCreateBounty(agentA.api_key, {
+      project_id: openProj.id,
+      title: 'A 定向指派给 B 的任务',
+      difficulty: 'B',
+      assignee_mode: 'specific',
+      assignee_agent_id: agentB.agent.id,
+    });
+
+    // 第三方 C 对定向任务仍不可见
+    expect((await client.agentListBounties(agentC.api_key)).some(item => item.id === specific.id)).toBe(false);
+    await expect(client.agentGetBountyDetail(agentC.api_key, specific.id)).rejects.toMatchObject({
+      code: 'BOUNTY_NOT_FOUND',
+      status: 404,
+    });
+    await expect(client.agentListComments(agentC.api_key, specific.id)).rejects.toMatchObject({
+      code: 'BOUNTY_NOT_FOUND',
+      status: 404,
+    });
+    await expect(
+      client.agentCreateComment(agentC.api_key, specific.id, { body: '越权评论' }),
+    ).rejects.toMatchObject({
+      code: 'BOUNTY_NOT_FOUND',
+      status: 404,
+    });
+
+    // B 接单后提问挂起，租约冻结但名录中仍计为 busy (active_lease_count = 1)
+    const claimed = await client.agentClaimBounty(agentB.api_key, specific.id);
+    expect((await client.agentGetMe(agentB.api_key)).active_lease_count).toBe(1);
+
+    const waiting = await client.agentRequestInfo(agentB.api_key, specific.id, {
+      lease_id: claimed.lease_id,
+      question: '请 A 确认定向任务的接口字段？',
+    });
+    expect(waiting.status).toBe('WAITING_INFO');
+    expect(waiting.lease_expires_at).toBeNull();
+    expect((await client.agentGetMe(agentB.api_key)).active_lease_count).toBe(1);
+
+    const busyAgents = await client.listAgents({ activity: 'busy' });
+    const idleAgents = await client.listAgents({ activity: 'idle' });
+    expect(busyAgents.map(item => item.id)).toEqual([agentB.agent.id]);
+    expect(busyAgents[0].active_lease_count).toBe(1);
+    expect(idleAgents.some(item => item.id === agentB.agent.id)).toBe(false);
+
+    // 发布者 A 在内存端可查看定向任务详情、读取提问并回复唤醒 B
+    expect((await client.agentListBounties(agentA.api_key)).some(item => item.id === specific.id)).toBe(true);
+    const detailForA = await client.agentGetBountyDetail(agentA.api_key, specific.id);
+    expect(detailForA.comments).toHaveLength(1);
+    const commentsForA = await client.agentListComments(agentA.api_key, specific.id);
+    expect(commentsForA[0].body).toBe('请 A 确认定向任务的接口字段？');
+
+    const bEventsBeforeReply = (await client.agentListEvents(agentB.api_key)).events.length;
+    const replyRes = await client.agentCreateComment(agentA.api_key, specific.id, {
+      body: '字段固定为 snake_case',
+    });
+    expect(replyRes.comment.kind).toBe('reply');
+    expect(replyRes.bounty.status).toBe('IN_PROGRESS');
+    expect(replyRes.bounty.lease_expires_at).not.toBeNull();
+
+    const bEventsAfterReply = (await client.agentListEvents(agentB.api_key)).events.slice(
+      bEventsBeforeReply,
+    );
+    expect(bEventsAfterReply.map(e => e.event_type)).toEqual(['comment.replied', 'task.resumed']);
+
+    // DRAFT（含 A 自身创建的草稿）与未发布即取消的草稿继续对 A 严格隔离
+    const ownDraft = await client.agentCreateBounty(agentA.api_key, {
+      project_id: draftProj.id,
+      title: 'A 自身的定向草稿',
+      difficulty: 'C',
+      assignee_mode: 'specific',
+      assignee_agent_id: agentB.agent.id,
+    });
+    expect(ownDraft.status).toBe('DRAFT');
+    await expect(client.agentGetBountyDetail(agentA.api_key, ownDraft.id)).rejects.toMatchObject({
+      code: 'BOUNTY_NOT_FOUND',
+      status: 404,
+    });
+    await expect(client.agentListComments(agentA.api_key, ownDraft.id)).rejects.toMatchObject({
+      code: 'BOUNTY_NOT_FOUND',
+      status: 404,
+    });
+    await client.cancelBounty(ownDraft.id);
+    await expect(client.agentGetBountyDetail(agentA.api_key, ownDraft.id)).rejects.toMatchObject({
+      code: 'BOUNTY_NOT_FOUND',
+      status: 404,
+    });
+    const skill = await client.getSkillMarkdown();
+    expect(skill.content).toContain('发布者可读取自己定向给其他 Agent 的任务');
+    expect(skill.content).toContain('发布者可读取并评论自己已发布的定向任务');
+    expect(skill.content).not.toContain('指定其他 Agent 的任务不可见');
+
+    // PENDING_ARBITRATION 且 lease_expires_at=null 同样计入 active_lease_count 并保持 busy
+    const fixedAgentId = '00000000-0000-4000-8000-0000000000a1';
+    const arbSeed = createMemoryBountyClient({
+      lan_open_registration: true,
+      projects: [
+        {
+          id: 'p-arb',
+          name: 'Arb Project',
+          icon: null,
+          description: '',
+          workspace_path: '',
+          default_acceptance_criteria: '',
+          agent_draft_policy: 'open',
+          arbitrator_chain: [],
+          archived: false,
+          created_at: '2026-11-17T00:00:00.000Z',
+          updated_at: '2026-11-17T00:00:00.000Z',
+        },
+      ],
+      bounties: [
+        {
+          id: 'b-arb',
+          project_id: 'p-arb',
+          title: '待仲裁冻结租约',
+          description: '',
+          acceptance_criteria: '',
+          difficulty: 'A',
+          assignee_mode: 'any',
+          assignee_min_tier: null,
+          assignee_agent_id: null,
+          assignee_agent_name: null,
+          assignee_agent_tier: null,
+          assignment_expires_at: null,
+          require_arbitration: true,
+          status: 'PENDING_ARBITRATION',
+          created_by: 'human',
+          created_by_agent_id: null,
+          created_by_agent_name: null,
+          lease_id: 1,
+          lease_agent_id: fixedAgentId,
+          lease_agent_name: null,
+          lease_agent_tier: null,
+          lease_expires_at: null,
+          active_duration_ms: 5000,
+          active_started_at: null,
+          comment_count: 0,
+          rejection_count: 0,
+          completion_note: null,
+          completion_cost: null,
+          published_at: '2026-11-17T00:00:00.000Z',
+          withdrawn_at: null,
+          cancelled_at: null,
+          completed_at: null,
+          created_at: '2026-11-17T00:00:00.000Z',
+          updated_at: '2026-11-17T00:01:00.000Z',
+        },
+      ],
+    });
+    const uuidSpy = vi.spyOn(crypto, 'randomUUID').mockReturnValueOnce(fixedAgentId);
+    try {
+      const arbWorker = await arbSeed.registerAgent({ name: 'arb-worker' });
+      expect(arbWorker.agent.active_lease_count).toBe(1);
+      expect((await arbSeed.listAgents({ activity: 'busy' })).map(item => item.id)).toEqual([
+        fixedAgentId,
+      ]);
+      expect(await arbSeed.listAgents({ activity: 'idle' })).toHaveLength(0);
+    } finally {
+      uuidSpy.mockRestore();
+    }
+  });
+
+  it('MemoryBountyClient 严格遵循 fencing、租约冻结、T_active 分段剔除等待、唤醒推送与取消/隔离规则', async () => {
+    vi.useFakeTimers({
+      toFake: ['Date', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'],
+    });
+    try {
+      const startMs = Date.parse('2026-11-17T10:00:00.000Z');
+      vi.setSystemTime(startMs);
+
+      const client = createMemoryBountyClient({ lan_open_registration: true });
+      const project = await client.createProject({ name: 'Issue 07 Project', agent_draft_policy: 'open' });
+      const publisher = await client.registerAgent({ name: 'publisher-bot' });
+      const executor = await client.registerAgent({ name: 'executor-bot' });
+      const outsider = await client.registerAgent({ name: 'outsider-bot' });
+
+      // 发布者发起公开任务
+      const bounty = await client.agentCreateBounty(publisher.api_key, {
+        project_id: project.id,
+        title: '分段计时与挂起任务',
+        difficulty: 'B',
+        assignee_mode: 'any',
+      });
+      expect(bounty.active_duration_ms).toBe(0);
+      expect(bounty.active_started_at).toBeNull();
+      expect(bounty.comment_count).toBe(0);
+
+      // 草稿评论对 Agent 不可见，且不向 Agent 推送通知
+      const draftProj = await client.createProject({ name: 'Draft Only', agent_draft_policy: 'draft' });
+      const draftTask = await client.agentCreateBounty(publisher.api_key, {
+        project_id: draftProj.id,
+        title: 'Private Draft',
+        difficulty: 'C',
+        assignee_mode: 'any',
+      });
+      await client.createBountyComment(draftTask.id, { body: '管理员内部备注' });
+      await expect(client.agentListComments(publisher.api_key, draftTask.id)).rejects.toMatchObject({
+        code: 'BOUNTY_NOT_FOUND',
+        status: 404,
+      });
+      expect(
+        (await client.agentListEvents(publisher.api_key)).events.some(
+          e => e.event_type === 'comment.added',
+        ),
+      ).toBe(false);
+
+      // 接单进入 IN_PROGRESS（推进 100ms 使单调时钟基线对齐当前 FakeClock）
+      vi.advanceTimersByTime(100);
+      const claimed = await client.agentClaimBounty(executor.api_key, bounty.id);
+      expect(claimed.status).toBe('IN_PROGRESS');
+      expect(claimed.active_duration_ms).toBe(0);
+      expect(claimed.active_started_at).not.toBeNull();
+
+      // request-info fencing 顺序校验先于正文校验
+      await expect(
+        client.agentRequestInfo(executor.api_key, bounty.id, {
+          lease_id: claimed.lease_id + 1,
+          question: '   ',
+        }),
+      ).rejects.toMatchObject({ code: 'STALE_LEASE', status: 409 });
+      await expect(
+        client.agentRequestInfo(outsider.api_key, bounty.id, {
+          lease_id: claimed.lease_id,
+          question: '   ',
+        }),
+      ).rejects.toMatchObject({ code: 'LEASE_OWNER_MISMATCH', status: 403 });
+      await expect(
+        client.agentRequestInfo(executor.api_key, bounty.id, {
+          lease_id: claimed.lease_id,
+          question: '   ',
+        }),
+      ).rejects.toMatchObject({ code: 'VALIDATION_ERROR', status: 400 });
+
+      // 执行 5 分钟后提问挂起 -> T_active = 300_000ms，租约冻结（lease_expires_at=null）
+      vi.advanceTimersByTime(5 * 60 * 1000);
+      const waiting = await client.agentRequestInfo(executor.api_key, bounty.id, {
+        lease_id: claimed.lease_id,
+        question: '请确认边界公式 $f(x) = x^2$',
+      });
+      expect(waiting.status).toBe('WAITING_INFO');
+      expect(waiting.lease_id).toBe(claimed.lease_id);
+      expect(waiting.lease_agent_id).toBe(executor.agent.id);
+      expect(waiting.lease_expires_at).toBeNull();
+      expect(waiting.active_started_at).toBeNull();
+      expect(waiting.active_duration_ms).toBe(5 * 60 * 1000);
+      expect(waiting.comment_count).toBe(1);
+
+      // 发布者收到 task.info_requested
+      const pubEventsAfterReq = await client.agentListEvents(publisher.api_key);
+      expect(pubEventsAfterReq.events.some(e => e.event_type === 'task.info_requested')).toBe(true);
+
+      // 等待 2 小时并多次调用 sweepLeases：WAITING_INFO 不超时回收，T_active 保持冻结
+      vi.advanceTimersByTime(2 * 60 * 60 * 1000);
+      await client.sweepLeases();
+      const stillWaiting = (await client.getBountyDetail(bounty.id)).bounty;
+      expect(stillWaiting.status).toBe('WAITING_INFO');
+      expect(stillWaiting.active_duration_ms).toBe(5 * 60 * 1000);
+      expect((await client.agentGetMe(executor.api_key)).timeout_count).toBe(0);
+
+      // 执行者自己在 WAITING_INFO 期间补充评论：只追加 comment，不触发恢复或自唤醒
+      const execSelfComment = await client.agentCreateComment(executor.api_key, bounty.id, {
+        body: '补充日志片段',
+      });
+      expect(execSelfComment.bounty.status).toBe('WAITING_INFO');
+      expect(execSelfComment.comment.kind).toBe('comment');
+
+      // 发布者（非当前执行者）回复后：自动恢复为 IN_PROGRESS，刷新 15 分钟租约，推送 comment.replied 与 task.resumed
+      const execEventsBeforeReply = (await client.agentListEvents(executor.api_key)).events.length;
+      vi.advanceTimersByTime(100);
+      const resumedByPub = await client.agentCreateComment(publisher.api_key, bounty.id, {
+        body: '已确认，按闭区间处理。',
+      });
+      expect(resumedByPub.comment.kind).toBe('reply');
+      expect(resumedByPub.bounty.status).toBe('IN_PROGRESS');
+      expect(resumedByPub.bounty.lease_expires_at).not.toBeNull();
+      expect(resumedByPub.bounty.active_started_at).not.toBeNull();
+      expect(resumedByPub.bounty.active_duration_ms).toBe(5 * 60 * 1000);
+      expect(resumedByPub.bounty.comment_count).toBe(3);
+
+      const execEventsAfterReply = (await client.agentListEvents(executor.api_key)).events.slice(
+        execEventsBeforeReply,
+      );
+      expect(execEventsAfterReply.map(e => e.event_type)).toEqual([
+        'comment.replied',
+        'task.resumed',
+      ]);
+
+      // 再执行 3 分钟后完成交付：总有效耗时 = 5 + 3 = 8 分钟（剔除 2 小时等待）
+      vi.advanceTimersByTime(3 * 60 * 1000);
+      const completed = await client.agentCompleteBounty(executor.api_key, bounty.id, {
+        lease_id: claimed.lease_id,
+        completion_note: '已完成',
+      });
+      expect(completed.status).toBe('COMPLETED');
+      expect(completed.active_duration_ms).toBe(8 * 60 * 1000);
+      expect(completed.active_started_at).toBeNull();
+
+      // 验证新一轮接单会重置 T_active，及 WAITING_INFO 取消与 CANCELLED 禁止评论
+      const task2 = await client.createBounty({
+        project_id: project.id,
+        title: '第二任务：弃单清零与挂起取消',
+        difficulty: 'C',
+        assignee_mode: 'any',
+        status: 'OPEN',
+      });
+      vi.advanceTimersByTime(100);
+      const c2 = await client.agentClaimBounty(executor.api_key, task2.id);
+      vi.advanceTimersByTime(60_000);
+      await client.agentAbandonBounty(executor.api_key, task2.id, { lease_id: c2.lease_id });
+      vi.advanceTimersByTime(100);
+      const c3 = await client.agentClaimBounty(executor.api_key, task2.id);
+      expect(c3.active_duration_ms).toBe(0);
+
+      vi.advanceTimersByTime(45_000);
+      const waiting2 = await client.agentRequestInfo(executor.api_key, task2.id, {
+        lease_id: c3.lease_id,
+        question: '确认需求是否取消？',
+      });
+      expect(waiting2.active_duration_ms).toBe(45_000);
+
+      // 人类管理员取消 WAITING_INFO 任务 -> CANCELLED，推送 task.cancelled，保留 T_active 并禁止评论
+      const cancelled = await client.cancelBounty(task2.id);
+      expect(cancelled.status).toBe('CANCELLED');
+      expect(cancelled.active_duration_ms).toBe(45_000);
+      expect(cancelled.active_started_at).toBeNull();
+      expect(cancelled.lease_expires_at).toBeNull();
+      expect(
+        (await client.agentListEvents(executor.api_key)).events.some(
+          e => e.bounty_id === task2.id && e.event_type === 'task.cancelled',
+        ),
+      ).toBe(true);
+
+      await expect(
+        client.createBountyComment(task2.id, { body: '已取消后评论' }),
+      ).rejects.toMatchObject({ code: 'INVALID_TRANSITION', status: 409 });
+      await expect(
+        client.agentCreateComment(executor.api_key, task2.id, { body: 'Agent 也不允许评论' }),
+      ).rejects.toMatchObject({ code: 'INVALID_TRANSITION', status: 409 });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('helpers 正确计算与格式化 T_active、评论类型/角色与新流转事件（含双语且无中点）', () => {
+    setLocalePreference('zh-CN');
+    const nowMs = Date.parse('2026-11-17T10:05:30.000Z');
+    expect(
+      computeActiveDurationMs(
+        {
+          status: 'IN_PROGRESS',
+          active_duration_ms: 60_000,
+          active_started_at: '2026-11-17T10:05:00.000Z',
+        },
+        nowMs,
+      ),
+    ).toBe(90_000);
+    expect(
+      computeActiveDurationMs(
+        {
+          status: 'WAITING_INFO',
+          active_duration_ms: 60_000,
+          active_started_at: '2026-11-17T10:05:00.000Z',
+        },
+        nowMs,
+      ),
+    ).toBe(60_000);
+    expect(formatActiveDuration(90_000)).toBe('01:30');
+    expect(formatActiveDuration(3_665_000)).toBe('1:01:05');
+
+    expect(formatCommentKind('question')).toBe('提问阻塞');
+    expect(formatCommentKind('reply')).toBe('恢复回复');
+    expect(formatCommentAuthorRole('human')).toBe('人类管理员');
+    expect(formatCommentAuthorRole('agent')).toBe('Agent');
+    expect(formatEventLabel('info_requested')).toBe('提问挂起');
+    expect(formatEventLabel('resumed')).toBe('回复并恢复');
+    expect(formatEventLabel('commented')).toBe('发表评论');
+
+    setLocalePreference('en');
+    expect(formatCommentKind('question')).toBe('Question');
+    expect(formatCommentKind('reply')).toBe('Reply (resumed)');
+    expect(formatCommentAuthorRole('human')).toBe('Admin');
+    expect(formatEventLabel('info_requested')).toBe('Requested info');
+    expect(formatEventLabel('resumed')).toBe('Replied & resumed');
+    expect(formatEventLabel('commented')).toBe('Commented');
+
+    for (const label of [
+      formatCommentKind('question'),
+      formatCommentKind('reply'),
+      formatCommentAuthorRole('human'),
+      formatEventLabel('info_requested'),
+      formatEventLabel('resumed'),
+    ]) {
+      expect(label).not.toContain('·');
     }
     setLocalePreference('zh-CN');
   });

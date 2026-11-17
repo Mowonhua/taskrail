@@ -202,3 +202,56 @@
 | S-03 | 约束 | `heartbeat`、`abandon` 与 `complete` 严格按顺序校验发布隔离、`lease_id`、租约持有者、状态及有效期；过期或旧 `lease_id` 返 `409 STALE_LEASE`，非持有者返 `403 LEASE_OWNER_MISMATCH`；开启仲裁直接完成返 `409 ARBITRATION_REQUIRED`，非法 `completion_cost` 返 `400 VALIDATION_ERROR`；事务任一步失败整体回滚 | src-tauri/tests/server_agent_leases.rs::fencing_error_order_and_completion_validation_preserve_the_lease, src-tauri/tests/server_agent_leases.rs::failed_history_incident_notification_or_redispatch_rolls_back_the_entire_mutation, src/lib/api/bounty-client.test.ts::Issue 06: 租约令牌、并发抢单、指派婉拒、超时回收与无仲裁交付 > HttpBountyClient.releaseLease 与 HttpAgentClient 租约接口发送正确路由与正文, src/lib/api/bounty-client.test.ts::Issue 06: 租约令牌、并发抢单、指派婉拒、超时回收与无仲裁交付 > HttpAgentClient.completeBounty 与 MemoryBountyClient 一致拒绝 NaN、Infinity、-Infinity 与负数成本且不触发 fetch |
 | S-04 | 正常 | 后台调度器在租约剩余 ≤3 分钟时仅推送一次 `lease.expiring`（心跳续租后重置），到期自动回收至 `OPEN`、累计 `timeout_count`（停用/吊销持有人不发私密提醒但仍回收）、定向给原持有者的任务回退 `any`；`abandon` 累计 `abandon_count`；`WAITING_INFO` / `PENDING_ARBITRATION` 不受超时回收 | src-tauri/tests/server_agent_leases.rs::warning_is_once_until_heartbeat_and_sweeps_do_not_expire_suspended_tasks, src-tauri/tests/server_agent_leases.rs::expired_lease_is_reclaimed_once_and_notifies_former_holder, src-tauri/tests/server_agent_leases.rs::inactive_holder_still_times_out_without_private_notification, src-tauri/tests/server_agent_leases.rs::http_admin_release_and_running_server_scheduler_are_live_and_shutdown_stops_sweeps |
 | S-05 | 正常 | 未启用仲裁的任务可附带可选去空白 `completion_note` 与 `completion_cost` 直接设为 `COMPLETED`（保留执行者与 `lease_id` 追溯并清除租约期限）；桌面卡片、详情抽屉与 Agent 名录实时显示执行者段位、租约倒计时（含 ≤3 分钟告警态）、完成说明与成本及异常计数，管理员可通过「强制释放租约」重置回 `OPEN`（不计入事故且保留定向窗口） | src-tauri/tests/server_agent_leases.rs::completion_preserves_holder_token_and_normalizes_note_without_arbitration, src-tauri/tests/server_agent_leases.rs::admin_release_supports_held_states_resets_specific_window_and_never_records_incident, src/lib/api/bounty-client.test.ts::Issue 06: 租约令牌、并发抢单、指派婉拒、超时回收与无仲裁交付 > helpers 格式化执行者、倒计时、成本、系统调度事件与租约错误码, src/lib/session/app-integration.test.ts::悬赏板工作台外壳集成测试 > 实时展示执行者段位、租约倒计时与完成备注\，支持管理员强制释放租约、定向婉拒回退及异常次数展示, src/lib/session/app-integration.test.ts::悬赏板工作台外壳集成测试 > 无需切页或点击\，外部 Agent 接单、续租与直接完成时自动实时同步卡片、已打开详情抽屉与名录 |
+
+## F-BNT-005 任务评论区、提问挂起与租约冻结分段计时
+
+每个悬赏任务拥有按序号持久化排序的独立 Markdown + KaTeX 评论流（`bounty_comments`，含 `comment`、`question`、`reply` 与 `status` 四类条目），并在任务详情接口一并返回；当前持有租约的执行者可通过 `POST /api/v1/agent/bounties/{id}/request-info`（校验 `lease_id` 防脑裂）提交阻塞提问并挂起任务至 `WAITING_INFO`，系统冻结租约倒计时（清除 `lease_expires_at`、保留 `lease_id` 与 `lease_agent_id` 并免除后台超时回收）、结转暂停有效执行耗时 `T_active`（`active_duration_ms`）并通知非同一身份的发布者（`task.info_requested`）。人工管理员或非当前执行者的发布者 Agent 在 `WAITING_INFO` 下发表回复评论时，系统在同一写事务内写入 `kind='reply'`、恢复任务为 `IN_PROGRESS`、刷新 15 分钟 `lease_expires_at` 并重启 `active_started_at` 分段计时，同时向原执行者发送 `comment.replied` 与 `task.resumed` 唤醒通知；执行者本人补充评论不解除冻结状态。前端卡片展示评论数与「租约已冻结」状态（不显示过期告警），左侧「待我处理」自动实时聚合 `WAITING_INFO` 任务并更新未处理角标，详情抽屉高亮展示最新待回答提问（Markdown+KaTeX）、实时分段 `T_active`、评论流（后台同步保留未发送草稿）及 `WAITING_INFO` 取消与 `CANCELLED` 禁止评论控制。
+
+创建提交：-
+
+### 功能关系
+
+| 类型 | 功能编号 |
+|---|---|
+| 依赖 | F-SRV-001 |
+| 依赖 | F-BNT-002 |
+| 依赖 | F-BNT-003 |
+| 依赖 | F-BNT-004 |
+| 依赖 | F-AGT-002 |
+| 依赖 | F-AGT-003 |
+
+### 实现
+
+| 角色 | 代码符号 |
+|---|---|
+| 主入口 | src-tauri/src/server/routes.rs::bounty_comments |
+| 主入口 | src-tauri/src/server/routes.rs::create_bounty_comment |
+| 主入口 | src-tauri/src/server/routes/agents.rs::comments |
+| 主入口 | src-tauri/src/server/routes/agents.rs::create_comment |
+| 主入口 | src-tauri/src/server/routes/agents.rs::request_info |
+| 关键实现 | src-tauri/src/server/schema_v6.sql::<module> |
+| 关键实现 | src-tauri/src/server/db/comments.rs::Repository::bounty_comments |
+| 关键实现 | src-tauri/src/server/db/comments.rs::Repository::agent_bounty_comments |
+| 关键实现 | src-tauri/src/server/db/comments.rs::Repository::create_bounty_comment |
+| 关键实现 | src-tauri/src/server/db/comments.rs::Repository::agent_create_comment |
+| 关键实现 | src-tauri/src/server/db/comments.rs::Repository::agent_request_info |
+| 关键实现 | src/lib/api/bounty-client.ts::HttpBountyClient |
+| 关键实现 | src/lib/api/bounty-client.ts::HttpAgentClient |
+| 关键实现 | src/lib/api/bounty-client.ts::createMemoryBountyClient |
+| 关键实现 | src/lib/bounty/helpers.ts::computeActiveDurationMs |
+| 关键实现 | src/lib/bounty/helpers.ts::formatActiveDuration |
+| 关键实现 | src/lib/bounty/helpers.ts::formatCommentKind |
+| 关键实现 | src/lib/bounty/helpers.ts::formatCommentAuthorRole |
+| 关键实现 | src/lib/bounty/BountyCard.svelte::<module> |
+| 关键实现 | src/lib/bounty/BountyDetailDrawer.svelte::<module> |
+| 关键实现 | src/App.svelte::<module> |
+
+### 行为场景
+
+| 编号 | 类型 | 场景与预期 | 测试 |
+|---|---|---|---|
+| S-01 | 正常 | 执行者调用 `request-info` 将任务切为 `WAITING_INFO`、记录 `question` 评论并冻结租约，结转累计有效耗时 `active_duration_ms` 并清空 `active_started_at` 与 `lease_expires_at`；`sweep_leases` 跳过 `WAITING_INFO` 不计入等待耗时与超时回收，冻结期间仍计入执行者 `active_lease_count`（忙碌），重新认领周期归零重计 | src-tauri/tests/server_agent_comments.rs::waiting_freezes_lease_and_counts_only_active_segments, src-tauri/tests/server_agent_comments.rs::each_claim_cycle_starts_from_zero_after_abandon_expiry_or_release, src-tauri/tests/server_agent_comments.rs::frozen_lease_stays_busy_until_cancelled_or_released, src/lib/api/bounty-client.test.ts::Issue 07 评论区、提问挂起与回复唤醒 > MemoryBountyClient 严格遵循 fencing、租约冻结、T_active 分段剔除等待、唤醒推送与取消/隔离规则, src/lib/api/bounty-client.test.ts::Issue 07 评论区、提问挂起与回复唤醒 > MemoryBountyClient 允许定向任务发布者查看与回复唤醒\，且冻结租约计入 active_lease_count 保持名录 busy |
+| S-02 | 正常 | 人工管理员或非当前执行者的发布者 Agent（含定向给其他 Agent 的已发布任务发布者）在 `WAITING_INFO` 下回复评论后自动标记 `reply` 并恢复 `IN_PROGRESS`、重置 15 分钟 `lease_expires_at`、重启 `active_started_at` 并通过站内收件箱、SSE 与 HMAC Webhook 向原执行者推送 `comment.replied` 与 `task.resumed`；普通评论按去重集合向相关活跃参与者发 `comment.added` | src-tauri/tests/server_agent_comments.rs::publisher_reply_resumes_and_inactive_recipients_receive_no_events, src-tauri/tests/server_agent_comments.rs::specific_publisher_can_read_and_reply_while_third_party_stays_hidden, src-tauri/tests/server_agent_comments.rs::human_and_publisher_replies_reach_inbox_sse_and_signed_webhook, src-tauri/tests/server_agent_comments.rs::comments_apply_visibility_draft_isolation_names_and_unique_notifications, src/lib/api/bounty-client.test.ts::Issue 07 评论区、提问挂起与回复唤醒 > HttpBountyClient 与 HttpAgentClient 透传空白正文和有限整数令牌并保持与内存客户端错误优先级一致, src/lib/api/bounty-client.test.ts::Issue 07 评论区、提问挂起与回复唤醒 > MemoryBountyClient 允许定向任务发布者查看与回复唤醒\，且冻结租约计入 active_lease_count 保持名录 busy |
+| S-03 | 并发 | 多个回复并发提交时仅一次完成状态恢复与双通知唤醒并完整保留全部评论；评论、状态、事件与通知写入任一步失败均同一事务原子回滚 | src-tauri/tests/server_agent_comments.rs::concurrent_replies_resume_once_and_preserve_all_comments, src-tauri/tests/server_agent_comments.rs::comment_history_and_notifications_fail_as_one_transaction, src/lib/api/bounty-client.test.ts::Issue 07 评论区、提问挂起与回复唤醒 > MemoryBountyClient 严格遵循 fencing、租约冻结、T_active 分段剔除等待、唤醒推送与取消/隔离规则 |
+| S-04 | 正常 | 悬赏卡片显示评论数与冻结状态（无过期告警），左侧「待我处理」自动实时聚合 `WAITING_INFO` 并同步未处理角标；详情抽屉高亮渲染 Markdown+KaTeX 待回答提问、分段 `T_active`、评论流并在后台 2 秒刷新时保留未提交草稿，支持人工回复唤醒与 `WAITING_INFO` 取消 | src/lib/session/app-integration.test.ts::悬赏板工作台外壳集成测试 > 支持任务评论区、Agent 提问挂起冻结租约与有效耗时、待我处理实时聚合、人工回复唤醒与挂起取消, src/lib/api/bounty-client.test.ts::Issue 07 评论区、提问挂起与回复唤醒 > helpers 正确计算与格式化 T_active、评论类型/角色与新流转事件（含双语且无中点） |
+| S-05 | 约束 | `request-info` 严格遵循租约防脑裂错误顺序（非持有人 `403 LEASE_OWNER_MISMATCH`、过期或旧令牌 `409 STALE_LEASE`、空白问题 `400 VALIDATION_ERROR`）；`CANCELLED` 任务拒绝评论（`409 INVALID_TRANSITION`），草稿评论严格对 Agent 隔离且已停用/吊销参与者不收通知；在 `WAITING_INFO` 取消保留 `lease_id`、`lease_agent_id` 与已累计 `active_duration_ms` 并推送 `task.cancelled` | src-tauri/tests/server_agent_comments.rs::fencing_order_and_invalid_questions_leave_all_writes_unchanged, src-tauri/tests/server_agent_comments.rs::cancellation_preserves_fencing_and_active_total_but_clears_deadline, src-tauri/tests/server_agent_comments.rs::http_contracts_auth_validation_details_and_draft_privacy, src-tauri/tests/server_agent_comments.rs::failed_second_wakeup_or_publisher_notification_rolls_back_every_write, src/lib/api/bounty-client.test.ts::Issue 07 评论区、提问挂起与回复唤醒 > HttpBountyClient 与 HttpAgentClient 透传空白正文和有限整数令牌并保持与内存客户端错误优先级一致, src/lib/api/bounty-client.test.ts::Issue 07 评论区、提问挂起与回复唤醒 > MemoryBountyClient 严格遵循 fencing、租约冻结、T_active 分段剔除等待、唤醒推送与取消/隔离规则 |
