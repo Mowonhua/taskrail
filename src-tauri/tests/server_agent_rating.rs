@@ -920,7 +920,7 @@ fn v7_to_v8_is_atomic_idempotent_and_preserves_existing_rating_and_tasks() {
             conn.query_row("SELECT MAX(version) FROM schema_migrations", [], |r| r
                 .get::<_, i64>(0))
                 .unwrap(),
-            8
+            9
         );
         let d = repo.get_agent_detail("a").unwrap();
         near(d.mmr, 1612.5);

@@ -81,6 +81,12 @@ export interface ArbitrationConfig {
   arbitrator_chain: string[];
 }
 
+export interface BountyDependencySummary {
+  id: string;
+  title: string;
+  status: BountyStatus;
+}
+
 export interface BountyTask {
   id: string;
   project_id: string;
@@ -116,6 +122,14 @@ export interface BountyTask {
   active_duration_ms: number;
   active_started_at: string | null;
   comment_count: number;
+  draft_collaborator_agent_id: string | null;
+  draft_collaborator_agent_name: string | null;
+  draft_collaborator_agent_tier: AgentTier | null;
+  draft_needs_human_review: boolean;
+  parent_bounty_id: string | null;
+  blocked_by: string[];
+  blocked_by_summaries: BountyDependencySummary[];
+  is_blocked: boolean;
   published_at: string | null;
   withdrawn_at: string | null;
   cancelled_at: string | null;
@@ -167,6 +181,8 @@ export interface BountyDetail {
   bounty: BountyTask;
   events: BountyEvent[];
   comments: BountyComment[];
+  blocks: BountyDependencySummary[];
+  child_bounties: BountyDependencySummary[];
 }
 
 export interface CreateBountyInput {
@@ -179,6 +195,7 @@ export interface CreateBountyInput {
   assignee_min_tier?: BountyDifficulty | null;
   assignee_agent_id?: string | null;
   require_arbitration?: boolean;
+  blocked_by?: string[];
   status: 'DRAFT' | 'OPEN';
   created_by?: string;
 }
@@ -193,6 +210,7 @@ export interface AgentCreateBountyInput {
   assignee_min_tier?: BountyDifficulty | null;
   assignee_agent_id?: string | null;
   require_arbitration?: boolean;
+  blocked_by?: string[];
 }
 
 export interface UpdateBountyInput {
@@ -205,6 +223,44 @@ export interface UpdateBountyInput {
   assignee_min_tier?: BountyDifficulty | null;
   assignee_agent_id?: string | null;
   require_arbitration?: boolean;
+  blocked_by?: string[];
+}
+
+export interface InviteDraftCollaboratorInput {
+  agent_id?: string | null;
+}
+
+export interface AgentUpdateDraftInput {
+  title?: string;
+  description?: string;
+  acceptance_criteria?: string;
+  blocked_by?: string[];
+}
+
+export interface SplitDraftItem {
+  key?: string | null;
+  title: string;
+  description?: string;
+  acceptance_criteria?: string;
+  difficulty: BountyDifficulty;
+  assignee_mode: AssigneeMode;
+  assignee_min_tier?: BountyDifficulty | null;
+  assignee_agent_id?: string | null;
+  require_arbitration?: boolean;
+  blocked_by?: string[];
+}
+
+export interface SplitDraftInput {
+  items: SplitDraftItem[];
+}
+
+export interface SplitDraftResult {
+  parent: BountyTask;
+  children: BountyTask[];
+}
+
+export interface PublishBountiesBatchInput {
+  bounty_ids: string[];
 }
 
 export interface BountyQuery {
@@ -401,6 +457,7 @@ export interface AgentSubscriptionsInput {
 }
 
 export type AgentEventType =
+  | 'draft.invited'
   | 'task.published'
   | 'task.assigned'
   | 'task.withdrawn'
@@ -463,11 +520,14 @@ export type ServiceErrorCode =
   | 'INVITE_TOKEN_INVALID'
   | 'AGENT_REVOKED'
   | 'AGENT_DISABLED'
+  | 'AGENT_INACTIVE'
   | 'ASSIGNEE_MISMATCH'
   | 'TIER_INSUFFICIENT'
   | 'LEASE_OWNER_MISMATCH'
   | 'ARBITRATOR_CONFLICT'
   | 'ARBITRATOR_MISMATCH'
+  | 'DEPENDENCY_CYCLE'
+  | 'BOUNTY_BLOCKED'
   | 'PROJECT_NOT_FOUND'
   | 'BOUNTY_NOT_FOUND'
   | 'AGENT_NOT_FOUND'

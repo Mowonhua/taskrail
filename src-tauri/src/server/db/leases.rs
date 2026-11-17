@@ -55,6 +55,7 @@ impl Repository {
             if bounty.assignee_agent_id.as_deref() != Some(agent_id) {
                 return Err(assignee_mismatch());
             }
+            if bounty.is_blocked { return Err(dependencies::blocked()); }
             clear_assignment(tx, id, &now())?;
             let updated = find_bounty(tx, id)?;
             let detail = json!({"declined_by_agent_id":agent_id,"declined_by_agent_name":agent.name,"reason":input.reason});
@@ -133,6 +134,7 @@ impl Repository {
             rating::settle(tx, &find_bounty(tx, id)?, RatingOutcome::Completed, false, &timestamp)?;
             let updated = find_bounty(tx, id)?;
             event(tx, &updated, "completed", &format!("agent:{agent_id}"), Some(bounty.status), json!({"lease_id":bounty.lease_id,"lease_agent_id":agent_id,"lease_agent_name":bounty.lease_agent_name,"completion_note":updated.completion_note,"completion_cost":updated.completion_cost}))?;
+            dependencies::unlock_dependents(tx, id, &timestamp)?;
             Ok(updated)
         })
     }
@@ -222,6 +224,9 @@ fn claimable(bounty: &Bounty) -> Result<()> {
     }
     if bounty.status != BountyStatus::Open {
         return Err(invalid_transition());
+    }
+    if bounty.is_blocked {
+        return Err(dependencies::blocked());
     }
     Ok(())
 }

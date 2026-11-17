@@ -31,6 +31,7 @@ import {
   formatCommentAuthorRole,
   formatCommentKind,
   formatCompletionCost,
+  formatDraftCollaborator,
   formatEfficiencyPercent,
   formatEventActor,
   formatEventLabel,
@@ -442,6 +443,14 @@ describe('createMemoryBountyClient', () => {
       calibrated_difficulty: null,
       completion_note: null,
       completion_cost: null,
+      draft_collaborator_agent_id: null,
+      draft_collaborator_agent_name: null,
+      draft_collaborator_agent_tier: null,
+      draft_needs_human_review: false,
+      parent_bounty_id: null,
+      blocked_by: [],
+      blocked_by_summaries: [],
+      is_blocked: false,
       published_at: '2026-11-16T10:01:00.000Z',
       withdrawn_at: null,
       cancelled_at: null,
@@ -1269,7 +1278,7 @@ describe('createMemoryBountyClient (Issue 04 双通道推送与持久化事件�
 });
 
 describe('Issue 04 通道状态格式化与中英文翻译', () => {
-  it('formatAgentChannelStatus 正确输出中英文状态且不含 · 分隔符', () => {
+  it('formatAgentChannelStatus 正确输出中英文状态且不含中点分隔符', () => {
     setLocalePreference('zh-CN');
     const streamingZh = formatAgentChannelStatus({
       channel_status: 'streaming',
@@ -1653,7 +1662,7 @@ describe('Issue 05 Agent 自动发单与项目级草稿审核策略', () => {
     closeWorkerStream();
   });
 
-  it('formatAgentDraftPolicy、formatBountyPublisher 与 formatEventActor 支持中英文且不含 · 分隔符', () => {
+  it('formatAgentDraftPolicy、formatBountyPublisher 与 formatEventActor 支持中英文且不含中点分隔符', () => {
     const agentBounty = {
       created_by: 'agent:ag-1',
       created_by_agent_id: 'ag-1',
@@ -2491,6 +2500,14 @@ describe('Issue 07 评论区、提问挂起与回复唤醒', () => {
           calibrated_difficulty: null,
           completion_note: null,
           completion_cost: null,
+          draft_collaborator_agent_id: null,
+          draft_collaborator_agent_name: null,
+          draft_collaborator_agent_tier: null,
+          draft_needs_human_review: false,
+          parent_bounty_id: null,
+          blocked_by: [],
+          blocked_by_summaries: [],
+          is_blocked: false,
           published_at: '2026-11-17T00:00:00.000Z',
           withdrawn_at: null,
           cancelled_at: null,
@@ -3907,5 +3924,583 @@ describe('Issue 09 隐藏分评级、防刷规则与段位门槛', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe('Issue 10 草稿受邀共创拆单与前置依赖自动解锁', () => {
+  it('HttpBountyClient 与 HttpAgentClient 正确构造协作者邀请、批量发布、草稿修订、拆单与 blocked_by 请求', async () => {
+    const calls: Array<{ url: string; method?: string; headers: Record<string, string>; body?: string }> = [];
+    const fetchMock: typeof fetch = async (input, init) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      const headers = new Headers(init?.headers);
+      calls.push({
+        url,
+        method: init?.method,
+        headers: Object.fromEntries(headers.entries()),
+        body: typeof init?.body === 'string' ? init.body : undefined,
+      });
+      if (url.endsWith('/api/v1/bounties/publish-batch')) {
+        return new Response(JSON.stringify([]), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (url.endsWith('/split')) {
+        return new Response(JSON.stringify({ parent: { id: 'b-1' }, children: [] }), {
+          status: 201,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify({ id: 'b-1' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    };
+
+    const admin = new HttpBountyClient('http://127.0.0.1:4312', 'adm-token', fetchMock);
+    await admin.inviteDraftCollaborator('b-1', { agent_id: 'ag-1' });
+    await admin.publishBountiesBatch({ bounty_ids: ['b-1', 'b-2'] });
+
+    const agent = new HttpAgentClient('http://127.0.0.1:4312', 'ag-key', fetchMock);
+    await agent.updateDraft('b-1', {
+      title: 'Refined draft',
+      blocked_by: ['b-pre'],
+    });
+    await agent.splitDraft('b-1', {
+      items: [
+        { key: 'step1', title: 'Step 1', difficulty: 'C', assignee_mode: 'any' },
+        {
+          key: 'step2',
+          title: 'Step 2',
+          difficulty: 'B',
+          assignee_mode: 'any',
+          blocked_by: ['step1'],
+        },
+      ],
+    });
+
+    expect(calls.map(c => `${c.method} ${new URL(c.url).pathname}`)).toEqual([
+      'POST /api/v1/bounties/b-1/collaborator',
+      'POST /api/v1/bounties/publish-batch',
+      'PATCH /api/v1/agent/bounties/b-1',
+      'POST /api/v1/agent/bounties/b-1/split',
+    ]);
+    expect(JSON.parse(calls[0].body ?? '{}')).toEqual({ agent_id: 'ag-1' });
+    expect(JSON.parse(calls[1].body ?? '{}')).toEqual({ bounty_ids: ['b-1', 'b-2'] });
+    expect(JSON.parse(calls[2].body ?? '{}')).toEqual({
+      title: 'Refined draft',
+      blocked_by: ['b-pre'],
+    });
+    expect(JSON.parse(calls[3].body ?? '{}')).toEqual({
+      items: [
+        { key: 'step1', title: 'Step 1', difficulty: 'C', assignee_mode: 'any' },
+        {
+          key: 'step2',
+          title: 'Step 2',
+          difficulty: 'B',
+          assignee_mode: 'any',
+          blocked_by: ['step1'],
+        },
+      ],
+    });
+  });
+
+  it('MemoryBountyClient 草稿共创授权、待审核标记流转、拆单原子性及非协作者隔离', async () => {
+    const client = createMemoryBountyClient({ lan_open_registration: true });
+    const project = await client.createProject({ name: 'Co-creation Project' });
+    const collab = await client.registerAgent({ name: 'planner-agent', capabilities: ['arch'] });
+    const outsider = await client.registerAgent({ name: 'outsider-agent', capabilities: ['impl'] });
+    const disabledReg = await client.registerAgent({ name: 'disabled-agent' });
+    await client.disableAgent(disabledReg.agent.id);
+
+    const draft = await client.createBounty({
+      project_id: project.id,
+      title: 'Parent Architecture Draft',
+      difficulty: 'A',
+      assignee_mode: 'any',
+      status: 'DRAFT',
+    });
+
+    // 只能邀请 active Agent
+    await expect(
+      client.inviteDraftCollaborator(draft.id, { agent_id: disabledReg.agent.id }),
+    ).rejects.toMatchObject({ code: 'AGENT_INACTIVE', status: 409 });
+
+    // 邀请活跃 Agent 后发送通知且记录事件
+    const invited = await client.inviteDraftCollaborator(draft.id, { agent_id: collab.agent.id });
+    expect(invited.draft_collaborator_agent_id).toBe(collab.agent.id);
+    expect(invited.draft_collaborator_agent_name).toBe('planner-agent');
+    const inviteInbox = await client.agentListEvents(collab.api_key);
+    expect(inviteInbox.events.some(ev => ev.event_type === 'draft.invited' && ev.bounty_id === draft.id)).toBe(true);
+
+    // 仅受邀协作者可通过 include_drafts 列表、详情与修改/评论草稿
+    expect((await client.agentListBounties(outsider.api_key, { include_drafts: true }))).toHaveLength(0);
+    await expect(client.agentGetBountyDetail(outsider.api_key, draft.id)).rejects.toMatchObject({
+      code: 'BOUNTY_NOT_FOUND',
+      status: 404,
+    });
+    await expect(
+      client.agentUpdateDraft(outsider.api_key, draft.id, { title: 'Hijack' }),
+    ).rejects.toMatchObject({ code: 'BOUNTY_NOT_FOUND', status: 404 });
+
+    const collabDrafts = await client.agentListBounties(collab.api_key, { include_drafts: true });
+    expect(collabDrafts.map(item => item.id)).toEqual([draft.id]);
+
+    // 协作者修订草稿后标记待人工审核
+    const revised = await client.agentUpdateDraft(collab.api_key, draft.id, {
+      title: 'Refined Parent Draft',
+      description: 'Updated plan',
+    });
+    expect(revised.draft_needs_human_review).toBe(true);
+
+    // 管理员发表评论清除待审核标记并推送给协作者
+    const commentRes = await client.createBountyComment(draft.id, { body: 'Looks good, split it!' });
+    expect(commentRes.bounty.draft_needs_human_review).toBe(false);
+    const collabInboxAfterReply = await client.agentListEvents(collab.api_key);
+    expect(
+      collabInboxAfterReply.events.some(ev => ev.event_type === 'comment.added' && ev.bounty_id === draft.id),
+    ).toBe(true);
+
+    // 拆单遇到非法环依赖时事务回滚（不残留任何子草稿）
+    await expect(
+      client.agentSplitDraft(collab.api_key, draft.id, {
+        items: [
+          { key: 'a', title: 'Child A', difficulty: 'C', assignee_mode: 'any', blocked_by: ['b'] },
+          { key: 'b', title: 'Child B', difficulty: 'C', assignee_mode: 'any', blocked_by: ['a'] },
+        ],
+      }),
+    ).rejects.toMatchObject({ code: 'DEPENDENCY_CYCLE', status: 409 });
+    expect(await client.listBounties({ include_drafts: true })).toHaveLength(1);
+
+    // 合法拆单生成派生子草稿并继承 blocked_by 与 parent_bounty_id
+    const splitResult = await client.agentSplitDraft(collab.api_key, draft.id, {
+      items: [
+        { key: 'schema', title: 'Subtask Schema', difficulty: 'C', assignee_mode: 'any' },
+        {
+          key: 'api',
+          title: 'Subtask API',
+          difficulty: 'B',
+          assignee_mode: 'any',
+          blocked_by: ['schema'],
+        },
+      ],
+    });
+    expect(splitResult.parent.draft_needs_human_review).toBe(true);
+    expect(splitResult.children).toHaveLength(2);
+    const [childSchema, childApi] = splitResult.children;
+    expect(childSchema.parent_bounty_id).toBe(draft.id);
+    expect(childSchema.status).toBe('DRAFT');
+    expect(childSchema.draft_collaborator_agent_id).toBe(collab.agent.id);
+    expect(childApi.blocked_by).toEqual([childSchema.id]);
+    expect(childApi.is_blocked).toBe(true);
+
+    // 非协作者读取未公开前置草稿被脱敏；协作者读取仍保留真实标题
+    await client.publishBounty(childApi.id);
+    const outsiderListed = await client.agentListBounties(outsider.api_key);
+    const outsiderApiView = outsiderListed.find(item => item.id === childApi.id)!;
+    expect(outsiderApiView.blocked_by_summaries[0].title).toBe('[草稿前置任务]');
+    const collabListed = await client.agentListBounties(collab.api_key);
+    const collabApiView = collabListed.find(item => item.id === childApi.id)!;
+    expect(collabApiView.blocked_by_summaries[0].title).toBe('Subtask Schema');
+
+    // 批量发布草稿原子校验：包含已发布/非草稿任务时整批回滚
+    await expect(
+      client.publishBountiesBatch({ bounty_ids: [childSchema.id, childApi.id] }),
+    ).rejects.toMatchObject({ code: 'INVALID_TRANSITION', status: 409 });
+    expect((await client.getBountyDetail(childSchema.id)).bounty.status).toBe('DRAFT');
+
+    const batchPublished = await client.publishBountiesBatch({
+      bounty_ids: [draft.id, childSchema.id],
+    });
+    expect(batchPublished.map(item => item.status)).toEqual(['OPEN', 'OPEN']);
+  });
+
+  it('MemoryBountyClient DAG 循环拒绝、blocked_by 阻塞抢单/拒单、直接完成与仲裁通过自动解锁通知及格式化无中点', async () => {
+    const client = createMemoryBountyClient({ lan_open_registration: true });
+    const project = await client.createProject({ name: 'DAG Unlock Project' });
+    const worker = await client.registerAgent({ name: 'dag-worker', capabilities: ['rust'] });
+    const judge = await client.registerAgent({ name: 'dag-judge' });
+    await client.updateArbitrationConfig({ arbitrator_chain: [judge.agent.id] });
+
+    const preDirect = await client.createBounty({
+      project_id: project.id,
+      title: 'Prereq Direct',
+      difficulty: 'C',
+      assignee_mode: 'any',
+      status: 'OPEN',
+    });
+    const preArb = await client.createBounty({
+      project_id: project.id,
+      title: 'Prereq Arbitrated',
+      difficulty: 'B',
+      assignee_mode: 'any',
+      require_arbitration: true,
+      status: 'OPEN',
+    });
+
+    // 循环依赖检测：preDirect -> downstream -> preDirect（先创建 draft 再更新成环）
+    const downstream = await client.createBounty({
+      project_id: project.id,
+      title: 'Downstream Task',
+      difficulty: 'B',
+      assignee_mode: 'specific',
+      assignee_agent_id: worker.agent.id,
+      blocked_by: [preDirect.id, preArb.id],
+      status: 'DRAFT',
+    });
+    await expect(client.updateBounty(downstream.id, { blocked_by: [downstream.id] })).rejects.toMatchObject({
+      code: 'DEPENDENCY_CYCLE',
+      status: 409,
+    });
+    const cycleDraft = await client.createBounty({
+      project_id: project.id,
+      title: 'Cycle Node',
+      difficulty: 'C',
+      assignee_mode: 'any',
+      blocked_by: [downstream.id],
+      status: 'DRAFT',
+    });
+    await expect(client.updateBounty(downstream.id, { blocked_by: [cycleDraft.id] })).rejects.toMatchObject({
+      code: 'DEPENDENCY_CYCLE',
+      status: 409,
+    });
+
+    // 发布被阻塞的下游任务：虽为 OPEN + specific，但 is_blocked=true，暂不派发也不允许 claim/decline
+    const publishedDownstream = await client.publishBounty(downstream.id);
+    expect(publishedDownstream.is_blocked).toBe(true);
+    expect(publishedDownstream.assignment_expires_at).toBeNull();
+    const initialInbox = await client.agentListEvents(worker.api_key);
+    expect(initialInbox.events.some(ev => ev.bounty_id === downstream.id)).toBe(false);
+
+    await expect(client.agentClaimBounty(worker.api_key, downstream.id)).rejects.toMatchObject({
+      code: 'BOUNTY_BLOCKED',
+      status: 409,
+    });
+    await expect(
+      client.agentDeclineBounty(worker.api_key, downstream.id, { reason: 'busy' }),
+    ).rejects.toMatchObject({ code: 'BOUNTY_BLOCKED', status: 409 });
+
+    // 完成第 1 个前置任务：仍被 preArb 阻塞，暂不解锁
+    const claimDirect = await client.agentClaimBounty(worker.api_key, preDirect.id);
+    await client.agentCompleteBounty(worker.api_key, preDirect.id, {
+      lease_id: claimDirect.lease_id,
+      completion_note: 'done 1',
+    });
+    const afterFirst = await client.getBountyDetail(downstream.id);
+    expect(afterFirst.bounty.is_blocked).toBe(true);
+    expect(afterFirst.events.some(ev => ev.event_type === 'dependency_unlocked')).toBe(false);
+
+    // 完成并仲裁通过第 2 个前置任务：触发自动解锁与 task.assigned 派发
+    const claimArb = await client.agentClaimBounty(worker.api_key, preArb.id);
+    await client.agentSubmitArbitration(worker.api_key, preArb.id, {
+      lease_id: claimArb.lease_id,
+      completion_note: 'done 2',
+    });
+    await client.agentApproveArbitration(judge.api_key, preArb.id, { quality_grade: 'perfect' });
+
+    const afterSecond = await client.getBountyDetail(downstream.id);
+    expect(afterSecond.bounty.is_blocked).toBe(false);
+    expect(afterSecond.bounty.assignment_expires_at).not.toBeNull();
+    expect(afterSecond.events.some(ev => ev.event_type === 'dependency_unlocked')).toBe(true);
+    const unlockedInbox = await client.agentListEvents(worker.api_key);
+    expect(
+      unlockedInbox.events.some(
+        ev => ev.bounty_id === downstream.id && ev.event_type === 'task.assigned',
+      ),
+    ).toBe(true);
+
+    // 现可正常抢单
+    const claimedDownstream = await client.agentClaimBounty(worker.api_key, downstream.id);
+    expect(claimedDownstream.status).toBe('IN_PROGRESS');
+
+    // SKILL.md 协议文档包含 Issue 10 新路由与字段，且中英文格式化函数不含中点
+    const skill = await client.getPublicSkillMarkdown({ baseUrl: 'http://127.0.0.1:4312' });
+    expect(skill).toContain('/api/v1/agent/bounties/{id}');
+    expect(skill).toContain('/api/v1/agent/bounties/{id}/split');
+    expect(skill).toContain('blocked_by');
+    expect(skill).toContain('is_blocked');
+    expect(skill).not.toContain('·');
+
+    for (const loc of ['zh-CN', 'en'] as const) {
+      setLocalePreference(loc);
+      const labels = [
+        formatDraftCollaborator(invitedSample(collabName())),
+        formatEventLabel('draft_invited'),
+        formatEventLabel('draft_collaborator_cleared'),
+        formatEventLabel('draft_revised'),
+        formatEventLabel('draft_split'),
+        formatEventLabel('dependency_unlocked'),
+        formatServiceError({ code: 'AGENT_INACTIVE', status: 409, message: 'inactive' }),
+        formatServiceError({ code: 'DEPENDENCY_CYCLE', status: 409, message: 'cycle' }),
+        formatServiceError({ code: 'BOUNTY_BLOCKED', status: 409, message: 'blocked' }),
+      ];
+      for (const item of labels) {
+        expect(item).toBeTruthy();
+        expect(item).not.toContain('·');
+      }
+    }
+    setLocalePreference('zh-CN');
+
+    function collabName(): string {
+      return 'planner-agent';
+    }
+    function invitedSample(name: string) {
+      return {
+        draft_collaborator_agent_id: worker.agent.id,
+        draft_collaborator_agent_name: name,
+        draft_collaborator_agent_tier: 'B' as const,
+      };
+    }
+  });
+
+  it('MemoryBountyClient 对 blocks、blocked_by_summaries 与 replaceDependencies 实施完整 Agent 可见性隔离', async () => {
+    const client = createMemoryBountyClient({ lan_open_registration: true });
+    const project = await client.createProject({ name: 'Visibility Isolation Project' });
+    const viewer = await client.registerAgent({ name: 'viewer-agent' });
+    const peer = await client.registerAgent({ name: 'peer-agent' });
+
+    // 前置任务：一个公开任务、一个定向给 peer 的任务、一个未公开即取消的草稿、一个曾公开后取消的任务
+    const publicPrereq = await client.createBounty({
+      project_id: project.id,
+      title: 'Public Prereq',
+      difficulty: 'C',
+      assignee_mode: 'any',
+      status: 'OPEN',
+    });
+    const secretSpecificPrereq = await client.createBounty({
+      project_id: project.id,
+      title: 'Secret Peer Specific Prereq',
+      difficulty: 'C',
+      assignee_mode: 'specific',
+      assignee_agent_id: peer.agent.id,
+      status: 'OPEN',
+    });
+    const unpubCancelledDraft = await client.createBounty({
+      project_id: project.id,
+      title: 'Never Published Draft',
+      difficulty: 'C',
+      assignee_mode: 'any',
+      status: 'DRAFT',
+    });
+    const publishedThenCancelled = await client.createBounty({
+      project_id: project.id,
+      title: 'Published Then Cancelled',
+      difficulty: 'C',
+      assignee_mode: 'any',
+      status: 'OPEN',
+    });
+
+    // 下游 1（挂在 publicPrereq 之后）：定向给 peer 的任务（viewer 无权查看，blocks 应隐藏）
+    const hiddenSpecificDownstream = await client.createBounty({
+      project_id: project.id,
+      title: 'Hidden Downstream Specific',
+      difficulty: 'C',
+      assignee_mode: 'specific',
+      assignee_agent_id: peer.agent.id,
+      blocked_by: [publicPrereq.id],
+      status: 'OPEN',
+    });
+    // 下游 2（挂在 publicPrereq 之后）：未公开即取消的草稿（viewer 无权查看，blocks 应隐藏）
+    const unpubCancelledDownstream = await client.createBounty({
+      project_id: project.id,
+      title: 'Unpublished Cancelled Downstream',
+      difficulty: 'C',
+      assignee_mode: 'any',
+      blocked_by: [publicPrereq.id],
+      status: 'DRAFT',
+    });
+    await client.cancelBounty(unpubCancelledDownstream.id);
+    // 下游 3（挂在 publicPrereq 之后）：公开任务（viewer 应可见）
+    const visibleDownstream = await client.createBounty({
+      project_id: project.id,
+      title: 'Visible Downstream',
+      difficulty: 'C',
+      assignee_mode: 'any',
+      blocked_by: [publicPrereq.id],
+      status: 'OPEN',
+    });
+
+    // 下游 4：依赖 secretSpecificPrereq 与 unpubCancelledDraft，随后取消 unpubCancelledDraft，测试 blocked_by_summaries 脱敏
+    const redactedConsumer = await client.createBounty({
+      project_id: project.id,
+      title: 'Redacted Consumer',
+      difficulty: 'C',
+      assignee_mode: 'any',
+      blocked_by: [secretSpecificPrereq.id, unpubCancelledDraft.id],
+      status: 'OPEN',
+    });
+    await client.cancelBounty(unpubCancelledDraft.id);
+    await client.cancelBounty(publishedThenCancelled.id);
+
+    // Blocker 1: viewer 查看 publicPrereq 详情时，blocks 只返回可见的 visibleDownstream，隐藏定向给他人与未公开即取消的任务
+    const viewerPublicDetail = await client.agentGetBountyDetail(viewer.api_key, publicPrereq.id);
+    expect(viewerPublicDetail.blocks.map(item => item.id)).toEqual([visibleDownstream.id]);
+    // peer 可见分配给自己的 hiddenSpecificDownstream 与公开的 visibleDownstream，但仍不可见未公开即取消的草稿
+    const peerPublicDetail = await client.agentGetBountyDetail(peer.api_key, publicPrereq.id);
+    expect(peerPublicDetail.blocks.map(item => item.id).sort()).toEqual(
+      [hiddenSpecificDownstream.id, visibleDownstream.id].sort(),
+    );
+
+    // Blocker 2 (redactBountyForAgent): viewer 读取 redactedConsumer 时，两个不可见前置均脱敏为 [草稿前置任务] 且保留 id/status
+    const viewerConsumerDetail = await client.agentGetBountyDetail(
+      viewer.api_key,
+      redactedConsumer.id,
+    );
+    expect(viewerConsumerDetail.bounty.blocked_by_summaries).toEqual([
+      { id: secretSpecificPrereq.id, title: '[草稿前置任务]', status: 'OPEN' },
+      { id: unpubCancelledDraft.id, title: '[草稿前置任务]', status: 'CANCELLED' },
+    ]);
+    // peer 可见定向给自己的 secretSpecificPrereq 原标题，但仍脱敏未公开即取消的草稿
+    const peerConsumerDetail = await client.agentGetBountyDetail(
+      peer.api_key,
+      redactedConsumer.id,
+    );
+    expect(peerConsumerDetail.bounty.blocked_by_summaries).toEqual([
+      { id: secretSpecificPrereq.id, title: 'Secret Peer Specific Prereq', status: 'OPEN' },
+      { id: unpubCancelledDraft.id, title: '[草稿前置任务]', status: 'CANCELLED' },
+    ]);
+
+    // Blocker 2 (replaceDependencies): Agent 在修订或拆单时引用不可见 CANCELLED 草稿或不可见 specific 任务必须先返回 404 BOUNTY_NOT_FOUND
+    const editableDraft = await client.createBounty({
+      project_id: project.id,
+      title: 'Collab Editable Draft',
+      difficulty: 'B',
+      assignee_mode: 'any',
+      status: 'DRAFT',
+    });
+    await client.inviteDraftCollaborator(editableDraft.id, { agent_id: viewer.agent.id });
+
+    await expect(
+      client.agentUpdateDraft(viewer.api_key, editableDraft.id, {
+        blocked_by: [unpubCancelledDraft.id],
+      }),
+    ).rejects.toMatchObject({ code: 'BOUNTY_NOT_FOUND', status: 404 });
+
+    await expect(
+      client.agentUpdateDraft(viewer.api_key, editableDraft.id, {
+        blocked_by: [secretSpecificPrereq.id],
+      }),
+    ).rejects.toMatchObject({ code: 'BOUNTY_NOT_FOUND', status: 404 });
+
+    await expect(
+      client.agentSplitDraft(viewer.api_key, editableDraft.id, {
+        items: [
+          {
+            key: 'c1',
+            title: 'Split Probe',
+            difficulty: 'C',
+            assignee_mode: 'any',
+            blocked_by: [unpubCancelledDraft.id],
+          },
+        ],
+      }),
+    ).rejects.toMatchObject({ code: 'BOUNTY_NOT_FOUND', status: 404 });
+
+    // 而可见的曾公开后取消的任务则应返回 409 INVALID_TRANSITION
+    await expect(
+      client.agentUpdateDraft(viewer.api_key, editableDraft.id, {
+        blocked_by: [publishedThenCancelled.id],
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_TRANSITION', status: 409 });
+  });
+
+  it('MemoryBountyClient.inviteDraftCollaborator 与 agentSplitDraft 与 Rust serde 输入契约 1:1 对齐', async () => {
+    const client = createMemoryBountyClient({ lan_open_registration: true });
+    const project = await client.createProject({ name: 'Contract Parity Project' });
+    const collab = await client.registerAgent({ name: 'parity-collab' });
+
+    const draft = await client.createBounty({
+      project_id: project.id,
+      title: 'Parity Draft',
+      difficulty: 'B',
+      assignee_mode: 'any',
+      status: 'DRAFT',
+    });
+
+    await client.inviteDraftCollaborator(draft.id, { agent_id: collab.agent.id });
+    // agent_id 省略 ({}) 与显式 null 等价，均清空协作者并返回 200
+    const clearedByEmptyObj = await client.inviteDraftCollaborator(draft.id, {});
+    expect(clearedByEmptyObj.draft_collaborator_agent_id).toBeNull();
+
+    await expect(
+      client.inviteDraftCollaborator(draft.id, { agent_id: 123 as unknown as string }),
+    ).rejects.toMatchObject({ code: 'VALIDATION_ERROR', status: 400 });
+
+    // 重新邀请以测试 splitDraft 契约
+    await client.inviteDraftCollaborator(draft.id, { agent_id: collab.agent.id });
+
+    // Rust #[serde(default)] 字段：省略有效，但显式传入 null 必须返回 400 VALIDATION_ERROR
+    for (const field of [
+      'description',
+      'acceptance_criteria',
+      'require_arbitration',
+      'blocked_by',
+    ] as const) {
+      await expect(
+        client.agentSplitDraft(collab.api_key, draft.id, {
+          items: [
+            {
+              title: 'Invalid Null Field',
+              difficulty: 'C',
+              assignee_mode: 'any',
+              [field]: null,
+            } as never,
+          ],
+        }),
+      ).rejects.toMatchObject({ code: 'VALIDATION_ERROR', status: 400 });
+    }
+
+    // 必填字符串/枚举与 Option 字段类型错误均返回 400 VALIDATION_ERROR
+    await expect(
+      client.agentSplitDraft(collab.api_key, draft.id, {
+        items: [{ title: 42, difficulty: 'C', assignee_mode: 'any' } as never],
+      }),
+    ).rejects.toMatchObject({ code: 'VALIDATION_ERROR', status: 400 });
+
+    await expect(
+      client.agentSplitDraft(collab.api_key, draft.id, {
+        items: [{ title: 'Bad Tier', difficulty: 'C', assignee_mode: 'min_tier', assignee_min_tier: 99 } as never],
+      }),
+    ).rejects.toMatchObject({ code: 'VALIDATION_ERROR', status: 400 });
+
+    await expect(
+      client.agentSplitDraft(collab.api_key, draft.id, {
+        items: [{ title: 'Bad Agent', difficulty: 'C', assignee_mode: 'specific', assignee_agent_id: 99 } as never],
+      }),
+    ).rejects.toMatchObject({ code: 'VALIDATION_ERROR', status: 400 });
+
+    // 省略可选字段且 Option 字段为 null 时合法通过
+    const validSplit = await client.agentSplitDraft(collab.api_key, draft.id, {
+      items: [
+        {
+          title: 'Valid Omitted Optionals',
+          difficulty: 'C',
+          assignee_mode: 'any',
+          assignee_min_tier: null,
+          assignee_agent_id: null,
+        },
+      ],
+    });
+    expect(validSplit.children).toHaveLength(1);
+
+    // HttpBountyClient 与 HttpAgentClient 原样透传 {} 与省略字段，不擅自改写为 null
+    const bodies: string[] = [];
+    const fetchMock: typeof fetch = async (_input, init) => {
+      bodies.push(typeof init?.body === 'string' ? init.body : '');
+      return new Response(JSON.stringify({ id: 'b-1', parent: { id: 'b-1' }, children: [] }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    };
+    const httpAdmin = new HttpBountyClient('http://127.0.0.1:4312', 'adm-token', fetchMock);
+    const httpAgent = new HttpAgentClient('http://127.0.0.1:4312', 'ag-key', fetchMock);
+    await httpAdmin.inviteDraftCollaborator('b-1', {});
+    await httpAgent.splitDraft('b-1', {
+      items: [{ title: 'Step', difficulty: 'C', assignee_mode: 'any' }],
+    });
+    expect(JSON.parse(bodies[0])).toEqual({});
+    expect(JSON.parse(bodies[1])).toEqual({
+      items: [{ title: 'Step', difficulty: 'C', assignee_mode: 'any' }],
+    });
   });
 });

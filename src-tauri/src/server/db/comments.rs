@@ -166,7 +166,12 @@ fn add(
         body,
         &timestamp,
     )?;
-    if resume {
+    if bounty.status == BountyStatus::Draft {
+        tx.execute(
+            "UPDATE bounties SET draft_needs_human_review=?2,updated_at=?3 WHERE id=?1",
+            params![bounty.id, author_id.is_some(), timestamp],
+        )?;
+    } else if resume {
         tx.execute("UPDATE bounties SET status='IN_PROGRESS',lease_expires_at=?2,lease_warned_id=0,active_started_at=?3,updated_at=?3 WHERE id=?1", params![bounty.id,leases::deadline(),timestamp])?;
     } else {
         tx.execute(
@@ -174,7 +179,7 @@ fn add(
             params![bounty.id, timestamp],
         )?;
     }
-    let updated = find_bounty(tx, &bounty.id)?;
+    let mut updated = find_bounty(tx, &bounty.id)?;
     let actor = author_id.map_or_else(|| "human".into(), |id| format!("agent:{id}"));
     let detail = if resume {
         json!({"lease_id":updated.lease_id,"lease_agent_id":updated.lease_agent_id,"comment_id":comment.id,"lease_expires_at":updated.lease_expires_at})
@@ -200,8 +205,18 @@ fn add(
                 data.clone(),
             )?;
         }
-    } else if updated.status != BountyStatus::Draft && updated.published_at.is_some() {
-        // 草稿评论只留在管理员时间线，不能通过通知绕过 Agent 草稿隔离。
+    } else if updated.status == BountyStatus::Draft {
+        // 草稿只通知当前受邀者，原发布者身份不授予草稿权限。
+        if author_id.is_none() {
+            events::notify_active(
+                tx,
+                updated.draft_collaborator_agent_id.as_deref(),
+                &updated,
+                "comment.added",
+                data,
+            )?;
+        }
+    } else if updated.published_at.is_some() {
         // 发布者与执行者可能相同；同一身份每条评论最多收到一条通知，并排除评论者自己。
         let mut targets = std::collections::BTreeSet::new();
         for target in [
@@ -218,6 +233,9 @@ fn add(
         for target in targets {
             events::notify_active(tx, Some(target), &updated, "comment.added", data.clone())?;
         }
+    }
+    if let Some(id) = author_id {
+        dependencies::redact(tx, &mut updated, id)?;
     }
     Ok(BountyCommentResult {
         bounty: updated,

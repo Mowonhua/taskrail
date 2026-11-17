@@ -163,6 +163,8 @@
   let bountySearchQuery = $state('');
   let bounties = $state<BountyTask[]>([]);
   let actionableBounties = $state<BountyTask[]>([]);
+  let allBountiesForDeps = $state<BountyTask[]>([]);
+  let selectedInboxDraftIds = $state<string[]>([]);
   let inboxFilter = $state<'ALL' | 'DRAFT' | 'WAITING_INFO' | 'PENDING_ARBITRATION'>('ALL');
 
   let onboardingSettings = $state<OnboardingSettings>({
@@ -254,6 +256,17 @@
       inboxFilter === 'ALL' ? true : item.status === inboxFilter,
     ),
   );
+  const visibleInboxDraftIds = $derived(
+    visibleInboxBounties.filter(item => item.status === 'DRAFT').map(item => item.id),
+  );
+  const allVisibleInboxDraftsSelected = $derived(
+    visibleInboxDraftIds.length > 0 &&
+      visibleInboxDraftIds.every(id => selectedInboxDraftIds.includes(id)),
+  );
+  const selectedPublishableDraftIds = $derived.by(() => {
+    const visibleSet = new Set(visibleInboxDraftIds);
+    return selectedInboxDraftIds.filter(id => visibleSet.has(id));
+  });
 
   function resolveWindowMaterial(
     theme: ThemeDefinition,
@@ -440,6 +453,21 @@
     return filter;
   }
 
+  function applyBountySnapshots(filteredList: BountyTask[], fullList: BountyTask[]): void {
+    bounties = filteredList;
+    allBountiesForDeps = fullList;
+    actionableBounties = fullList.filter(
+      item =>
+        item.status === 'DRAFT' ||
+        item.status === 'WAITING_INFO' ||
+        item.status === 'PENDING_ARBITRATION',
+    );
+    const validDraftIds = new Set(
+      fullList.filter(item => item.status === 'DRAFT').map(item => item.id),
+    );
+    selectedInboxDraftIds = selectedInboxDraftIds.filter(id => validDraftIds.has(id));
+  }
+
   async function refreshBountiesOnly(): Promise<void> {
     const statusSeq = ++connectionStatusSeq;
     const listSeq = ++bountyListRequestSeq;
@@ -456,13 +484,7 @@
         return;
       }
       if (listSeq === bountyListRequestSeq) {
-        bounties = filteredList;
-        actionableBounties = fullList.filter(
-          item =>
-            item.status === 'DRAFT' ||
-            item.status === 'WAITING_INFO' ||
-            item.status === 'PENDING_ARBITRATION',
-        );
+        applyBountySnapshots(filteredList, fullList);
       }
       if (statusSeq === connectionStatusSeq) {
         serviceConnected = true;
@@ -834,13 +856,7 @@
         bountyProjectFilter = 'ALL';
       }
       if (listSeq === bountyListRequestSeq) {
-        bounties = filteredList;
-        actionableBounties = fullList.filter(
-          item =>
-            item.status === 'DRAFT' ||
-            item.status === 'WAITING_INFO' ||
-            item.status === 'PENDING_ARBITRATION',
-        );
+        applyBountySnapshots(filteredList, fullList);
       }
       if (statusSeq === connectionStatusSeq) {
         serviceConnected = true;
@@ -899,13 +915,7 @@
           ) {
             return;
           }
-          bounties = filteredList;
-          actionableBounties = fullList.filter(
-            item =>
-              item.status === 'DRAFT' ||
-              item.status === 'WAITING_INFO' ||
-              item.status === 'PENDING_ARBITRATION',
-          );
+          applyBountySnapshots(filteredList, fullList);
         }),
       );
     }
@@ -1066,6 +1076,8 @@
         allBountyProjects = [];
         bounties = [];
         actionableBounties = [];
+        allBountiesForDeps = [];
+        selectedInboxDraftIds = [];
         onboardingSettings = { lan_open_registration: false, invite_tokens: [] };
         onboardingLoaded = false;
         onboardingLoadError = '';
@@ -1419,6 +1431,94 @@
         return;
       }
       showToast(formatServiceError(error));
+    } finally {
+      detailInFlightCount -= 1;
+    }
+  }
+
+  function toggleInboxDraftSelection(bountyId: string): void {
+    if (selectedInboxDraftIds.includes(bountyId)) {
+      selectedInboxDraftIds = selectedInboxDraftIds.filter(id => id !== bountyId);
+    } else {
+      selectedInboxDraftIds = [...selectedInboxDraftIds, bountyId];
+    }
+  }
+
+  function toggleSelectAllInboxDrafts(): void {
+    if (allVisibleInboxDraftsSelected) {
+      const visibleSet = new Set(visibleInboxDraftIds);
+      selectedInboxDraftIds = selectedInboxDraftIds.filter(id => !visibleSet.has(id));
+    } else {
+      const next = new Set(selectedInboxDraftIds);
+      for (const id of visibleInboxDraftIds) {
+        next.add(id);
+      }
+      selectedInboxDraftIds = Array.from(next);
+    }
+  }
+
+  async function handleInviteCollaboratorFromDrawer(
+    bountyId: string,
+    agentId: string | null,
+  ): Promise<void> {
+    const detailSeq = ++detailRequestSeq;
+    const serviceSeq = serviceReconnectSeq;
+    const api = activeBountyApi;
+    if (typeof api.inviteDraftCollaborator !== 'function') {
+      throw new Error('Draft collaboration API is unavailable');
+    }
+    detailInFlightCount += 1;
+    try {
+      await api.inviteDraftCollaborator(bountyId, { agent_id: agentId });
+      const refreshedDetail = await api.getBountyDetail(bountyId);
+      if (
+        detailSeq === detailRequestSeq &&
+        serviceSeq === serviceReconnectSeq &&
+        api === activeBountyApi &&
+        activeDetail?.bounty.id === bountyId
+      ) {
+        activeDetail = refreshedDetail;
+      }
+      await refreshBountyWorkspace();
+      showToast(agentId ? $t('已邀请 Agent 协助草稿') : $t('已取消草稿协作者'));
+    } catch (error) {
+      showToast(formatServiceError(error));
+      throw error;
+    } finally {
+      detailInFlightCount -= 1;
+    }
+  }
+
+  async function handlePublishBatch(bountyIds: string[]): Promise<void> {
+    if (bountyIds.length === 0) return;
+    const serviceSeq = serviceReconnectSeq;
+    const api = activeBountyApi;
+    if (typeof api.publishBountiesBatch !== 'function') {
+      throw new Error('Batch publish API is unavailable');
+    }
+    const openDetailId = activeDetail?.bounty.id ?? null;
+    const detailSeq = openDetailId ? ++detailRequestSeq : detailRequestSeq;
+    detailInFlightCount += 1;
+    try {
+      const published = await api.publishBountiesBatch({ bounty_ids: bountyIds });
+      const publishedSet = new Set(published.map(item => item.id));
+      selectedInboxDraftIds = selectedInboxDraftIds.filter(id => !publishedSet.has(id));
+      if (openDetailId) {
+        const refreshedDetail = await api.getBountyDetail(openDetailId);
+        if (
+          detailSeq === detailRequestSeq &&
+          serviceSeq === serviceReconnectSeq &&
+          api === activeBountyApi &&
+          activeDetail?.bounty.id === openDetailId
+        ) {
+          activeDetail = refreshedDetail;
+        }
+      }
+      await refreshBountyWorkspace();
+      showToast($t('已批量发布 {count} 个任务', { count: published.length }));
+    } catch (error) {
+      showToast(formatServiceError(error));
+      throw error;
     } finally {
       detailInFlightCount -= 1;
     }
@@ -2581,11 +2681,40 @@
                 </p>
               </div>
             {:else}
+              {#if visibleInboxDraftIds.length > 0}
+                <div class="inbox-batch-bar" data-slot="inbox-batch-publish">
+                  <div class="inbox-batch-bar-meta">
+                    <button
+                      type="button"
+                      class="secondary-action"
+                      data-action="select-all-inbox-drafts"
+                      onclick={toggleSelectAllInboxDrafts}
+                    >
+                      {allVisibleInboxDraftsSelected ? $t('取消全选') : $t('全选草稿')}
+                    </button>
+                    <span class="inbox-batch-count">
+                      {$t('已选 {count} 项草稿', { count: selectedPublishableDraftIds.length })}
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    class="primary-action"
+                    data-action="publish-selected-drafts"
+                    disabled={selectedPublishableDraftIds.length === 0}
+                    onclick={() => void handlePublishBatch(selectedPublishableDraftIds)}
+                  >
+                    {$t('批量发布 ({count})', { count: selectedPublishableDraftIds.length })}
+                  </button>
+                </div>
+              {/if}
               <div class="bounty-card-grid" data-slot="inbox-card-grid">
                 {#each visibleInboxBounties as bounty (bounty.id)}
                   <BountyCard
                     {bounty}
                     project={bountyProjectsById.get(bounty.project_id)}
+                    selectable={bounty.status === 'DRAFT'}
+                    selected={selectedInboxDraftIds.includes(bounty.id)}
+                    onToggleSelect={toggleInboxDraftSelection}
                     onSelect={id => void openBountyDetail(id)}
                   />
                 {/each}
@@ -2724,6 +2853,8 @@
     <BountyDetailDrawer
       detail={activeDetail}
       project={bountyProjectsById.get(activeDetail.bounty.project_id)}
+      agents={allAgents}
+      allBounties={allBountiesForDeps}
       onClose={() => {
         detailRequestSeq += 1;
         activeDetail = null;
@@ -2733,6 +2864,9 @@
       onWithdraw={handleWithdrawFromDrawer}
       onCancel={handleCancelFromDrawer}
       onReleaseLease={handleReleaseLeaseFromDrawer}
+      onInviteCollaborator={handleInviteCollaboratorFromDrawer}
+      onSelectBounty={id => void openBountyDetail(id)}
+      onPublishBatch={handlePublishBatch}
       onCreateComment={handleCreateCommentFromDrawer}
       onApproveArbitration={handleApproveArbitrationFromDrawer}
       onRejectArbitration={handleRejectArbitrationFromDrawer}
@@ -2742,6 +2876,7 @@
   {#if composerOpen}
     <BountyComposerModal
       projects={allBountyProjects}
+      availableDependencies={allBountiesForDeps}
       initialProjectId={bountyProjectFilter !== 'ALL' ? bountyProjectFilter : null}
       {editingBounty}
       desktop={capabilities.desktop}

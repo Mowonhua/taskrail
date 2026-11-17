@@ -273,21 +273,28 @@ impl Repository {
         self.list_projects(false)
     }
 
-    /// 函数职责：返回已发布的订阅范围内公开任务及自身发布/指派/持有/仲裁任务；任何参数都不能显示 DRAFT。
+    /// 函数职责：返回受邀草稿及已发布的可见任务；查询参数不能扩大可见范围。
     pub fn agent_bounties(&self, id: &str, mut filter: BountyFilter) -> Result<Vec<Bounty>> {
-        let agent = active_agent(&self.connect()?, id)?;
-        filter.include_drafts = false;
-        Ok(self
-            .list_bounties(filter)?
-            .into_iter()
-            .filter(|b| visible(&agent, b))
-            .collect())
+        let mut conn = self.connect()?;
+        let tx = conn.transaction()?;
+        let agent = active_agent(&tx, id)?;
+        filter.include_drafts = true;
+        let mut result = Vec::new();
+        for mut bounty in list_bounties_on(&tx, filter)? {
+            if visible(&agent, &bounty) {
+                dependencies::redact(&tx, &mut bounty, id)?;
+                result.push(bounty);
+            }
+        }
+        Ok(result)
     }
 
     /// 函数职责：读取任务详情并应用相同可见性规则；拒绝时不返回正文或事件。
     pub fn agent_bounty_detail(&self, agent_id: &str, id: &str) -> Result<BountyDetail> {
-        let agent = active_agent(&self.connect()?, agent_id)?;
-        let detail = self.get_bounty_detail(id)?;
+        let mut conn = self.connect()?;
+        let tx = conn.transaction()?;
+        let agent = active_agent(&tx, agent_id)?;
+        let mut detail = bounty_detail_on(&tx, id)?;
         if !visible(&agent, &detail.bounty) {
             return Err(ApiError::new(
                 StatusCode::NOT_FOUND,
@@ -295,6 +302,7 @@ impl Repository {
                 "悬赏不存在",
             ));
         }
+        dependencies::redact_detail(&tx, &mut detail, agent_id)?;
         Ok(detail)
     }
 }
@@ -386,7 +394,7 @@ fn replace_subscriptions(
     }
     Ok(())
 }
-fn find_agent(conn: &Connection, id: &str) -> Result<AgentSummary> {
+pub(super) fn find_agent(conn: &Connection, id: &str) -> Result<AgentSummary> {
     let mut agent = conn
         .query_row(
             &format!("SELECT {AGENT_COLUMNS} FROM agents WHERE id=?1"),
@@ -447,9 +455,10 @@ pub(super) fn active_agent(conn: &Connection, id: &str) -> Result<AgentSummary> 
     }
 }
 pub(super) fn visible(agent: &AgentSummary, bounty: &Bounty) -> bool {
-    // 发布者权限同样受发布门槛约束，不能读取草稿或未发布即取消的任务。
-    bounty.status != BountyStatus::Draft
-        && bounty.published_at.is_some()
+    if bounty.status == BountyStatus::Draft {
+        return bounty.draft_collaborator_agent_id.as_deref() == Some(agent.id.as_str());
+    }
+    bounty.published_at.is_some()
         && (bounty.created_by_agent_id.as_deref() == Some(&agent.id)
             || bounty.assignee_agent_id.as_deref() == Some(&agent.id)
             || bounty.lease_agent_id.as_deref() == Some(&agent.id)

@@ -169,6 +169,25 @@ export function formatBountyArbitrator(
   };
 }
 
+export function formatDraftCollaborator(
+  bounty: Pick<
+    BountyTask,
+    'draft_collaborator_agent_id' | 'draft_collaborator_agent_name' | 'draft_collaborator_agent_tier'
+  >,
+): { agentId: string; name: string; tier: AgentTier | null; label: string } | null {
+  if (!bounty.draft_collaborator_agent_id) {
+    return null;
+  }
+  const name = bounty.draft_collaborator_agent_name || bounty.draft_collaborator_agent_id;
+  const tier = bounty.draft_collaborator_agent_tier ?? null;
+  return {
+    agentId: bounty.draft_collaborator_agent_id,
+    name,
+    tier,
+    label: tier ? translate('{name}（{tier}）', { name, tier: formatAgentTier(tier) }) : name,
+  };
+}
+
 export function formatQualityGrade(grade: QualityGrade): string {
   switch (grade) {
     case 'perfect':
@@ -321,6 +340,16 @@ export function formatEventLabel(eventType: string): string {
       return translate('仲裁顺延改派');
     case 'arbitration_human_fallback':
       return translate('仲裁转人工兜底');
+    case 'draft_invited':
+      return translate('邀请草稿协作');
+    case 'draft_collaborator_cleared':
+      return translate('取消草稿协作');
+    case 'draft_revised':
+      return translate('协同修订草稿');
+    case 'draft_split':
+      return translate('派生拆分草稿');
+    case 'dependency_unlocked':
+      return translate('前置依赖解锁');
     default:
       return eventType;
   }
@@ -466,6 +495,12 @@ export function formatServiceError(error: unknown): string {
         return translate('唯一仲裁者不得接取开启仲裁的任务，请增配裁判或改由人工/无仲裁执行。');
       case 'ARBITRATOR_MISMATCH':
         return translate('仅当前指定的活跃仲裁者可执行该裁决操作。');
+      case 'AGENT_INACTIVE':
+        return translate('只能邀请活跃状态的 Agent 协助草稿。');
+      case 'DEPENDENCY_CYCLE':
+        return translate('存在自依赖或循环依赖，无法保存依赖关系。');
+      case 'BOUNTY_BLOCKED':
+        return translate('前置依赖任务尚未全部完成，暂不可抢单。');
       case 'UNAUTHORIZED':
         return translate('管理员凭证无效或未授权（401）。');
       case 'VALIDATION_ERROR':

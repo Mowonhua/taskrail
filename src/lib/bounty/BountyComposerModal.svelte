@@ -3,10 +3,11 @@
    * 文件职责：承载新建悬赏与编辑草稿（DRAFT）的模态抽屉表单。
    * 定义范围：项目选择与内联新建项目、标题、Markdown 详情与验收条件（编写/预览切换）、难度、执行者限制与仲裁开关。
    */
-  import { untrack } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import { open as openDialog } from '@tauri-apps/plugin-dialog';
   import type {
     AssigneeMode,
+    BountyDependencySummary,
     BountyDifficulty,
     BountyProject,
     BountyTask,
@@ -14,14 +15,16 @@
     CreateProjectInput,
     UpdateBountyInput,
   } from '../api/types';
-  import { t } from '../i18n';
+  import { observeAnchoredPopover, positionAnchoredPopover } from '../anchored-popover';
+  import { locale, t } from '../i18n';
   import { serializeProjectIcon, type ProjectIcon as ProjectIconValue } from '../project-icons';
   import ProjectIcon from '../ProjectIcon.svelte';
   import ProjectIconPicker from '../ProjectIconPicker.svelte';
-  import { formatServiceError, renderMarkdownAction } from './helpers';
+  import { formatBountyStatus, formatServiceError, renderMarkdownAction } from './helpers';
 
   interface Props {
     projects: BountyProject[];
+    availableDependencies?: BountyTask[];
     initialProjectId?: string | null;
     editingBounty?: BountyTask | null;
     desktop: boolean;
@@ -34,6 +37,7 @@
 
   let {
     projects,
+    availableDependencies = [],
     initialProjectId = null,
     editingBounty = null,
     desktop,
@@ -43,6 +47,21 @@
     onCreateBounty,
     onUpdateDraft,
   }: Props = $props();
+
+  let returnFocusEl: HTMLElement | null =
+    typeof document !== 'undefined' && document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+
+  onMount(() => {
+    return () => {
+      const opener = returnFocusEl;
+      returnFocusEl = null;
+      if (opener && opener.isConnected && !opener.closest('[hidden], [inert]')) {
+        opener.focus();
+      }
+    };
+  });
 
   const activeProjects = $derived(projects.filter(project => !project.archived));
   const editingOriginalProject = $derived(
@@ -82,6 +101,36 @@
   );
   let assigneeAgentId = $state(untrack(() => editingBounty?.assignee_agent_id ?? ''));
   let requireArbitration = $state(untrack(() => editingBounty?.require_arbitration ?? false));
+  let blockedBy = $state<string[]>(untrack(() => [...(editingBounty?.blocked_by ?? [])]));
+
+  const dependencyCandidates = $derived.by((): BountyDependencySummary[] => {
+    const byId = new Map<string, BountyDependencySummary>();
+    for (const item of availableDependencies) {
+      if (item.id === editingBounty?.id) continue;
+      if (item.status !== 'CANCELLED' || blockedBy.includes(item.id)) {
+        byId.set(item.id, {
+          id: item.id,
+          title: item.title,
+          status: item.status,
+        });
+      }
+    }
+    for (const id of blockedBy) {
+      if (id === editingBounty?.id || byId.has(id)) continue;
+      const summary = editingBounty?.blocked_by_summaries?.find(item => item.id === id);
+      byId.set(
+        id,
+        summary
+          ? { id: summary.id, title: summary.title, status: summary.status }
+          : { id, title: id, status: 'CANCELLED' },
+      );
+    }
+    return Array.from(byId.values());
+  });
+
+  let depHelpButton = $state<HTMLButtonElement | undefined>(undefined);
+  let depHelpBubble = $state<HTMLDivElement | undefined>(undefined);
+  let depHelpOpen = $state(false);
 
   let descriptionTab = $state<'write' | 'preview'>('write');
   let criteriaTab = $state<'write' | 'preview'>('write');
@@ -101,6 +150,58 @@
   const selectedProject = $derived(
     projects.find(project => project.id === selectedProjectId) ?? null,
   );
+
+  function closeDepHelp(): void {
+    depHelpOpen = false;
+    if (
+      typeof depHelpBubble?.hidePopover === 'function' &&
+      depHelpBubble.matches(':popover-open')
+    ) {
+      depHelpBubble.hidePopover();
+    }
+  }
+
+  function toggleDepHelp(): void {
+    if (!depHelpButton || !depHelpBubble) return;
+    depHelpOpen = !depHelpOpen;
+    if (!depHelpOpen) {
+      closeDepHelp();
+      return;
+    }
+    if (
+      typeof depHelpBubble.showPopover === 'function' &&
+      !depHelpBubble.matches(':popover-open')
+    ) {
+      depHelpBubble.showPopover();
+    }
+    positionAnchoredPopover(depHelpButton, depHelpBubble, closeDepHelp);
+  }
+
+  $effect(() => {
+    if (!depHelpOpen || !depHelpButton || !depHelpBubble) return;
+    const stopObserve = observeAnchoredPopover(depHelpButton, depHelpBubble, closeDepHelp);
+    const onKeydown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        event.stopPropagation();
+        closeDepHelp();
+      }
+    };
+    document.addEventListener('keydown', onKeydown, true);
+    return () => {
+      document.removeEventListener('keydown', onKeydown, true);
+      stopObserve();
+    };
+  });
+
+  function toggleDependency(depId: string): void {
+    formError = '';
+    if (blockedBy.includes(depId)) {
+      blockedBy = blockedBy.filter(id => id !== depId);
+    } else {
+      blockedBy = [...blockedBy, depId];
+    }
+  }
 
   function handleSelectProject(nextProjectId: string, selectEl?: HTMLSelectElement): void {
     if (nextProjectId === '__create_new__') {
@@ -176,6 +277,7 @@
     assignee_min_tier: BountyDifficulty | null;
     assignee_agent_id: string | null;
     require_arbitration: boolean;
+    blocked_by: string[];
   } | null {
     if (!selectedProjectId) {
       formError = $t('请先选择或新建一个有效项目。');
@@ -209,6 +311,7 @@
       assignee_min_tier: assigneeMode === 'min_tier' ? assigneeMinTier : null,
       assignee_agent_id: assigneeMode === 'specific' ? assigneeAgentId.trim() : null,
       require_arbitration: requireArbitration,
+      blocked_by: [...blockedBy],
     };
   }
 
@@ -240,6 +343,10 @@
     if (event.key !== 'Escape') return;
     event.preventDefault();
     event.stopPropagation();
+    if (depHelpOpen) {
+      closeDepHelp();
+      return;
+    }
     if (inlineIconPickerOpen) {
       inlineIconPickerOpen = false;
       return;
@@ -606,6 +713,84 @@
           />
         </div>
       {/if}
+
+      <div class="composer-field" data-slot="composer-blocked-by">
+        <div class="composer-field-header">
+          <div class="settings-label-group">
+            <span class="composer-label" id="composer-blocked-by-label">{$t('前置依赖任务')}</span>
+            <span class="settings-help">
+              <button
+                bind:this={depHelpButton}
+                type="button"
+                class="settings-help-trigger"
+                data-action="toggle-dependencies-help"
+                aria-label={$t('关于前置依赖任务')}
+                aria-expanded={depHelpOpen}
+                aria-controls="composer-blocked-by-help"
+                onclick={toggleDepHelp}
+              >
+                <svg
+                  width="14"
+                  height="14"
+                  viewBox="0 0 16 16"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.5"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  aria-hidden="true"
+                >
+                  <circle cx="8" cy="8" r="6.25" />
+                  <path d="M6.4 6.2a1.7 1.7 0 0 1 3.2.7c0 1.1-1.6 1.4-1.6 2.5" />
+                  <circle cx="8" cy="11.8" r=".75" fill="currentColor" stroke="none" />
+                </svg>
+              </button>
+              <div
+                bind:this={depHelpBubble}
+                id="composer-blocked-by-help"
+                class="settings-help-popover dropdown"
+                role="note"
+                popover="manual"
+                hidden={!depHelpOpen}
+                style="position: fixed; margin: 0; bottom: auto; right: auto; box-sizing: border-box;"
+              >
+                <p>{$t('选中任务全部完成后，当前任务才会向 Agent 开放抢单；保存时自动检测循环依赖。')}</p>
+              </div>
+            </span>
+          </div>
+          {#if blockedBy.length > 0}
+            <span class="composer-meta-badge">{$t('已选 {count} 项', { count: blockedBy.length })}</span>
+          {/if}
+        </div>
+        {#if dependencyCandidates.length === 0}
+          <p class="composer-empty-hint">{$t('暂无可选前置任务')}</p>
+        {:else}
+          <div class="composer-dependency-list" role="group" aria-labelledby="composer-blocked-by-label">
+            {#each dependencyCandidates as candidate (candidate.id)}
+              {@const candidateStatusLabel = (() => {
+                const _lang = $locale;
+                return formatBountyStatus(candidate.status, candidate.status === 'DRAFT');
+              })()}
+              <label
+                class="composer-dependency-item"
+                class:is-cancelled={candidate.status === 'CANCELLED'}
+                data-dependency-id={candidate.id}
+                data-dependency-status={candidate.status}
+              >
+                <input
+                  type="checkbox"
+                  checked={blockedBy.includes(candidate.id)}
+                  onchange={() => toggleDependency(candidate.id)}
+                />
+                <span class="composer-dependency-title">{candidate.title}</span>
+                <span class="status-pill" data-status={candidate.status}>
+                  {candidateStatusLabel}
+                </span>
+              </label>
+            {/each}
+          </div>
+        {/if}
+      </div>
 
       <div class="composer-switch-row">
         <label class="composer-label" for="bounty-require-arbitration">{$t('开启仲裁验收')}</label>

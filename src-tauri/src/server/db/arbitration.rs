@@ -69,6 +69,7 @@ impl Repository {
             let detail = json!({"lease_id":bounty.lease_id,"quality_grade":grade,"calibrated_difficulty":input.calibrated_difficulty,"comment_id":comment.as_ref().map(|c|c.id)});
             event(tx, &updated, "arbitration_approved", &actor, Some(bounty.status), detail.clone())?;
             notify(tx, bounty.lease_agent_id.as_deref(), &updated, "arbitration.approved", detail)?;
+            dependencies::unlock_dependents(tx, id, &timestamp)?;
             Ok(updated)
         })
     }

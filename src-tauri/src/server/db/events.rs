@@ -8,8 +8,11 @@ pub(super) fn notify_active(
     agent_id: Option<&str>,
     bounty: &Bounty,
     kind: &str,
-    data: serde_json::Value,
+    mut data: serde_json::Value,
 ) -> Result<()> {
+    if let Some(id) = agent_id {
+        redact_payload(tx, &mut data, id)?;
+    }
     let payload = json!({"project_id":bounty.project_id,"data":data}).to_string();
     tx.execute("INSERT INTO agent_events(agent_id,bounty_id,event_type,payload_json,created_at) SELECT id,?2,?3,?4,?5 FROM agents WHERE id=?1 AND status='active'", params![agent_id,bounty.id,kind,payload,now()])?;
     Ok(())
@@ -25,6 +28,9 @@ pub(super) fn dispatch(tx: &Transaction<'_>, bounty: &Bounty, withdrawn: bool) -
     } else {
         if bounty.status != BountyStatus::Open {
             return Err(invalid_transition());
+        }
+        if bounty.is_blocked {
+            return Ok(());
         }
         let mut stmt = tx.prepare("SELECT id FROM agents WHERE status='active' AND ((?1='specific' AND id=?2) OR (?1!='specific' AND (subscribe_all_projects=1 OR EXISTS(SELECT 1 FROM agent_subscriptions s WHERE s.agent_id=agents.id AND s.project_id=?3)) AND (?1='any' OR (CASE tier WHEN 'S' THEN 4 WHEN 'A' THEN 3 WHEN 'B' THEN 2 ELSE 1 END)>=?4))) ORDER BY id")?;
         let rank = match bounty.assignee_min_tier {
@@ -51,9 +57,15 @@ pub(super) fn dispatch(tx: &Transaction<'_>, bounty: &Bounty, withdrawn: bool) -
     } else {
         "task.published"
     };
-    let payload = json!({"project_id":bounty.project_id,"data":if withdrawn { json!({"bounty_id":bounty.id,"project_id":bounty.project_id}) } else { json!(bounty) }}).to_string();
     let timestamp = now();
     for id in targets {
+        let mut data = if withdrawn {
+            json!({"bounty_id":bounty.id,"project_id":bounty.project_id})
+        } else {
+            json!(bounty)
+        };
+        redact_payload(tx, &mut data, &id)?;
+        let payload = json!({"project_id":bounty.project_id,"data":data}).to_string();
         tx.execute("INSERT INTO agent_events(agent_id,bounty_id,event_type,payload_json,created_at) VALUES(?1,?2,?3,?4,?5)",params![id,bounty.id,kind,payload,timestamp])?;
         if !withdrawn {
             tx.execute("INSERT OR IGNORE INTO bounty_dispatches(bounty_id,agent_id,created_at) VALUES(?1,?2,?3)",params![bounty.id,id,timestamp])?;
@@ -64,6 +76,22 @@ pub(super) fn dispatch(tx: &Transaction<'_>, bounty: &Bounty, withdrawn: bool) -
             "DELETE FROM bounty_dispatches WHERE bounty_id=?1",
             [&bounty.id],
         )?;
+    }
+    Ok(())
+}
+
+/// 所有含悬赏快照的事件都按接收者处理；覆盖发布事件的直接快照和评论等事件的嵌套快照。
+fn redact_payload(conn: &Connection, data: &mut serde_json::Value, agent_id: &str) -> Result<()> {
+    let value = if data.get("bounty").is_some() {
+        &mut data["bounty"]
+    } else {
+        data
+    };
+    if value.get("blocked_by_summaries").is_some() {
+        let mut bounty: Bounty =
+            serde_json::from_value(value.clone()).map_err(ApiError::internal)?;
+        dependencies::redact(conn, &mut bounty, agent_id)?;
+        *value = serde_json::to_value(bounty).map_err(ApiError::internal)?;
     }
     Ok(())
 }

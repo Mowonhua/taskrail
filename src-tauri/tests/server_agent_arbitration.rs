@@ -1079,7 +1079,7 @@ fn v6_migration_is_atomic_and_preserves_history() {
                 conn.query_row("SELECT MAX(version) FROM schema_migrations", [], |r| r
                     .get::<_, i64>(0))
                     .unwrap(),
-                8
+                9
             );
             Repository::open(file.path()).unwrap();
             for sql in [

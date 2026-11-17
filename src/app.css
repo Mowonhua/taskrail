@@ -1375,6 +1375,8 @@ button.danger-text {
 
 .bounty-card {
   display: flex;
+  flex-direction: column;
+  gap: 6px;
   min-width: 0;
 }
 
@@ -3058,6 +3060,296 @@ button.danger-text {
   align-items: baseline;
   gap: 6px;
   flex-wrap: wrap;
+}
+
+/* 草稿共创、派生拆单、前置依赖与批量发布（Issue 10） */
+.bounty-card-select-bar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  padding: 4px 10px;
+  border: 1px solid var(--field-border, var(--line));
+  border-radius: var(--control-radius, 8px);
+  background: var(--field-background, var(--sidebar));
+}
+
+.bounty-card-select-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.bounty-card.is-selected .bounty-card-button {
+  border-color: var(--accent);
+}
+
+.bounty-card.is-selected .bounty-card-select-bar {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.draft-review-pill,
+.blocked-pill,
+.derived-draft-pill,
+.bounty-collaborator-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border: 1px solid var(--field-border, var(--line));
+  border-radius: var(--control-radius, 6px);
+  background: var(--field-background, var(--canvas));
+  color: var(--muted);
+  font-size: 11.5px;
+  font-weight: 500;
+}
+
+.draft-review-pill,
+.blocked-pill {
+  border-color: var(--danger);
+  color: var(--danger);
+  font-weight: 600;
+}
+
+.derived-draft-pill,
+.bounty-collaborator-pill {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.inbox-batch-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  margin-bottom: 12px;
+  border: 1px solid var(--field-border, var(--line));
+  border-radius: var(--field-radius, 10px);
+  background: var(--surface);
+  flex-wrap: wrap;
+}
+
+.inbox-batch-bar-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.inbox-batch-count {
+  font-size: 12.5px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.detail-cocreation-card,
+.detail-dependencies-card {
+  padding: 12px 14px;
+  border: 1px solid var(--field-border, var(--line));
+  border-radius: var(--field-radius, 8px);
+  background: var(--field-background, var(--canvas));
+  gap: 10px;
+}
+
+.detail-cocreation-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.detail-review-banner {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--danger);
+  border-radius: var(--field-radius, 8px);
+  background: var(--surface);
+  color: var(--danger);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
+.detail-lineage-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 12.5px;
+}
+
+.detail-lineage-label {
+  color: var(--muted);
+}
+
+.detail-relation-link {
+  padding: 2px 8px;
+  border: 1px solid var(--field-border, var(--line));
+  border-radius: var(--control-radius, 6px);
+  background: var(--surface);
+  color: var(--accent);
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.detail-relation-link:hover {
+  background: var(--hover);
+}
+
+.detail-collaborator-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.detail-collaborator-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.detail-collaborator-row .composer-select {
+  flex: 1;
+  min-width: 160px;
+}
+
+.detail-dependency-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.detail-dependency-group + .detail-dependency-group {
+  padding-top: 8px;
+  border-top: 1px solid var(--divider-color, var(--line));
+}
+
+.detail-dependency-group-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.detail-dependency-group-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.detail-relation-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.detail-relation-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 10px;
+  border: 1px solid var(--field-border, var(--line));
+  border-radius: var(--field-radius, 8px);
+  background: var(--surface);
+  color: var(--ink);
+  text-align: left;
+  cursor: pointer;
+}
+
+.detail-relation-item:hover {
+  background: var(--hover);
+  border-color: var(--accent);
+}
+
+.detail-relation-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 12.5px;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-meta-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border: 1px solid var(--accent);
+  border-radius: var(--control-radius, 6px);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 11.5px;
+  font-weight: 500;
+}
+
+.composer-hint,
+.composer-empty-hint {
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.composer-empty-hint {
+  padding: 8px 10px;
+  border: 1px dashed var(--field-border, var(--line));
+  border-radius: var(--field-radius, 8px);
+}
+
+.composer-dependency-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 180px;
+  overflow-y: auto;
+  padding: 8px;
+  border: 1px solid var(--field-border, var(--line));
+  border-radius: var(--field-radius, 8px);
+  background: var(--field-background, var(--canvas));
+}
+
+.composer-dependency-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: var(--control-radius, 6px);
+  background: var(--surface);
+  border: 1px solid var(--field-border, var(--line));
+  cursor: pointer;
+}
+
+.composer-dependency-item:hover {
+  background: var(--hover);
+}
+
+.composer-dependency-item.is-cancelled {
+  border-color: color-mix(in srgb, var(--danger) 40%, var(--line));
+}
+
+.composer-dependency-item.is-cancelled .composer-dependency-title {
+  color: var(--muted);
+  text-decoration: line-through;
+}
+
+.composer-dependency-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 12.5px;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* 响应式窄屏适配 */

@@ -4638,3 +4638,523 @@ describe('悬赏板工作台外壳集成测试', () => {
     expect(getDetailSpy).toHaveBeenCalledTimes(4);
   });
 });
+
+describe('Issue 10 UI 集成测试：草稿共创拆单、前置依赖选择器与批量发布', () => {
+  let target: HTMLDivElement;
+  let instance: Record<string, unknown> | undefined;
+
+  beforeEach(() => {
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    setLocalePreference('zh-CN');
+  });
+
+  afterEach(async () => {
+    if (instance) {
+      await unmount(instance);
+      instance = undefined;
+    }
+    target.remove();
+    setLocalePreference('zh-CN');
+  });
+
+  it('在新建与编辑表单勾选前置依赖、校验循环错误并在详情与卡片中展示依赖联动及自动解锁', async () => {
+    const { port } = createMemoryPort();
+    const bountyApi = createMemoryBountyClient({ lan_open_registration: true });
+    const project = await bountyApi.createProject({ name: 'DAG UI Project' });
+    const worker = await bountyApi.registerAgent({ name: 'ui-worker', capabilities: ['svelte'] });
+
+    const preA = await bountyApi.createBounty({
+      project_id: project.id,
+      title: 'Prerequisite Task A',
+      difficulty: 'C',
+      assignee_mode: 'any',
+      status: 'OPEN',
+    });
+
+    instance = mount(App, { target, props: { files: port, bountyApi } });
+    await flush();
+
+    // 1. 通过 Composer 创建受 preA 阻塞的下游任务 B
+    target.querySelector<HTMLButtonElement>('[data-action="open-composer"]')!.click();
+    await flush();
+
+    const titleInput = target.querySelector<HTMLInputElement>('#bounty-title-input')!;
+    titleInput.value = 'Downstream Task B';
+    titleInput.dispatchEvent(new Event('input', { bubbles: true }));
+
+    const depSection = target.querySelector<HTMLElement>('[data-slot="composer-blocked-by"]')!;
+    expect(depSection).not.toBeNull();
+    const depCheckbox = depSection.querySelector<HTMLInputElement>(
+      `[data-dependency-id="${preA.id}"] input[type="checkbox"]`,
+    )!;
+    expect(depCheckbox).not.toBeNull();
+    depCheckbox.click();
+    await flush();
+
+    target.querySelector<HTMLButtonElement>('[data-action="publish-now"]')!.click();
+    await flush();
+
+    const allCards = Array.from(target.querySelectorAll<HTMLElement>('.bounty-card'));
+    const cardB = allCards.find(card => card.textContent?.includes('Downstream Task B'))!;
+    expect(cardB).not.toBeNull();
+    expect(cardB.querySelector('[data-slot="card-blocked"]')?.textContent?.trim()).toBe('等待前置 (1)');
+    expect(cardB.textContent).not.toContain('·');
+
+    // 2. 打开 preA 详情抽屉，查看下游阻塞项并点击跳转到 B，验证跳转与详情依赖列表
+    const cardA = allCards.find(card => card.textContent?.includes('Prerequisite Task A'))!;
+    cardA.querySelector<HTMLButtonElement>('.bounty-card-button')!.click();
+    await flush();
+
+    const drawerA = target.querySelector<HTMLElement>('[data-dialog="bounty-detail"]')!;
+    const downstreamBtn = drawerA.querySelector<HTMLButtonElement>(
+      '[data-slot="dependency-downstream-item"]',
+    )!;
+    expect(downstreamBtn).not.toBeNull();
+    expect(downstreamBtn.textContent).toContain('Downstream Task B');
+    downstreamBtn.click();
+    await flush();
+
+    const drawerB = target.querySelector<HTMLElement>('[data-dialog="bounty-detail"]')!;
+    expect(drawerB.textContent).toContain('Downstream Task B');
+    expect(drawerB.querySelector('[data-slot="detail-blocked"]')?.textContent?.trim()).toBe(
+      '等待前置 (1)',
+    );
+    expect(
+      drawerB.querySelector('[data-slot="dependency-blocker-item"]')?.textContent,
+    ).toContain('Prerequisite Task A');
+    expect(drawerB.textContent).not.toContain('·');
+
+    // 3. 当 Agent 完成 preA 后刷新：B 卡片的 blocked 徽章消失，时间线记录前置依赖解锁
+    const claim = await bountyApi.agentClaimBounty(worker.api_key, preA.id);
+    await bountyApi.agentCompleteBounty(worker.api_key, preA.id, {
+      lease_id: claim.lease_id,
+      completion_note: 'A completed',
+    });
+
+    target.querySelector<HTMLButtonElement>('[data-status-filter="ALL"]')!.click();
+    await flush();
+
+    const refreshedCardB = Array.from(target.querySelectorAll<HTMLElement>('.bounty-card')).find(
+      card => card.textContent?.includes('Downstream Task B'),
+    )!;
+    expect(refreshedCardB.querySelector('[data-slot="card-blocked"]')).toBeNull();
+
+    refreshedCardB.querySelector<HTMLButtonElement>('.bounty-card-button')!.click();
+    await flush();
+    const unlockedDrawerB = target.querySelector<HTMLElement>('[data-dialog="bounty-detail"]')!;
+    expect(unlockedDrawerB.textContent).toContain('前置依赖解锁');
+
+    // 4. 在编辑草稿时触发循环依赖，Composer 表单正确显示错误而不关闭
+    const draft1 = await bountyApi.createBounty({
+      project_id: project.id,
+      title: 'Cycle Draft 1',
+      difficulty: 'C',
+      assignee_mode: 'any',
+      status: 'DRAFT',
+    });
+    const draft2 = await bountyApi.createBounty({
+      project_id: project.id,
+      title: 'Cycle Draft 2',
+      difficulty: 'C',
+      assignee_mode: 'any',
+      blocked_by: [draft1.id],
+      status: 'DRAFT',
+    });
+
+    target.querySelector<HTMLButtonElement>('[data-nav-section="inbox"]')!.click();
+    await flush();
+
+    const draft1Card = target.querySelector<HTMLElement>(`.bounty-card[data-bounty-id="${draft1.id}"]`)!;
+    draft1Card.querySelector<HTMLButtonElement>('.bounty-card-button')!.click();
+    await flush();
+
+    target.querySelector<HTMLButtonElement>('[data-action="edit-draft"]')!.click();
+    await flush();
+
+    const cycleDepBox = target.querySelector<HTMLInputElement>(
+      `[data-slot="composer-blocked-by"] [data-dependency-id="${draft2.id}"] input[type="checkbox"]`,
+    )!;
+    cycleDepBox.click();
+    await flush();
+
+    target.querySelector<HTMLButtonElement>('[data-action="save-draft"]')!.click();
+    await flush();
+
+    const composerError = target.querySelector<HTMLElement>('[data-status="composer-error"]');
+    expect(composerError).not.toBeNull();
+    expect(composerError!.textContent).toContain('循环依赖');
+  });
+
+  it('在草稿详情邀请活跃 Agent 共创、审阅修订与评论消标、拆单跳转及在待我处理中批量发布草稿', async () => {
+    const { port } = createMemoryPort();
+    const bountyApi = createMemoryBountyClient({ lan_open_registration: true });
+    const project = await bountyApi.createProject({ name: 'Co-creation UI Project' });
+    const activeCollab = await bountyApi.registerAgent({
+      name: 'active-planner',
+      capabilities: ['plan'],
+    });
+    const disabledCollab = await bountyApi.registerAgent({
+      name: 'disabled-planner',
+      capabilities: ['plan'],
+    });
+    await bountyApi.disableAgent(disabledCollab.agent.id);
+
+    const parentDraft = await bountyApi.createBounty({
+      project_id: project.id,
+      title: 'Epic Feature Draft',
+      difficulty: 'A',
+      assignee_mode: 'any',
+      status: 'DRAFT',
+    });
+
+    instance = mount(App, { target, props: { files: port, bountyApi } });
+    await flush();
+
+    // 切到 Inbox 打开父草稿详情，验证协作者下拉框过滤掉 disabled Agent
+    target.querySelector<HTMLButtonElement>('[data-nav-section="inbox"]')!.click();
+    await flush();
+
+    target
+      .querySelector<HTMLButtonElement>(
+        `.bounty-card[data-bounty-id="${parentDraft.id}"] .bounty-card-button`,
+      )!
+      .click();
+    await flush();
+
+    const selectEl = target.querySelector<HTMLSelectElement>('[data-slot="collaborator-select"]')!;
+    expect(selectEl).not.toBeNull();
+    const optionValues = Array.from(selectEl.options).map(opt => opt.value);
+    expect(optionValues).toContain(activeCollab.agent.id);
+    expect(optionValues).not.toContain(disabledCollab.agent.id);
+
+    selectEl.value = activeCollab.agent.id;
+    selectEl.dispatchEvent(new Event('change', { bubbles: true }));
+    await flush();
+
+    target.querySelector<HTMLButtonElement>('[data-action="invite-collaborator"]')!.click();
+    await flush();
+
+    expect(target.querySelector('[data-slot="detail-collaborator"]')?.textContent).toContain(
+      'active-planner',
+    );
+    expect(
+      target.querySelector(
+        `.bounty-card[data-bounty-id="${parentDraft.id}"] [data-slot="card-collaborator"]`,
+      )?.textContent,
+    ).toContain('active-planner');
+
+    // 受邀 Agent 修订并拆分草稿
+    await bountyApi.agentUpdateDraft(activeCollab.api_key, parentDraft.id, {
+      title: 'Epic Feature Draft Revised',
+    });
+    const splitRes = await bountyApi.agentSplitDraft(activeCollab.api_key, parentDraft.id, {
+      items: [
+        { key: 'sub1', title: 'Child Draft 1', difficulty: 'C', assignee_mode: 'any' },
+        {
+          key: 'sub2',
+          title: 'Child Draft 2',
+          difficulty: 'B',
+          assignee_mode: 'any',
+          blocked_by: ['sub1'],
+        },
+      ],
+    });
+    expect(splitRes.children).toHaveLength(2);
+    const [child1, child2] = splitRes.children;
+
+    // 刷新工作区并重新打开父草稿，验证「待人工审核」横幅与派生子单列表
+    target.querySelector<HTMLButtonElement>('[aria-label="关闭对话框"]')!.click();
+    await flush();
+    target.querySelector<HTMLButtonElement>('[data-action="refresh-inbox"]')!.click();
+    await flush();
+
+    const revisedParentCard = target.querySelector<HTMLElement>(
+      `.bounty-card[data-bounty-id="${parentDraft.id}"]`,
+    )!;
+    expect(revisedParentCard.querySelector('[data-slot="card-draft-review"]')?.textContent?.trim()).toBe(
+      '待人工审核',
+    );
+
+    revisedParentCard.querySelector<HTMLButtonElement>('.bounty-card-button')!.click();
+    await flush();
+
+    expect(target.querySelector('[data-slot="detail-draft-review-banner"]')).not.toBeNull();
+    const childItems = target.querySelectorAll<HTMLElement>('[data-slot="dependency-child-item"]');
+    expect(childItems).toHaveLength(2);
+    expect(target.querySelector('[data-action="publish-derived-drafts"]')).not.toBeNull();
+
+    // 管理员发表评论清除待人工审核标记
+    const commentInput = target.querySelector<HTMLTextAreaElement>('[data-slot="comment-input"]')!;
+    commentInput.value = 'Approved split structure';
+    commentInput.dispatchEvent(new Event('input', { bubbles: true }));
+    await flush();
+    target.querySelector<HTMLButtonElement>('[data-action="submit-comment"]')!.click();
+    await flush();
+
+    expect(target.querySelector('[data-slot="detail-draft-review-banner"]')).toBeNull();
+    expect(
+      target.querySelector(
+        `.bounty-card[data-bounty-id="${parentDraft.id}"] [data-slot="card-draft-review"]`,
+      ),
+    ).toBeNull();
+
+    // 点击子单跳转到子单详情，验证「派生子单」徽章与「来自父草稿」返回链接
+    target.querySelector<HTMLButtonElement>(`[data-slot="dependency-child-item"][data-bounty-id="${child2.id}"]`)!.click();
+    await flush();
+
+    expect(target.querySelector('[data-slot="detail-derived-draft"]')).not.toBeNull();
+    const openParentBtn = target.querySelector<HTMLButtonElement>('[data-action="open-parent-bounty"]')!;
+    expect(openParentBtn.textContent).toContain('Epic Feature Draft Revised');
+    openParentBtn.click();
+    await flush();
+    expect(target.querySelector('.detail-drawer-title')?.textContent).toContain(
+      'Epic Feature Draft Revised',
+    );
+
+    // 关闭抽屉并在待我处理视图中使用批量选择与批量发布按钮发布全部草稿
+    target.querySelector<HTMLButtonElement>('[aria-label="关闭对话框"]')!.click();
+    await flush();
+
+    const child1Card = target.querySelector<HTMLElement>(`.bounty-card[data-bounty-id="${child1.id}"]`)!;
+    expect(child1Card.querySelector('[data-slot="card-derived-draft"]')).not.toBeNull();
+
+    const batchBar = target.querySelector<HTMLElement>('[data-slot="inbox-batch-publish"]')!;
+    expect(batchBar).not.toBeNull();
+    expect(batchBar.textContent).not.toContain('·');
+
+    const publishSelectedBtn = target.querySelector<HTMLButtonElement>(
+      '[data-action="publish-selected-drafts"]',
+    )!;
+    expect(publishSelectedBtn.disabled).toBe(true);
+
+    target.querySelector<HTMLButtonElement>('[data-action="select-all-inbox-drafts"]')!.click();
+    await flush();
+    expect(publishSelectedBtn.disabled).toBe(false);
+    expect(publishSelectedBtn.textContent).toContain('3');
+
+    publishSelectedBtn.click();
+    await flush();
+
+    // 全部草稿发布后待我处理草稿清空，且悬赏板中可见子单依赖已生效
+    expect(target.querySelector('[data-slot="inbox-batch-publish"]')).toBeNull();
+    target.querySelector<HTMLButtonElement>('[data-nav-section="bounties"]')!.click();
+    await flush();
+
+    const child2BoardCard = target.querySelector<HTMLElement>(`.bounty-card[data-bounty-id="${child2.id}"]`)!;
+    expect(child2BoardCard).not.toBeNull();
+    expect(child2BoardCard.querySelector('[data-slot="card-blocked"]')?.textContent?.trim()).toBe(
+      '等待前置 (1)',
+    );
+    expect(target.textContent).not.toContain('·');
+  });
+
+  it('编辑含已取消前置的草稿时显式保留并允许取消勾选 CANCELLED 前置任务', async () => {
+    const { port } = createMemoryPort();
+    const bountyApi = createMemoryBountyClient({ lan_open_registration: true });
+    const project = await bountyApi.createProject({ name: 'Cancelled Prereq UI Project' });
+
+    const prereqSelected = await bountyApi.createBounty({
+      project_id: project.id,
+      title: 'Selected Prereq P',
+      difficulty: 'C',
+      assignee_mode: 'any',
+      status: 'OPEN',
+    });
+    const prereqUnselected = await bountyApi.createBounty({
+      project_id: project.id,
+      title: 'Unselected Cancelled P2',
+      difficulty: 'C',
+      assignee_mode: 'any',
+      status: 'OPEN',
+    });
+    const draftQ = await bountyApi.createBounty({
+      project_id: project.id,
+      title: 'Draft Q Depending On P',
+      difficulty: 'B',
+      assignee_mode: 'any',
+      blocked_by: [prereqSelected.id],
+      status: 'DRAFT',
+    });
+
+    await bountyApi.cancelBounty(prereqSelected.id);
+    await bountyApi.cancelBounty(prereqUnselected.id);
+
+    instance = mount(App, { target, props: { files: port, bountyApi } });
+    await flush();
+
+    target.querySelector<HTMLButtonElement>('[data-nav-section="inbox"]')!.click();
+    await flush();
+
+    target
+      .querySelector<HTMLButtonElement>(`.bounty-card[data-bounty-id="${draftQ.id}"] .bounty-card-button`)!
+      .click();
+    await flush();
+
+    target.querySelector<HTMLButtonElement>('[data-action="edit-draft"]')!.click();
+    await flush();
+
+    const depSection = target.querySelector<HTMLElement>('[data-slot="composer-blocked-by"]')!;
+    expect(depSection.textContent).toContain('已选 1 项');
+
+    // 已勾选的已取消前置 P 仍展示在列表中并带 CANCELLED 徽章与 is-cancelled 样式；未勾选的 P2 不出现
+    const cancelledCandidate = depSection.querySelector<HTMLElement>(
+      `[data-dependency-id="${prereqSelected.id}"]`,
+    )!;
+    expect(cancelledCandidate).not.toBeNull();
+    expect(cancelledCandidate.classList.contains('is-cancelled')).toBe(true);
+    expect(cancelledCandidate.dataset.dependencyStatus).toBe('CANCELLED');
+    expect(cancelledCandidate.querySelector('[data-status="CANCELLED"]')).not.toBeNull();
+    const cancelledCheckbox = cancelledCandidate.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+    expect(cancelledCheckbox.checked).toBe(true);
+
+    expect(depSection.querySelector(`[data-dependency-id="${prereqUnselected.id}"]`)).toBeNull();
+
+    // 取消勾选 P 后保存草稿应成功并清空 blocked_by
+    cancelledCheckbox.click();
+    await flush();
+    expect(depSection.textContent).not.toContain('已选 1 项');
+
+    target.querySelector<HTMLButtonElement>('[data-action="save-draft"]')!.click();
+    await flush();
+
+    expect(target.querySelector('[data-dialog="bounty-composer"]')).toBeNull();
+    const updatedQ = await bountyApi.getBountyDetail(draftQ.id);
+    expect(updatedQ.bounty.blocked_by).toEqual([]);
+  });
+
+  it('前置依赖与协作者说明收纳为问号气泡且 Escape 优先收起气泡并校验详情抽屉模态焦点管理', async () => {
+    const { port } = createMemoryPort();
+    const bountyApi = createMemoryBountyClient({ lan_open_registration: true });
+    const project = await bountyApi.createProject({ name: 'Help Popover & Focus Project' });
+    const agent = await bountyApi.registerAgent({ name: 'focus-helper-agent' });
+
+    const parentDraft = await bountyApi.createBounty({
+      project_id: project.id,
+      title: 'Parent Focus Draft',
+      difficulty: 'B',
+      assignee_mode: 'any',
+      status: 'DRAFT',
+    });
+    await bountyApi.inviteDraftCollaborator(parentDraft.id, { agent_id: agent.agent.id });
+    const splitRes = await bountyApi.agentSplitDraft(agent.api_key, parentDraft.id, {
+      items: [{ key: 'child', title: 'Child Focus Draft', difficulty: 'C', assignee_mode: 'any' }],
+    });
+    const childDraft = splitRes.children[0];
+
+    instance = mount(App, { target, props: { files: port, bountyApi } });
+    await flush();
+
+    // 1. 新建悬赏弹窗：前置依赖区域无常驻解释段落，点击 ? 按钮展开说明，首次 Escape 仅收起气泡，再次 Escape 关闭弹窗
+    target.querySelector<HTMLButtonElement>('[data-action="open-composer"]')!.click();
+    await flush();
+
+    const composerDialog = target.querySelector<HTMLElement>('[data-dialog="bounty-composer"]')!;
+    const composerDepSection = composerDialog.querySelector<HTMLElement>(
+      '[data-slot="composer-blocked-by"]',
+    )!;
+    expect(composerDepSection.querySelector('.composer-hint')).toBeNull();
+
+    const depHelpBtn = composerDepSection.querySelector<HTMLButtonElement>(
+      '[data-action="toggle-dependencies-help"]',
+    )!;
+    const depHelpPopover = composerDepSection.querySelector<HTMLElement>('#composer-blocked-by-help')!;
+    expect(depHelpPopover.hidden).toBe(true);
+
+    depHelpBtn.click();
+    await flush();
+    expect(depHelpPopover.hidden).toBe(false);
+    expect(depHelpPopover.textContent).toContain('循环依赖');
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    await flush();
+    expect(depHelpPopover.hidden).toBe(true);
+    expect(target.querySelector('[data-dialog="bounty-composer"]')).not.toBeNull();
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    await flush();
+    expect(target.querySelector('[data-dialog="bounty-composer"]')).toBeNull();
+
+    // 2. 切到待我处理打开父草稿详情抽屉：验证自动聚焦、Tab/Shift+Tab 闭环、外部 focusin 拉回、协作者 ? 气泡 Escape 优先与关联跳转焦点保持
+    target.querySelector<HTMLButtonElement>('[data-nav-section="inbox"]')!.click();
+    await flush();
+
+    const openerBtn = target.querySelector<HTMLButtonElement>(
+      `.bounty-card[data-bounty-id="${parentDraft.id}"] .bounty-card-button`,
+    )!;
+    openerBtn.focus();
+    openerBtn.click();
+    await flush();
+
+    const drawer = target.querySelector<HTMLElement>('[data-dialog="bounty-detail"]')!;
+    expect(drawer).not.toBeNull();
+    expect(drawer.contains(document.activeElement)).toBe(true);
+
+    const collabControls = drawer.querySelector<HTMLElement>('.detail-collaborator-controls')!;
+    expect(collabControls.querySelector('.detail-empty-hint')).toBeNull();
+
+    const collabHelpBtn = collabControls.querySelector<HTMLButtonElement>(
+      '[data-action="toggle-collaborator-help"]',
+    )!;
+    const collabHelpPopover = collabControls.querySelector<HTMLElement>('#detail-collaborator-help')!;
+    expect(collabHelpPopover.hidden).toBe(true);
+
+    collabHelpBtn.click();
+    await flush();
+    expect(collabHelpPopover.hidden).toBe(false);
+    expect(collabHelpPopover.textContent).toContain('待人工审核');
+
+    // 首次 Escape 收起协作者气泡而不关闭详情抽屉
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    await flush();
+    expect(collabHelpPopover.hidden).toBe(true);
+    expect(target.querySelector('[data-dialog="bounty-detail"]')).not.toBeNull();
+
+    // Tab / Shift+Tab 焦点陷阱闭环（空评论时发送按钮 disabled，最后一个可聚焦控件为评论输入框）
+    const drawerCloseBtn = drawer.querySelector<HTMLButtonElement>('[aria-label="关闭对话框"]')!;
+    const drawerCommentInput = drawer.querySelector<HTMLTextAreaElement>(
+      '[data-slot="comment-input"]',
+    )!;
+    drawerCloseBtn.focus();
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, bubbles: true }));
+    expect(document.activeElement).toBe(drawerCommentInput);
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true }));
+    expect(document.activeElement).toBe(drawerCloseBtn);
+
+    // 外部元素触发 focusin 时焦点被拉回抽屉内部
+    const outsideNav = target.querySelector<HTMLButtonElement>('[data-nav-section="bounties"]')!;
+    outsideNav.focus();
+    outsideNav.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+    expect(drawer.contains(document.activeElement)).toBe(true);
+
+    // 点击派生子单跳转并再点「来自父草稿」返回时，焦点仍保持在详情抽屉内
+    drawer
+      .querySelector<HTMLButtonElement>(`[data-slot="dependency-child-item"][data-bounty-id="${childDraft.id}"]`)!
+      .click();
+    await flush();
+    expect(target.querySelector('.detail-drawer-title')?.textContent).toContain('Child Focus Draft');
+    expect(drawer.contains(document.activeElement)).toBe(true);
+
+    // 从抽屉中打开编辑草稿弹窗时，上层模态正常接收输入/Escape 而不被下层抽屉抢夺；关闭后焦点回到抽屉内编辑按钮
+    const editDraftBtn = drawer.querySelector<HTMLButtonElement>('[data-action="edit-draft"]')!;
+    editDraftBtn.focus();
+    editDraftBtn.click();
+    await flush();
+    expect(target.querySelector('[data-dialog="bounty-composer"]')).not.toBeNull();
+    const composerTitle = target.querySelector<HTMLInputElement>('#bounty-title-input')!;
+    composerTitle.focus();
+    expect(document.activeElement).toBe(composerTitle);
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    await flush();
+    expect(target.querySelector('[data-dialog="bounty-composer"]')).toBeNull();
+    expect(target.querySelector('[data-dialog="bounty-detail"]')).not.toBeNull();
+    expect(drawer.contains(document.activeElement)).toBe(true);
+    expect(document.activeElement).toBe(editDraftBtn);
+
+    // 最终按 Escape 关闭详情抽屉并恢复焦点到打开它的卡片按钮
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    await flush();
+    expect(target.querySelector('[data-dialog="bounty-detail"]')).toBeNull();
+    expect(document.activeElement).toBe(openerBtn);
+  });
+});

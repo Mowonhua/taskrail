@@ -3,7 +3,9 @@
    * 文件职责：承载右侧滑出的悬赏任务详情抽屉。
    * 定义范围：展示任务状态与元数据、状态转换动作栏（发布/撤回/编辑/取消）、Markdown+KaTeX 正文与验收条件渲染及状态流转时间线。
    */
+  import { onMount } from 'svelte';
   import type {
+    AgentSummary,
     ApproveArbitrationInput,
     BountyDetail,
     BountyDifficulty,
@@ -12,11 +14,13 @@
     QualityGrade,
     RejectArbitrationInput,
   } from '../api/types';
+  import { observeAnchoredPopover, positionAnchoredPopover } from '../anchored-popover';
   import { locale, t } from '../i18n';
   import ProjectIcon from '../ProjectIcon.svelte';
   import {
     computeActiveDurationMs,
     formatActiveDuration,
+    formatAgentTier,
     formatAssigneeConstraint,
     formatBountyArbitrator,
     formatBountyExecutor,
@@ -25,6 +29,7 @@
     formatCommentAuthorRole,
     formatCommentKind,
     formatCompletionCost,
+    formatDraftCollaborator,
     formatEventActor,
     formatEventLabel,
     formatLeaseCountdown,
@@ -37,12 +42,17 @@
   interface Props {
     detail: BountyDetail;
     project?: BountyProject;
+    agents?: AgentSummary[];
+    allBounties?: BountyTask[];
     onClose: () => void;
     onEditDraft: (bounty: BountyTask) => void;
     onPublish: (bountyId: string) => Promise<void>;
     onWithdraw: (bountyId: string) => Promise<void>;
     onCancel: (bountyId: string) => Promise<void>;
     onReleaseLease: (bountyId: string) => Promise<void>;
+    onInviteCollaborator?: (bountyId: string, agentId: string | null) => Promise<void>;
+    onSelectBounty?: (bountyId: string) => Promise<void> | void;
+    onPublishBatch?: (bountyIds: string[]) => Promise<void>;
     onCreateComment?: (bountyId: string, body: string) => Promise<void>;
     onApproveArbitration?: (bountyId: string, input: ApproveArbitrationInput) => Promise<void>;
     onRejectArbitration?: (bountyId: string, input: RejectArbitrationInput) => Promise<void>;
@@ -51,16 +61,24 @@
   let {
     detail,
     project,
+    agents = [],
+    allBounties = [],
     onClose,
     onEditDraft,
     onPublish,
     onWithdraw,
     onCancel,
     onReleaseLease,
+    onInviteCollaborator,
+    onSelectBounty,
+    onPublishBatch,
     onCreateComment,
     onApproveArbitration,
     onRejectArbitration,
   }: Props = $props();
+
+  const FOCUSABLE_SELECTOR =
+    'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
   let busy = $state(false);
   let actionError = $state('');
@@ -73,18 +91,121 @@
   let approveComment = $state('');
   let rejectComment = $state('');
   let arbitrationError = $state('');
+  let selectedCollaboratorId = $state('');
+  let collaboratorError = $state('');
   let lastBountyId = '';
   let lastArbitrationStateKey = '';
+  let lastCollaboratorKey = '';
+
+  let drawerEl = $state<HTMLDivElement | null>(null);
+  let collaboratorHelpButton = $state<HTMLButtonElement | undefined>(undefined);
+  let collaboratorHelpBubble = $state<HTMLDivElement | undefined>(undefined);
+  let collaboratorHelpOpen = $state(false);
+  let returnFocusEl: HTMLElement | null =
+    typeof document !== 'undefined' && document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+  let isDestroyed = false;
 
   const bounty = $derived(detail.bounty);
   const events = $derived(detail.events);
   const comments = $derived(detail.comments ?? []);
+  const blockedBySummaries = $derived(bounty.blocked_by_summaries ?? []);
+  const blockDownstreams = $derived(detail.blocks ?? []);
+  const childBounties = $derived(detail.child_bounties ?? []);
+
+  function getFocusableElements(container: HTMLElement): HTMLElement[] {
+    return Array.from(container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter(
+      el => !el.hasAttribute('disabled') && !el.closest('[hidden], [inert]'),
+    );
+  }
+
+  function isTopmostDialog(): boolean {
+    if (isDestroyed || !drawerEl || typeof document === 'undefined') return false;
+    const modals = Array.from(
+      document.querySelectorAll<HTMLElement>('[role="dialog"][aria-modal="true"]'),
+    );
+    return modals.length > 0 && modals[modals.length - 1] === drawerEl;
+  }
+
+  function focusIntoDrawer(): void {
+    if (!drawerEl) return;
+    const target = getFocusableElements(drawerEl)[0] ?? drawerEl;
+    target.focus();
+  }
+
+  function closeCollaboratorHelp(): void {
+    collaboratorHelpOpen = false;
+    if (
+      typeof collaboratorHelpBubble?.hidePopover === 'function' &&
+      collaboratorHelpBubble.matches(':popover-open')
+    ) {
+      collaboratorHelpBubble.hidePopover();
+    }
+  }
+
+  function toggleCollaboratorHelp(): void {
+    if (!collaboratorHelpButton || !collaboratorHelpBubble) return;
+    collaboratorHelpOpen = !collaboratorHelpOpen;
+    if (!collaboratorHelpOpen) {
+      closeCollaboratorHelp();
+      return;
+    }
+    if (
+      typeof collaboratorHelpBubble.showPopover === 'function' &&
+      !collaboratorHelpBubble.matches(':popover-open')
+    ) {
+      collaboratorHelpBubble.showPopover();
+    }
+    positionAnchoredPopover(
+      collaboratorHelpButton,
+      collaboratorHelpBubble,
+      closeCollaboratorHelp,
+    );
+  }
+
+  onMount(() => {
+    if (isTopmostDialog()) {
+      const currentFocus = document.activeElement;
+      if (!(currentFocus instanceof Node) || !drawerEl?.contains(currentFocus)) {
+        focusIntoDrawer();
+      }
+    }
+    const docBody = drawerEl?.ownerDocument?.body ?? null;
+    const modalObserver =
+      typeof MutationObserver !== 'undefined' && docBody
+        ? new MutationObserver(() => {
+            if (isDestroyed || !drawerEl || !isTopmostDialog()) return;
+            const currentFocus = document.activeElement;
+            if (!(currentFocus instanceof Node) || !drawerEl.contains(currentFocus)) {
+              focusIntoDrawer();
+            }
+          })
+        : null;
+    modalObserver?.observe(docBody!, { childList: true, subtree: true });
+    return () => {
+      isDestroyed = true;
+      modalObserver?.disconnect();
+      const opener = returnFocusEl;
+      returnFocusEl = null;
+      if (opener && opener.isConnected) {
+        opener.focus();
+      }
+    };
+  });
 
   $effect(() => {
     if (bounty.id !== lastBountyId) {
       lastBountyId = bounty.id;
       commentDraft = '';
       commentError = '';
+      actionError = '';
+    }
+    const collabKey = `${bounty.id}:${bounty.draft_collaborator_agent_id ?? ''}`;
+    if (collabKey !== lastCollaboratorKey) {
+      lastCollaboratorKey = collabKey;
+      selectedCollaboratorId = bounty.draft_collaborator_agent_id ?? '';
+      collaboratorError = '';
     }
     const arbitrationKey = `${bounty.id}:${bounty.status}:${bounty.rejection_count}`;
     if (arbitrationKey !== lastArbitrationStateKey) {
@@ -95,6 +216,44 @@
       rejectComment = '';
       arbitrationError = '';
     }
+  });
+
+  $effect(() => {
+    void bounty.id;
+    void bounty.status;
+    void detail;
+    if (!drawerEl || !isTopmostDialog()) return;
+    const currentFocus = document.activeElement;
+    if (!(currentFocus instanceof Node) || !drawerEl.contains(currentFocus)) {
+      focusIntoDrawer();
+    }
+  });
+
+  $effect(() => {
+    if (bounty.status !== 'DRAFT') {
+      closeCollaboratorHelp();
+    }
+  });
+
+  $effect(() => {
+    if (!collaboratorHelpOpen || !collaboratorHelpButton || !collaboratorHelpBubble) return;
+    const stopObserve = observeAnchoredPopover(
+      collaboratorHelpButton,
+      collaboratorHelpBubble,
+      closeCollaboratorHelp,
+    );
+    const onKeydown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        event.stopPropagation();
+        closeCollaboratorHelp();
+      }
+    };
+    document.addEventListener('keydown', onKeydown, true);
+    return () => {
+      document.removeEventListener('keydown', onKeydown, true);
+      stopObserve();
+    };
   });
 
   $effect(() => {
@@ -126,6 +285,43 @@
     const _lang = $locale;
     return formatBountyPublisher(bounty);
   });
+
+  const collaborator = $derived.by(() => {
+    const _lang = $locale;
+    return formatDraftCollaborator(bounty);
+  });
+
+  const activeAgents = $derived(agents.filter(agent => agent.status === 'active'));
+
+  const parentBountySummary = $derived(
+    bounty.parent_bounty_id
+      ? (allBounties.find(item => item.id === bounty.parent_bounty_id) ?? null)
+      : null,
+  );
+
+  const completedBlockersCount = $derived(
+    blockedBySummaries.filter(item => item.status === 'COMPLETED').length,
+  );
+
+  const blockedRemainingCount = $derived.by(() => {
+    const incomplete = blockedBySummaries.filter(item => item.status !== 'COMPLETED').length;
+    if (incomplete > 0) return incomplete;
+    return bounty.is_blocked ? Math.max(1, (bounty.blocked_by ?? []).length) : 0;
+  });
+
+  const childDraftIds = $derived(
+    childBounties.filter(item => item.status === 'DRAFT').map(item => item.id),
+  );
+
+  const showCoCreationSection = $derived(
+    bounty.status === 'DRAFT' ||
+      Boolean(bounty.draft_collaborator_agent_id) ||
+      Boolean(bounty.parent_bounty_id),
+  );
+
+  const showDependenciesSection = $derived(
+    blockedBySummaries.length > 0 || blockDownstreams.length > 0 || childBounties.length > 0,
+  );
 
   const executor = $derived.by(() => {
     const _lang = $locale;
@@ -207,6 +403,20 @@
     }
   }
 
+  async function submitCollaboratorChange(agentId: string | null): Promise<void> {
+    if (!onInviteCollaborator || busy) return;
+    collaboratorError = '';
+    actionError = '';
+    busy = true;
+    try {
+      await onInviteCollaborator(bounty.id, agentId);
+    } catch (error) {
+      collaboratorError = formatServiceError(error);
+    } finally {
+      busy = false;
+    }
+  }
+
   async function submitApproveArbitration(): Promise<void> {
     if (!onApproveArbitration || busy) return;
     arbitrationError = '';
@@ -266,16 +476,54 @@
     }
   }
 
+  function handleWindowFocusIn(event: FocusEvent): void {
+    if (!isTopmostDialog() || !drawerEl) return;
+    const target = event.target;
+    if (target instanceof Node && drawerEl.contains(target)) return;
+    focusIntoDrawer();
+  }
+
   function handleWindowKeydown(event: KeyboardEvent): void {
+    if (!isTopmostDialog() || !drawerEl) return;
+    if (event.key === 'Tab') {
+      const focusables = getFocusableElements(drawerEl);
+      if (focusables.length === 0) {
+        event.preventDefault();
+        drawerEl.focus();
+        return;
+      }
+      const first = focusables[0];
+      const last = focusables[focusables.length - 1];
+      const active = document.activeElement;
+      if (!drawerEl.contains(active)) {
+        event.preventDefault();
+        (event.shiftKey ? last : first).focus();
+        return;
+      }
+      if (event.shiftKey && (active === first || active === drawerEl)) {
+        event.preventDefault();
+        last.focus();
+        return;
+      }
+      if (!event.shiftKey && active === last) {
+        event.preventDefault();
+        first.focus();
+      }
+      return;
+    }
     if (event.key === 'Escape') {
       event.preventDefault();
       event.stopPropagation();
+      if (collaboratorHelpOpen) {
+        closeCollaboratorHelp();
+        return;
+      }
       onClose();
     }
   }
 </script>
 
-<svelte:window onkeydown={handleWindowKeydown} />
+<svelte:window onkeydown={handleWindowKeydown} onfocusin={handleWindowFocusIn} />
 
 <div
   class="drawer-backdrop"
@@ -285,6 +533,8 @@
   }}
 >
   <div
+    bind:this={drawerEl}
+    tabindex="-1"
     class="detail-drawer"
     role="dialog"
     aria-modal="true"
@@ -301,6 +551,21 @@
           <span class="status-pill" data-status={bounty.status}>
             {statusLabel}
           </span>
+          {#if bounty.status === 'DRAFT' && bounty.draft_needs_human_review}
+            <span class="draft-review-pill" data-slot="detail-draft-review">
+              {$t('待人工审核')}
+            </span>
+          {/if}
+          {#if bounty.is_blocked}
+            <span class="blocked-pill" data-slot="detail-blocked">
+              {$t('等待前置 ({count})', { count: blockedRemainingCount })}
+            </span>
+          {/if}
+          {#if bounty.parent_bounty_id}
+            <span class="derived-draft-pill" data-slot="detail-derived-draft">
+              {$t('派生子单')}
+            </span>
+          {/if}
           {#if bounty.require_arbitration}
             <span class="arbitration-pill">{$t('仲裁开启')}</span>
           {/if}
@@ -708,6 +973,246 @@
                     ? $t('第 4 次打回并重开')
                     : $t('打回修改')}
                 </button>
+              </div>
+            </div>
+          {/if}
+        </section>
+      {/if}
+
+      {#if showCoCreationSection}
+        <section class="detail-section detail-cocreation-card" data-slot="detail-draft-cocreation">
+          <div class="detail-cocreation-header">
+            <h3 class="detail-section-title">{$t('草稿共创与派生')}</h3>
+            {#if collaborator}
+              <span class="bounty-collaborator-pill" data-slot="detail-collaborator">
+                {$t('协作者: {agent}', { agent: collaborator.label })}
+              </span>
+            {/if}
+          </div>
+
+          {#if bounty.status === 'DRAFT' && bounty.draft_needs_human_review}
+            <p class="detail-review-banner" role="status" data-slot="detail-draft-review-banner">
+              {$t('受邀 Agent 已更新该草稿，请审阅修订内容并在确认后发布。')}
+            </p>
+          {/if}
+
+          {#if bounty.parent_bounty_id}
+            <div class="detail-lineage-row" data-slot="detail-parent-link">
+              <span class="detail-lineage-label">{$t('来自父草稿')}</span>
+              <button
+                type="button"
+                class="detail-relation-link"
+                data-action="open-parent-bounty"
+                data-bounty-id={bounty.parent_bounty_id}
+                onclick={() => void onSelectBounty?.(bounty.parent_bounty_id!)}
+              >
+                {parentBountySummary?.title ?? bounty.parent_bounty_id}
+              </button>
+            </div>
+          {/if}
+
+          {#if bounty.status === 'DRAFT' && onInviteCollaborator}
+            <div class="detail-collaborator-controls">
+              <div class="project-form-field">
+                <div class="settings-label-group">
+                  <label class="composer-label" for="detail-collaborator-select">
+                    {$t('受邀协作者')}
+                  </label>
+                  <span class="settings-help">
+                    <button
+                      bind:this={collaboratorHelpButton}
+                      type="button"
+                      class="settings-help-trigger"
+                      data-action="toggle-collaborator-help"
+                      aria-label={$t('关于受邀协作者')}
+                      aria-expanded={collaboratorHelpOpen}
+                      aria-controls="detail-collaborator-help"
+                      onclick={toggleCollaboratorHelp}
+                    >
+                      <svg
+                        width="14"
+                        height="14"
+                        viewBox="0 0 16 16"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="1.5"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        aria-hidden="true"
+                      >
+                        <circle cx="8" cy="8" r="6.25" />
+                        <path d="M6.4 6.2a1.7 1.7 0 0 1 3.2.7c0 1.1-1.6 1.4-1.6 2.5" />
+                        <circle cx="8" cy="11.8" r=".75" fill="currentColor" stroke="none" />
+                      </svg>
+                    </button>
+                    <div
+                      bind:this={collaboratorHelpBubble}
+                      id="detail-collaborator-help"
+                      class="settings-help-popover dropdown"
+                      role="note"
+                      popover="manual"
+                      hidden={!collaboratorHelpOpen}
+                      style="position: fixed; margin: 0; bottom: auto; right: auto; box-sizing: border-box;"
+                    >
+                      <p>{$t('Agent 修订或评论草稿会标记为待人工审核；管理员发表评论将清除该标记并通知协作者。')}</p>
+                    </div>
+                  </span>
+                </div>
+                <div class="detail-collaborator-row">
+                  <select
+                    id="detail-collaborator-select"
+                    class="composer-select"
+                    data-slot="collaborator-select"
+                    disabled={busy}
+                    bind:value={selectedCollaboratorId}
+                  >
+                    <option value="">{$t('选择活跃 Agent…')}</option>
+                    {#if bounty.draft_collaborator_agent_id && !activeAgents.some(a => a.id === bounty.draft_collaborator_agent_id)}
+                      <option value={bounty.draft_collaborator_agent_id}>
+                        {collaborator?.label ?? bounty.draft_collaborator_agent_id}
+                      </option>
+                    {/if}
+                    {#each activeAgents as agent (agent.id)}
+                      <option value={agent.id}>
+                        {agent.name} ({formatAgentTier(agent.tier)})
+                      </option>
+                    {/each}
+                  </select>
+                  <button
+                    type="button"
+                    class="primary"
+                    data-action="invite-collaborator"
+                    disabled={busy ||
+                      !selectedCollaboratorId ||
+                      selectedCollaboratorId === bounty.draft_collaborator_agent_id}
+                    onclick={() => void submitCollaboratorChange(selectedCollaboratorId)}
+                  >
+                    {bounty.draft_collaborator_agent_id ? $t('更换协作者') : $t('邀请协助草稿')}
+                  </button>
+                  {#if bounty.draft_collaborator_agent_id}
+                    <button
+                      type="button"
+                      class="secondary-action"
+                      data-action="clear-collaborator"
+                      disabled={busy}
+                      onclick={() => void submitCollaboratorChange(null)}
+                    >
+                      {$t('取消协作')}
+                    </button>
+                  {/if}
+                </div>
+              </div>
+              {#if collaboratorError}
+                <p class="detail-comment-error" role="alert" data-status="collaborator-error">
+                  {collaboratorError}
+                </p>
+              {/if}
+            </div>
+          {/if}
+        </section>
+      {/if}
+
+      {#if showDependenciesSection}
+        <section class="detail-section detail-dependencies-card" data-slot="detail-dependencies">
+          <h3 class="detail-section-title">{$t('依赖与拆单关系')}</h3>
+
+          {#if blockedBySummaries.length > 0}
+            <div class="detail-dependency-group" data-slot="detail-blocked-by-list">
+              <div class="detail-dependency-group-header">
+                <span class="detail-dependency-group-title">
+                  {$t('前置依赖 ({done}/{total})', {
+                    done: completedBlockersCount,
+                    total: blockedBySummaries.length,
+                  })}
+                </span>
+              </div>
+              <div class="detail-relation-list">
+                {#each blockedBySummaries as dep (dep.id)}
+                  {@const depStatusLabel = (() => {
+                    const _lang = $locale;
+                    return formatBountyStatus(dep.status, dep.status === 'DRAFT');
+                  })()}
+                  <button
+                    type="button"
+                    class="detail-relation-item"
+                    data-slot="dependency-blocker-item"
+                    data-bounty-id={dep.id}
+                    data-bounty-status={dep.status}
+                    onclick={() => void onSelectBounty?.(dep.id)}
+                  >
+                    <span class="status-pill" data-status={dep.status}>{depStatusLabel}</span>
+                    <span class="detail-relation-title">{dep.title}</span>
+                  </button>
+                {/each}
+              </div>
+            </div>
+          {/if}
+
+          {#if blockDownstreams.length > 0}
+            <div class="detail-dependency-group" data-slot="detail-blocks-list">
+              <div class="detail-dependency-group-header">
+                <span class="detail-dependency-group-title">
+                  {$t('被我阻塞的下游 ({count})', { count: blockDownstreams.length })}
+                </span>
+              </div>
+              <div class="detail-relation-list">
+                {#each blockDownstreams as item (item.id)}
+                  {@const itemStatusLabel = (() => {
+                    const _lang = $locale;
+                    return formatBountyStatus(item.status, item.status === 'DRAFT');
+                  })()}
+                  <button
+                    type="button"
+                    class="detail-relation-item"
+                    data-slot="dependency-downstream-item"
+                    data-bounty-id={item.id}
+                    data-bounty-status={item.status}
+                    onclick={() => void onSelectBounty?.(item.id)}
+                  >
+                    <span class="status-pill" data-status={item.status}>{itemStatusLabel}</span>
+                    <span class="detail-relation-title">{item.title}</span>
+                  </button>
+                {/each}
+              </div>
+            </div>
+          {/if}
+
+          {#if childBounties.length > 0}
+            <div class="detail-dependency-group" data-slot="detail-children-list">
+              <div class="detail-dependency-group-header">
+                <span class="detail-dependency-group-title">
+                  {$t('派生子单 ({count})', { count: childBounties.length })}
+                </span>
+                {#if childDraftIds.length > 0 && onPublishBatch}
+                  <button
+                    type="button"
+                    class="primary secondary-action"
+                    data-action="publish-derived-drafts"
+                    disabled={busy}
+                    onclick={() => void runAction(() => onPublishBatch!(childDraftIds))}
+                  >
+                    {$t('发布全部派生草稿 ({count})', { count: childDraftIds.length })}
+                  </button>
+                {/if}
+              </div>
+              <div class="detail-relation-list">
+                {#each childBounties as child (child.id)}
+                  {@const childStatusLabel = (() => {
+                    const _lang = $locale;
+                    return formatBountyStatus(child.status, child.status === 'DRAFT');
+                  })()}
+                  <button
+                    type="button"
+                    class="detail-relation-item"
+                    data-slot="dependency-child-item"
+                    data-bounty-id={child.id}
+                    data-bounty-status={child.status}
+                    onclick={() => void onSelectBounty?.(child.id)}
+                  >
+                    <span class="status-pill" data-status={child.status}>{childStatusLabel}</span>
+                    <span class="detail-relation-title">{child.title}</span>
+                  </button>
+                {/each}
               </div>
             </div>
           {/if}

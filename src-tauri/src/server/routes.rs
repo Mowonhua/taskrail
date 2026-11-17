@@ -54,6 +54,14 @@ pub(super) fn router(state: AppState) -> Router {
         )
         .route("/api/v1/bounties", get(list_bounties).post(create_bounty))
         .route(
+            "/api/v1/bounties/publish-batch",
+            post(publish_bounties_batch),
+        )
+        .route(
+            "/api/v1/bounties/{id}/collaborator",
+            post(invite_draft_collaborator),
+        )
+        .route(
             "/api/v1/bounties/{id}",
             get(bounty_detail).patch(update_bounty),
         )
@@ -246,6 +254,24 @@ async fn update_bounty(
 }
 async fn publish_bounty(State(state): State<AppState>, Id(id): Id) -> Result<Json<Bounty>> {
     disk(state, move |r| r.publish_bounty(&id, "human"))
+        .await
+        .map(Json)
+}
+
+async fn invite_draft_collaborator(
+    State(state): State<AppState>,
+    Id(id): Id,
+    Body(input): Body<InviteDraftCollaboratorInput>,
+) -> Result<Json<Bounty>> {
+    disk(state, move |r| r.invite_draft_collaborator(&id, input))
+        .await
+        .map(Json)
+}
+async fn publish_bounties_batch(
+    State(state): State<AppState>,
+    Body(input): Body<PublishBountiesBatchInput>,
+) -> Result<Json<Vec<Bounty>>> {
+    disk(state, move |r| r.publish_bounties_batch(input, "human"))
         .await
         .map(Json)
 }

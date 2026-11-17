@@ -277,6 +277,8 @@ pub struct Project {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateBounty {
+    #[serde(default)]
+    pub blocked_by: Vec<String>,
     pub project_id: String,
     pub title: String,
     #[serde(default)]
@@ -301,6 +303,8 @@ pub struct CreateBounty {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentCreateBounty {
+    #[serde(default)]
+    pub blocked_by: Vec<String>,
     pub project_id: String,
     pub title: String,
     #[serde(default)]
@@ -321,6 +325,7 @@ pub struct AgentCreateBounty {
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct UpdateBounty {
+    pub blocked_by: Option<Vec<String>>,
     pub project_id: Option<String>,
     pub title: Option<String>,
     pub description: Option<String>,
@@ -335,6 +340,19 @@ pub struct UpdateBounty {
 /// 结构职责：悬赏持久化快照；lease_id 只递增，时间为 UTC RFC3339。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Bounty {
+    /// 只有当前受邀身份可读取 DRAFT；名称和段位关联读取当前公开资料。
+    pub draft_collaborator_agent_id: Option<String>,
+    pub draft_collaborator_agent_name: Option<String>,
+    pub draft_collaborator_agent_tier: Option<AgentTier>,
+    /// 受邀者评论、修订或拆单置 true；人类草稿评论及发布、撤回、取消清零。
+    pub draft_needs_human_review: bool,
+    /// 拆单时绑定父草稿；父任务删除时由数据库置空。
+    pub parent_bounty_id: Option<String>,
+    /// 依赖按声明顺序返回；Agent 视角对不可见草稿的摘要标题脱敏。
+    pub blocked_by: Vec<String>,
+    pub blocked_by_summaries: Vec<BountyDependencySummary>,
+    /// 任意前置任务尚未完成即阻塞，与当前任务状态无关。
+    pub is_blocked: bool,
     pub id: String,
     pub project_id: String,
     pub title: String,
@@ -439,9 +457,80 @@ pub struct BountyEvent {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct BountyDetail {
+    /// 下游按 created_at、id 排序；Agent 视角隐藏不可见草稿。
+    pub blocks: Vec<BountyDependencySummary>,
+    /// 派生任务按 created_at、id 排序；Agent 视角仅返回有权查看的记录。
+    pub child_bounties: Vec<BountyDependencySummary>,
     pub bounty: Bounty,
     pub events: Vec<BountyEvent>,
     pub comments: Vec<BountyComment>,
+}
+
+/// 结构职责：依赖和派生关系的最小公开摘要；不包含正文或 Agent 内部资料。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BountyDependencySummary {
+    pub id: String,
+    pub title: String,
+    pub status: BountyStatus,
+}
+
+/// 结构职责：管理员替换草稿协作者；null 或省略 agent_id 取消邀请。
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InviteDraftCollaboratorInput {
+    pub agent_id: Option<String>,
+}
+
+/// 结构职责：受邀协作者可修订的草稿内容；依赖整体替换。
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AgentUpdateDraftInput {
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub acceptance_criteria: Option<String>,
+    pub blocked_by: Option<Vec<String>>,
+}
+
+/// 结构职责：一个派生子草稿；key 去空白后须非空且批内唯一，可供兄弟项引用。
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SplitDraftItem {
+    pub key: Option<String>,
+    pub title: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub acceptance_criteria: String,
+    pub difficulty: Tier,
+    pub assignee_mode: AssigneeMode,
+    #[serde(default)]
+    pub assignee_min_tier: Option<Tier>,
+    #[serde(default)]
+    pub assignee_agent_id: Option<String>,
+    #[serde(default)]
+    pub require_arbitration: bool,
+    #[serde(default)]
+    pub blocked_by: Vec<String>,
+}
+
+/// 结构职责：非空拆单批次；全部子草稿、依赖边和父草稿历史原子提交。
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SplitDraftInput {
+    pub items: Vec<SplitDraftItem>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SplitDraftResult {
+    pub parent: Bounty,
+    pub children: Vec<Bounty>,
+}
+
+/// 结构职责：管理员原子发布草稿集合；ID 拒绝空白并按首次出现顺序去重。
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PublishBountiesBatchInput {
+    pub bounty_ids: Vec<String>,
 }
 
 /// 结构职责：提供给桌面前端的当前会话连接信息；token 不写入磁盘或日志。

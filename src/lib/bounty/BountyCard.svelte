@@ -13,6 +13,7 @@
     formatBountyPublisher,
     formatBountyStatus,
     formatCompletionCost,
+    formatDraftCollaborator,
     formatLeaseCountdown,
     formatQualityGrade,
     formatTimestamp,
@@ -22,10 +23,20 @@
   interface Props {
     bounty: BountyTask;
     project?: BountyProject;
+    selectable?: boolean;
+    selected?: boolean;
     onSelect: (bountyId: string) => void;
+    onToggleSelect?: (bountyId: string) => void;
   }
 
-  let { bounty, project, onSelect }: Props = $props();
+  let {
+    bounty,
+    project,
+    selectable = false,
+    selected = false,
+    onSelect,
+    onToggleSelect,
+  }: Props = $props();
 
   let nowMs = $state(Date.now());
 
@@ -57,6 +68,11 @@
   const publisher = $derived.by(() => {
     const _lang = $locale;
     return formatBountyPublisher(bounty);
+  });
+
+  const collaborator = $derived.by(() => {
+    const _lang = $locale;
+    return formatDraftCollaborator(bounty);
   });
 
   const executor = $derived.by(() => {
@@ -95,15 +111,38 @@
     Boolean(bounty.completion_note?.trim()) || completionCostLabel !== null,
   );
 
+  const blockedRemainingCount = $derived.by(() => {
+    const summaries = bounty.blocked_by_summaries ?? [];
+    const incomplete = summaries.filter(item => item.status !== 'COMPLETED').length;
+    if (incomplete > 0) return incomplete;
+    return bounty.is_blocked ? Math.max(1, (bounty.blocked_by ?? []).length) : 0;
+  });
+
   const timeLabel = $derived(formatTimestamp(bounty.updated_at || bounty.created_at));
 </script>
 
 <article
   class="bounty-card"
+  class:is-selected={selected}
   data-bounty-id={bounty.id}
   data-bounty-status={bounty.status}
   data-bounty-difficulty={bounty.difficulty}
 >
+  {#if selectable && onToggleSelect}
+    <div class="bounty-card-select-bar">
+      <label class="bounty-card-select-label">
+        <input
+          type="checkbox"
+          data-action="toggle-select-draft"
+          data-bounty-id={bounty.id}
+          checked={selected}
+          aria-label={$t('选择草稿 {title}', { title: bounty.title })}
+          onchange={() => onToggleSelect(bounty.id)}
+        />
+        <span>{$t('选择草稿')}</span>
+      </label>
+    </div>
+  {/if}
   <button
     type="button"
     class="bounty-card-button"
@@ -118,6 +157,21 @@
         <span class="status-pill" data-status={bounty.status}>
           {statusLabel}
         </span>
+        {#if bounty.status === 'DRAFT' && bounty.draft_needs_human_review}
+          <span class="draft-review-pill" data-slot="card-draft-review">
+            {$t('待人工审核')}
+          </span>
+        {/if}
+        {#if bounty.is_blocked}
+          <span class="blocked-pill" data-slot="card-blocked">
+            {$t('等待前置 ({count})', { count: blockedRemainingCount })}
+          </span>
+        {/if}
+        {#if bounty.parent_bounty_id}
+          <span class="derived-draft-pill" data-slot="card-derived-draft">
+            {$t('派生子单')}
+          </span>
+        {/if}
         {#if bounty.require_arbitration}
           <span class="arbitration-pill">{$t('仲裁开启')}</span>
         {/if}
@@ -188,6 +242,11 @@
         {#if publisher.isAgent}
           <span class="bounty-publisher-pill" data-publisher-kind="agent">
             {publisher.label}
+          </span>
+        {/if}
+        {#if collaborator}
+          <span class="bounty-collaborator-pill" data-slot="card-collaborator">
+            {$t('协作者: {agent}', { agent: collaborator.label })}
           </span>
         {/if}
         {#if executor}

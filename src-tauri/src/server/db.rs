@@ -17,6 +17,8 @@ use uuid::Uuid;
 mod agents;
 mod arbitration;
 mod comments;
+mod dependencies;
+mod drafts;
 mod events;
 mod leases;
 mod rating;
@@ -30,8 +32,8 @@ pub struct Repository {
 }
 
 const PROJECT_COLUMNS: &str = "id,name,icon,description,workspace_path,default_acceptance_criteria,agent_draft_policy,arbitrator_chain_json,archived,created_at,updated_at";
-const BOUNTY_COLUMNS: &str = "b.id,b.project_id,b.title,b.description,b.acceptance_criteria,b.difficulty,b.assignee_mode,b.assignee_min_tier,b.assignee_agent_id,b.require_arbitration,b.status,b.created_by,b.lease_id,b.lease_agent_id,b.lease_expires_at,b.rejection_count,b.completion_note,b.published_at,b.withdrawn_at,b.cancelled_at,b.completed_at,b.created_at,b.updated_at,b.created_by_agent_id,a.name,la.name,la.tier,aa.name,aa.tier,b.assignment_expires_at,b.completion_cost,b.active_duration_ms,b.active_started_at,(SELECT COUNT(*) FROM bounty_comments c WHERE c.bounty_id=b.id),b.arbitrator_agent_id,ar.name,ar.tier,b.arbitration_expires_at,b.quality_grade,b.calibrated_difficulty";
-const BOUNTY_SOURCE: &str = "bounties b LEFT JOIN agents a ON a.id=b.created_by_agent_id LEFT JOIN agents la ON la.id=b.lease_agent_id LEFT JOIN agents aa ON aa.id=b.assignee_agent_id LEFT JOIN agents ar ON ar.id=b.arbitrator_agent_id";
+const BOUNTY_COLUMNS: &str = "b.id,b.project_id,b.title,b.description,b.acceptance_criteria,b.difficulty,b.assignee_mode,b.assignee_min_tier,b.assignee_agent_id,b.require_arbitration,b.status,b.created_by,b.lease_id,b.lease_agent_id,b.lease_expires_at,b.rejection_count,b.completion_note,b.published_at,b.withdrawn_at,b.cancelled_at,b.completed_at,b.created_at,b.updated_at,b.created_by_agent_id,a.name,la.name,la.tier,aa.name,aa.tier,b.assignment_expires_at,b.completion_cost,b.active_duration_ms,b.active_started_at,(SELECT COUNT(*) FROM bounty_comments c WHERE c.bounty_id=b.id),b.arbitrator_agent_id,ar.name,ar.tier,b.arbitration_expires_at,b.quality_grade,b.calibrated_difficulty,b.draft_collaborator_agent_id,dc.name,dc.tier,b.draft_needs_human_review,b.parent_bounty_id";
+const BOUNTY_SOURCE: &str = "bounties b LEFT JOIN agents a ON a.id=b.created_by_agent_id LEFT JOIN agents la ON la.id=b.lease_agent_id LEFT JOIN agents aa ON aa.id=b.assignee_agent_id LEFT JOIN agents ar ON ar.id=b.arbitrator_agent_id LEFT JOIN agents dc ON dc.id=b.draft_collaborator_agent_id";
 
 impl Repository {
     /// 函数职责：初始化文件、连接参数和版本化迁移；重复打开不重置数据。
@@ -57,13 +59,13 @@ impl Repository {
             [],
             |r| r.get(0),
         )?;
-        if version > 8 {
+        if version > 9 {
             return Err(ApiError::internal("数据库版本高于当前服务支持版本"));
         }
         if version == 0 {
             tx.execute_batch(include_str!("schema.sql"))?;
             tx.execute(
-                "INSERT INTO schema_migrations(version,applied_at) VALUES(8,?1)",
+                "INSERT INTO schema_migrations(version,applied_at) VALUES(9,?1)",
                 [now()],
             )?;
         } else {
@@ -76,6 +78,7 @@ impl Repository {
                 (6, include_str!("schema_v6.sql")),
                 (7, include_str!("schema_v7.sql")),
                 (8, include_str!("schema_v8.sql")),
+                (9, include_str!("schema_v9.sql")),
             ] {
                 if version < target {
                     tx.execute_batch(schema)?;
@@ -199,12 +202,13 @@ impl Repository {
             let id = Uuid::new_v4().to_string();
             let timestamp = now();
             let published = (input.status == BountyStatus::Open).then_some(&timestamp);
-            let assignment = (published.is_some() && input.assignee_mode == AssigneeMode::Specific).then(leases::deadline);
+            let assignment: Option<String> = None;
             tx.execute("INSERT INTO bounties(id,project_id,title,description,acceptance_criteria,difficulty,assignee_mode,assignee_min_tier,assignee_agent_id,require_arbitration,status,created_by,published_at,created_at,updated_at,assignment_expires_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?14,?15)",
                 params![id,input.project_id,input.title,input.description,input.acceptance_criteria,input.difficulty.as_str(),input.assignee_mode.as_str(),input.assignee_min_tier.map(Tier::as_str),input.assignee_agent_id,input.require_arbitration,input.status.as_str(),input.created_by,published,timestamp,assignment])?;
-            let b = find_bounty(tx, &id)?;
+            dependencies::replace(tx, &id, input.blocked_by, None, &timestamp)?;
+            let mut b = find_bounty(tx, &id)?;
             event(tx, &b, "created", &b.created_by, None, json!({}))?;
-            if b.status == BountyStatus::Open { events::dispatch(tx, &b, false)?; }
+            if b.status == BountyStatus::Open { b = dependencies::dispatch_ready(tx, &id, &timestamp)?; }
             Ok(b)
         })
     }
@@ -233,66 +237,35 @@ impl Repository {
             };
             let published = (status == BountyStatus::Open).then_some(&timestamp);
             let actor = format!("agent:{agent_id}");
-            let assignment = (published.is_some() && input.assignee_mode == AssigneeMode::Specific).then(leases::deadline);
+            let assignment: Option<String> = None;
             tx.execute("INSERT INTO bounties(id,project_id,title,description,acceptance_criteria,difficulty,assignee_mode,assignee_min_tier,assignee_agent_id,require_arbitration,status,created_by,created_by_agent_id,published_at,created_at,updated_at,assignment_expires_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?15,?16)",
                 params![id,input.project_id,input.title,input.description,input.acceptance_criteria,input.difficulty.as_str(),input.assignee_mode.as_str(),input.assignee_min_tier.map(Tier::as_str),input.assignee_agent_id,input.require_arbitration,status.as_str(),actor,agent_id,published,timestamp,assignment])?;
-            let bounty = find_bounty(tx, &id)?;
+            dependencies::replace(tx, &id, input.blocked_by, Some(agent_id), &timestamp)?;
+            let mut bounty = find_bounty(tx, &id)?;
             event(tx, &bounty, "created", &actor, None, json!({
                 "publisher_agent_id": agent_id,
                 "publisher_agent_name": agent.name,
                 "policy": project.agent_draft_policy.as_str(),
             }))?;
             if status == BountyStatus::Open {
-                events::dispatch(tx, &bounty, false)?;
+                bounty = dependencies::dispatch_ready(tx, &id, &timestamp)?;
             }
+            dependencies::redact(tx, &mut bounty, agent_id)?;
             Ok(bounty)
         })
     }
 
     pub fn list_bounties(&self, filter: BountyFilter) -> Result<Vec<Bounty>> {
-        let conn = self.connect()?;
-        // instr 按字面子串搜索，用户输入 % 和 _ 不会扩大匹配范围。
-        let mut stmt = conn.prepare(&format!("SELECT {BOUNTY_COLUMNS} FROM {BOUNTY_SOURCE} WHERE (?1 OR b.status<>'DRAFT') AND (?2 IS NULL OR b.project_id=?2) AND (?3 IS NULL OR b.status=?3) AND (?4 IS NULL OR instr(lower(b.id),lower(?4))>0 OR instr(lower(b.title),lower(?4))>0 OR instr(lower(b.description),lower(?4))>0 OR instr(lower(b.acceptance_criteria),lower(?4))>0) ORDER BY b.created_at DESC,b.id"))?;
-        let rows = stmt.query_map(
-            params![
-                filter.include_drafts,
-                filter.project_id,
-                filter.status.map(BountyStatus::as_str),
-                filter.q
-            ],
-            bounty_row,
-        )?;
-        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        let mut conn = self.connect()?;
+        let tx = conn.transaction()?;
+        list_bounties_on(&tx, filter)
     }
 
-    /// 函数职责：在同一读快照中返回悬赏和完整事件，避免并发写入造成两者不一致。
+    /// 函数职责：在同一读快照返回悬赏、关系摘要、历史和评论。
     pub fn get_bounty_detail(&self, id: &str) -> Result<BountyDetail> {
         let mut conn = self.connect()?;
         let tx = conn.transaction()?;
-        let bounty = find_bounty(&tx, id)?;
-        let events = {
-            let mut stmt = tx.prepare("SELECT id,bounty_id,event_type,actor,from_status,to_status,detail_json,created_at FROM bounty_events WHERE bounty_id=?1 ORDER BY id")?;
-            let rows = stmt.query_map([id], |r| {
-                Ok(BountyEvent {
-                    id: r.get(0)?,
-                    bounty_id: r.get(1)?,
-                    event_type: r.get(2)?,
-                    actor: r.get(3)?,
-                    from_status: optional_enum(r, 4)?,
-                    to_status: enum_value(r, 5)?,
-                    detail: json_value(r, 6)?,
-                    created_at: r.get(7)?,
-                })
-            })?;
-            rows.collect::<rusqlite::Result<Vec<_>>>()?
-        };
-        let comments = comments::list(&tx, id)?;
-        tx.commit()?;
-        Ok(BountyDetail {
-            bounty,
-            events,
-            comments,
-        })
+        bounty_detail_on(&tx, id)
     }
 
     pub fn update_bounty(&self, id: &str, patch: UpdateBounty, actor: &str) -> Result<Bounty> {
@@ -312,6 +285,7 @@ impl Repository {
             validate_bounty(&b.title,b.assignee_mode,b.assignee_min_tier,b.assignee_agent_id.as_deref())?;
             tx.execute("UPDATE bounties SET project_id=?2,title=?3,description=?4,acceptance_criteria=?5,difficulty=?6,assignee_mode=?7,assignee_min_tier=?8,assignee_agent_id=?9,require_arbitration=?10,updated_at=?11 WHERE id=?1",
                 params![id,b.project_id,b.title,b.description,b.acceptance_criteria,b.difficulty.as_str(),b.assignee_mode.as_str(),b.assignee_min_tier.map(Tier::as_str),b.assignee_agent_id,b.require_arbitration,now()])?;
+            if let Some(ids) = patch.blocked_by { dependencies::replace(tx, id, ids, None, &now())?; }
             let b = find_bounty(tx, id)?;
             event(tx,&b,"updated",actor,Some(BountyStatus::Draft),json!({}))?;
             Ok(b)
@@ -360,11 +334,11 @@ impl Repository {
             let timestamp = now();
             // WHERE 再次约束读取到的状态与 fencing token；事务同时保护事件写入。
             let changed = if matches!(action,Transition::Withdraw) {
-                tx.execute("UPDATE bounties SET status='DRAFT',withdrawn_at=?2,assignment_expires_at=NULL,updated_at=?2 WHERE id=?1 AND status='OPEN' AND lease_agent_id IS NULL AND lease_id=?3",params![id,timestamp,b.lease_id])?
+                tx.execute("UPDATE bounties SET status='DRAFT',withdrawn_at=?2,draft_needs_human_review=0,assignment_expires_at=NULL,updated_at=?2 WHERE id=?1 AND status='OPEN' AND lease_agent_id IS NULL AND lease_id=?3",params![id,timestamp,b.lease_id])?
             } else {
-                let assignment = (matches!(action,Transition::Publish) && b.assignee_mode == AssigneeMode::Specific).then(leases::deadline);
+                let assignment = (matches!(action,Transition::Publish) && !b.is_blocked && b.assignee_mode == AssigneeMode::Specific).then(leases::deadline);
                 // column 仅来自上方固定动作分支，不接受调用方提供 SQL 标识符。
-                tx.execute(&format!("UPDATE bounties SET status=?2,{column}=?3,assignment_expires_at=?6,updated_at=?3 WHERE id=?1 AND status=?4 AND lease_id=?5"),params![id,to.as_str(),timestamp,b.status.as_str(),b.lease_id,assignment])?
+                tx.execute(&format!("UPDATE bounties SET status=?2,{column}=?3,draft_needs_human_review=0,assignment_expires_at=?6,updated_at=?3 WHERE id=?1 AND status=?4 AND lease_id=?5"),params![id,to.as_str(),timestamp,b.status.as_str(),b.lease_id,assignment])?
             };
             if changed != 1 { return Err(invalid_transition()); }
             if matches!(action, Transition::Cancel) {
@@ -374,7 +348,7 @@ impl Repository {
             if matches!(action, Transition::Cancel) && b.status == BountyStatus::WaitingInfo {
                 events::notify_active(tx, b.lease_agent_id.as_deref(), &updated, "task.cancelled", json!({"bounty":updated,"lease_id":b.lease_id,"lease_agent_id":b.lease_agent_id}))?;
             }
-            if matches!(action, Transition::Publish | Transition::Withdraw) {
+            if matches!(action, Transition::Withdraw) || (matches!(action, Transition::Publish) && !updated.is_blocked) {
                 events::dispatch(tx, &updated, matches!(action, Transition::Withdraw))?;
             }
             event(tx,&updated,event_type,actor,Some(b.status),json!({}))?;
@@ -481,13 +455,65 @@ fn find_project(conn: &Connection, id: &str) -> Result<Project> {
 }
 
 fn find_bounty(conn: &Connection, id: &str) -> Result<Bounty> {
-    conn.query_row(
-        &format!("SELECT {BOUNTY_COLUMNS} FROM {BOUNTY_SOURCE} WHERE b.id=?1"),
-        [id],
+    let mut bounty = conn
+        .query_row(
+            &format!("SELECT {BOUNTY_COLUMNS} FROM {BOUNTY_SOURCE} WHERE b.id=?1"),
+            [id],
+            bounty_row,
+        )
+        .optional()?
+        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "BOUNTY_NOT_FOUND", "悬赏不存在"))?;
+    dependencies::hydrate(conn, &mut bounty)?;
+    Ok(bounty)
+}
+
+fn list_bounties_on(conn: &Connection, filter: BountyFilter) -> Result<Vec<Bounty>> {
+    // instr 按字面子串搜索，用户输入 % 和 _ 不会扩大匹配范围。
+    let mut stmt = conn.prepare(&format!("SELECT {BOUNTY_COLUMNS} FROM {BOUNTY_SOURCE} WHERE (?1 OR b.status<>'DRAFT') AND (?2 IS NULL OR b.project_id=?2) AND (?3 IS NULL OR b.status=?3) AND (?4 IS NULL OR instr(lower(b.id),lower(?4))>0 OR instr(lower(b.title),lower(?4))>0 OR instr(lower(b.description),lower(?4))>0 OR instr(lower(b.acceptance_criteria),lower(?4))>0) ORDER BY b.created_at DESC,b.id"))?;
+    let rows = stmt.query_map(
+        params![
+            filter.include_drafts,
+            filter.project_id,
+            filter.status.map(BountyStatus::as_str),
+            filter.q
+        ],
         bounty_row,
-    )
-    .optional()?
-    .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "BOUNTY_NOT_FOUND", "悬赏不存在"))
+    )?;
+    let mut bounties = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    for bounty in &mut bounties {
+        dependencies::hydrate(conn, bounty)?;
+    }
+    Ok(bounties)
+}
+
+fn bounty_detail_on(conn: &Connection, id: &str) -> Result<BountyDetail> {
+    let bounty = find_bounty(conn, id)?;
+    let events = {
+        let mut stmt = conn.prepare("SELECT id,bounty_id,event_type,actor,from_status,to_status,detail_json,created_at FROM bounty_events WHERE bounty_id=?1 ORDER BY id")?;
+        let rows = stmt.query_map([id], |r| {
+            Ok(BountyEvent {
+                id: r.get(0)?,
+                bounty_id: r.get(1)?,
+                event_type: r.get(2)?,
+                actor: r.get(3)?,
+                from_status: optional_enum(r, 4)?,
+                to_status: enum_value(r, 5)?,
+                detail: json_value(r, 6)?,
+                created_at: r.get(7)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    let comments = comments::list(conn, id)?;
+    let blocks = dependencies::related(conn, id, false)?;
+    let child_bounties = dependencies::related(conn, id, true)?;
+    Ok(BountyDetail {
+        blocks,
+        child_bounties,
+        bounty,
+        events,
+        comments,
+    })
 }
 
 fn event(
@@ -577,6 +603,14 @@ fn bounty_row(r: &Row<'_>) -> rusqlite::Result<Bounty> {
         arbitration_expires_at: r.get(37)?,
         quality_grade: optional_enum(r, 38)?,
         calibrated_difficulty: optional_enum(r, 39)?,
+        draft_collaborator_agent_id: r.get(40)?,
+        draft_collaborator_agent_name: r.get(41)?,
+        draft_collaborator_agent_tier: optional_enum(r, 42)?,
+        draft_needs_human_review: r.get(43)?,
+        parent_bounty_id: r.get(44)?,
+        blocked_by: vec![],
+        blocked_by_summaries: vec![],
+        is_blocked: false,
     })
 }
 
@@ -611,7 +645,7 @@ mod tests {
         Repository::open(&path).unwrap();
         let conn = Connection::open(&path).unwrap();
         conn.execute(
-            "INSERT INTO schema_migrations(version,applied_at) VALUES(9,'future')",
+            "INSERT INTO schema_migrations(version,applied_at) VALUES(10,'future')",
             [],
         )
         .unwrap();
@@ -620,7 +654,7 @@ mod tests {
             conn.query_row("SELECT MAX(version) FROM schema_migrations", [], |r| r
                 .get::<_, i64>(0))
                 .unwrap(),
-            9
+            10
         );
     }
 
@@ -665,7 +699,7 @@ mod tests {
             conn.query_row("SELECT MAX(version) FROM schema_migrations", [], |r| r
                 .get::<_, i64>(0))
                 .unwrap(),
-            8
+            9
         );
         repo.create_bounty_comment(
             "b",
