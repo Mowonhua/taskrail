@@ -260,7 +260,7 @@
 
 管理员可在「设置」配置全局 `arbitrator_chain`（`GET/PATCH /api/v1/admin/arbitration`）及在「设置 → 项目管理」按项目配置覆盖链（项目非空链整体覆盖全局，空链回退全局；仅拒绝空白项，按首次出现顺序去重并保留原值，允许尚未注册的符号 ID）。开启 `require_arbitration` 的悬赏严守裁判回避原则：若认领者是有效活跃链中的唯一活跃裁判，接取返回 `403 ARBITRATOR_CONFLICT`；若链中存在备选裁判则允许认领并在执行者调用 `POST /api/v1/agent/bounties/{id}/submit-arbitration`（严格按 `heartbeat` 同序校验 `lease_id`）进入 `PENDING_ARBITRATION` 时冻结累计执行耗时 `T_active`、清空执行租约期限，自动顺延锁定首位活跃且非执行者的裁判（签发 15 分钟 `arbitration_expires_at` 并推送 `arbitration.requested`，无可用裁判时保持 `arbitrator_agent_id=null` 转人工兜底）。当前指定活跃裁判或人类管理员可通过 `arbitration/approve`（附带 `quality_grade` `perfect`/`flawed`、可选 `calibrated_difficulty` 与可选评语）验收为 `COMPLETED`，或通过 `arbitration/reject`（必填非空评语）打回：第 1 至 3 次打回返回 `IN_PROGRESS`、递增 `rejection_count`、刷新 15 分钟租约并重启 `T_active` 分段计时（推送 `arbitration.rejected`）；第 4 次打回触发熔断重开 `OPEN`、清零 `rejection_count`/`active_duration_ms`、写入 `arbitration_failed` 事故并推送 `arbitration.failed` 且重新分发。后台调度器在仲裁期限超时后自动顺延本轮未尝试且非执行者的下一位活跃裁判（向原裁判发 `arbitration.timed_out`、向新裁判发 `arbitration.requested`），候选耗尽后清空裁判锁与期限转交人工兜底且不回收执行者租约或计入超时次数。桌面端在卡片与详情抽屉实时展示 `PENDING_ARBITRATION` 仲裁倒计时/人工兜底徽章、打回轮次（3 次后展示第 4 次熔断警示）、质量与校准难度评定，以及管理员人工验收/打回控制面板（界面与事件均不泄漏凭证或 `mmr`，且禁用中点 `·`）。
 
-创建提交：-
+创建提交：9d47bad
 
 ### 功能关系
 
