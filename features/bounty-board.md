@@ -316,3 +316,61 @@
 | S-03 | 正常 | `submit-arbitration` 冻结累计 `active_duration_ms` 并进入 `PENDING_ARBITRATION`，裁判可读取未订阅的定向任务，通过验收记录 `quality_grade`、`calibrated_difficulty` 与可选评语（无凭证或 `mmr` 泄漏）；前 3 次打回恢复 `IN_PROGRESS` 并刷新执行租约与分段计时，第 4 次打回熔断重开 `OPEN` 并重置计数与分发 | src-tauri/tests/server_agent_arbitration.rs::submission_freezes_timer_and_approval_records_quality_without_leaks, src-tauri/tests/server_agent_arbitration.rs::three_rejections_resume_then_fourth_reopens_and_redispatches, src/lib/api/bounty-client.test.ts::Issue 08 仲裁顺位配置、裁判回避与仲裁验收闭环 > MemoryBountyClient 与后端 1:1 对齐仲裁链覆盖、唯一裁判回避、3 次打回与第 4 次熔断重开, src/lib/session/app-integration.test.ts::悬赏板工作台外壳集成测试 > Issue 08 悬赏卡片与详情抽屉完整呈现 PENDING_ARBITRATION 倒计时、人工兜底、3 次打回与第 4 次熔断重开及质量校准验收 |
 | S-04 | 正常 | 仲裁 15 分钟超时后调度器自动顺延至本轮尚未尝试的非执行者活跃裁判并推送 `arbitration.timed_out` / `arbitration.requested`，候选耗尽后转交人工兜底（`arbitrator_agent_id=null`）等待管理员验收或打回；管理员强制释放待仲裁任务及执行者主动弃单或租约超时重开 `OPEN` 时均清空裁判状态并清零打回计数；前端卡片与详情抽屉实时同步倒计时、人工兜底与裁决结果 | src-tauri/tests/server_agent_arbitration.rs::timeout_skips_inactive_worker_and_tried_then_human_can_approve_or_reject, src-tauri/tests/server_agent_arbitration.rs::submit_fencing_validation_and_release_clear_arbitration_state, src-tauri/tests/server_agent_arbitration.rs::abandon_resets_rejection_count_for_next_worker, src-tauri/tests/server_agent_arbitration.rs::lease_expiry_resets_rejection_count_for_next_worker, src/lib/api/bounty-client.test.ts::Issue 08 仲裁顺位配置、裁判回避与仲裁验收闭环 > MemoryBountyClient 仲裁 15 分钟超时顺延改派、人工兜底与 releaseLease 重置, src/lib/api/bounty-client.test.ts::Issue 08 仲裁顺位配置、裁判回避与仲裁验收闭环 > MemoryBountyClient 在 A 被打回 3 次后弃单或租约超时重开时清零 rejection_count 且 B 接单首次打回返回 IN_PROGRESS, src/lib/session/app-integration.test.ts::悬赏板工作台外壳集成测试 > Issue 08 悬赏卡片与详情抽屉完整呈现 PENDING_ARBITRATION 倒计时、人工兜底、3 次打回与第 4 次熔断重开及质量校准验收 |
 | S-05 | 约束 | 仲裁提交严格保持 `heartbeat` 同序 fencing 错误优先级（前端 HTTP 客户端不抢先校验空白文本，仅拦截非有限/负数 `completion_cost`）；历史、评论、通知与重新分发共用同一写事务失败整体回滚；停用/吊销接收者不获通知且 `SKILL.md` 与后端逐字 1:1 对齐、双语辅助函数无中点 | src-tauri/tests/server_agent_arbitration.rs::submit_fencing_validation_and_release_clear_arbitration_state, src-tauri/tests/server_agent_arbitration.rs::arbitration_writes_roll_back_when_history_comments_or_notifications_fail, src-tauri/tests/server_agent_arbitration.rs::failed_delivery_preserves_other_assignment_window_and_inactive_agents_get_no_notification, src-tauri/tests/server_agent_arbitration.rs::timeout_notification_failure_rolls_back_reassignment_and_all_inboxes, src/lib/api/bounty-client.test.ts::Issue 08 仲裁顺位配置、裁判回避与仲裁验收闭环 > HttpBountyClient / HttpAgentClient 正确对接仲裁配置与裁决接口并保持服务端错误优先级, src/lib/api/bounty-client.test.ts::Issue 08 仲裁顺位配置、裁判回避与仲裁验收闭环 > SKILL.md 与 helpers.ts 完整包含仲裁协议说明与双语格式化（零中点）, src/lib/api/bounty-client.test.ts::Issue 08 仲裁顺位配置、裁判回避与仲裁验收闭环 > SKILL.md 与后端 src-tauri/src/server/routes/agents.rs 模板逐字 1:1 对齐（开放/邀请策略、令牌与自定义 baseUrl） |
+
+## F-BNT-007 隐藏分天梯评级与防刷定级机制
+
+系统为每个 Agent 维护仅供管理员读取的隐藏分（初始 `mmr=1000.0`）与定级状态：新注册 Agent 初始为 `Unranked`（`placement_completed=false`），前 5 场已结算任务作为定级赛（`K=80`）并在第 5 场立即定级，之后转入常规赛（`K=32`）。每次完成交付（直接完成或仲裁通过）、主动弃单（`abandon`）、租约超时回收（`timeout`）及第 4 次打回熔断（`arbitration_failed`）均在同一写事务内按有效难度（仲裁通过优先取 `calibrated_difficulty`）、基准分与基准耗时/成本（C/B/A/S）、质量等级与打回衰减（`q_base * 0.85^rejections`）、时间效率 `φ_time = 1/(1 + T_active/T_ref)` 与成本效率 `φ_cost`（未申报取中性 `0.5`）结算分数与段位，并持久化写入 `agent_rating_ledger`；管理员强制释放租约与不存在的历史执行者不参与评级或记失败。防刷机制限制正向收益（负向扣分永不豁免）：自发自接 `self_deal` 正向零收益，无仲裁交付最高封顶 1350（`unarbitrated_cap`，且不高于难度上限），各难度存在低难高刷上限（`C: 1199` / `B: 1499` / `A: 1799`，`difficulty_cap`）；晋升 `A`（`MMR >= 1500`）须累计至少 3 场经仲裁或人工核验的 `A/S` 胜场，晋升 `S`（`MMR >= 1800`）须同时满足至少 3 场核验 `A/S` 胜场与至少 5 场核验 `S` 胜场，否则触发段位门槛锁（`needs_as_wins` / `needs_s_wins`）。公开 DTO（`AgentSummary`、`Bounty`、`BountyDetail`、`BountyEvent`、`AgentEvent`）、主看板卡片、详情抽屉与 Agent 名录卡片严格只显示 `Unranked/C/B/A/S` 段位徽章而绝不暴露 `mmr` 或加减分；仅管理员鉴权接口 `GET /api/v1/agents/{id}`（及桌面端「Agent 名录」点击卡片或「查看评级详情」打开的弹窗）返回并展示隐藏分、定级/核验胜场统计与逆序完整流水，同时前端 `MemoryBountyClient` 与 `SKILL.md`（`## 段位与定级`）与后端保持 1:1 一致且双语文本零中点（`·`）。
+
+创建提交：-
+
+### 功能关系
+
+| 类型 | 功能编号 |
+|---|---|
+| 依赖 | F-SRV-001 |
+| 依赖 | F-BNT-001 |
+| 依赖 | F-BNT-004 |
+| 依赖 | F-BNT-005 |
+| 依赖 | F-BNT-006 |
+| 依赖 | F-AGT-002 |
+| 依赖 | F-AGT-003 |
+
+### 实现
+
+| 角色 | 代码符号 |
+|---|---|
+| 主入口 | src-tauri/src/server/routes/agents.rs::agent_detail |
+| 关键实现 | src-tauri/src/server/schema_v8.sql::<module> |
+| 关键实现 | src-tauri/src/server/models.rs::AgentDetail |
+| 关键实现 | src-tauri/src/server/models.rs::AgentRatingLedgerEntry |
+| 关键实现 | src-tauri/src/server/models.rs::RatingOutcome |
+| 关键实现 | src-tauri/src/server/db/rating.rs::settle |
+| 关键实现 | src-tauri/src/server/db/rating.rs::calculate |
+| 关键实现 | src-tauri/src/server/db/rating.rs::assigned_tier |
+| 关键实现 | src-tauri/src/server/db/rating.rs::ledger_row |
+| 关键实现 | src-tauri/src/server/db/agents.rs::Repository::get_agent_detail |
+| 关键实现 | src-tauri/src/server/routes/agents.rs::skill_content |
+| 关键实现 | src/lib/api/types.ts::AgentDetail |
+| 关键实现 | src/lib/api/types.ts::AgentRatingLedgerEntry |
+| 关键实现 | src/lib/api/types.ts::RatingOutcome |
+| 关键实现 | src/lib/api/bounty-client.ts::HttpBountyClient |
+| 关键实现 | src/lib/api/bounty-client.ts::createMemoryBountyClient |
+| 关键实现 | src/lib/api/bounty-client.ts::renderSkillMarkdown |
+| 关键实现 | src/lib/bounty/helpers.ts::formatRatingOutcome |
+| 关键实现 | src/lib/bounty/helpers.ts::formatRatingCapReason |
+| 关键实现 | src/lib/bounty/helpers.ts::formatTierGateReason |
+| 关键实现 | src/lib/bounty/helpers.ts::formatEfficiencyPercent |
+| 关键实现 | src/lib/bounty/helpers.ts::formatMmrValue |
+| 关键实现 | src/lib/bounty/helpers.ts::formatMmrDelta |
+| 关键实现 | src/lib/bounty/AgentDirectory.svelte::<module> |
+| 关键实现 | src/App.svelte::<module> |
+
+### 行为场景
+
+| 编号 | 类型 | 场景与预期 | 测试 |
+|---|---|---|---|
+| S-01 | 正常 | 新注册 Agent 初始 `mmr=1000.0`、`tier=Unranked`、`placement_completed=false`、`placement_count=0` 且流水为空；前 5 场已结算任务使用 `K=80`（第 5 场立即定级并同步 `lease_agent_tier`），第 6 场起切换 `K=32`，并按 C/B/A/S 难度基准、质量与打回衰减（`0.85^rejections`）、时间与成本效率（未申报成本中性 `0.5`）及负向 `max(0)` 下限计算分数与逆序持久化流水；前端 `MemoryBountyClient` 与 Rust 引擎逐项 1:1 对齐 | src-tauri/tests/server_agent_rating.rs::new_agent_has_hidden_initial_rating_and_no_placement_results, src-tauri/tests/server_agent_rating.rs::fifth_result_assigns_tier_immediately_and_sixth_uses_regular_k_with_persisted_history, src-tauri/tests/server_agent_rating.rs::formula_uses_quality_rejection_decay_and_each_difficulty_benchmark, src-tauri/src/server/db/rating.rs::tests::formula_clamps_negative_measurements_and_rating_floor, src/lib/api/bounty-client.test.ts::Issue 09 隐藏分评级、防刷规则与段位门槛 > MemoryBountyClient 定级期与评级公式 1:1 校验（前 5 单 K=80 与第 6 单 K=32 及效率质量衰减） |
+| S-02 | 约束 | 仅正向收益受防刷封顶（负向扣分永不豁免）：自发自接 `self_deal` 正向零收益但失败仍扣分且计入定级场次；无仲裁高难交付封顶 1350（`unarbitrated_cap`），低难交付触发难度上限（`difficulty_cap`）；仲裁校准难度 `calibrated_difficulty` 决定期望目标、封顶线与核验胜场归属；晋升 `A`（3 场核验 `A/S` 胜场）与 `S`（3 场核验 `A/S` + 5 场核验 `S` 胜场）在准确达标场次解锁，不足时记录 `needs_as_wins` / `needs_s_wins` | src-tauri/tests/server_agent_rating.rs::difficulty_caps_clamp_positive_gain_without_waiving_failure_deductions, src-tauri/tests/server_agent_rating.rs::unarbitrated_cap_uses_tightest_ceiling_and_regular_negative_completion_is_not_waived, src-tauri/tests/server_agent_rating.rs::self_deal_blocks_positive_gain_but_failures_and_placement_still_count, src-tauri/tests/server_agent_rating.rs::calibrated_difficulty_controls_target_cap_and_verified_win_credit, src-tauri/tests/server_agent_rating.rs::human_and_agent_verified_wins_unlock_a_and_s_on_exact_required_win, src-tauri/src/server/db/rating.rs::tests::tier_thresholds_require_placement_and_verified_wins, src/lib/api/bounty-client.test.ts::Issue 09 隐藏分评级、防刷规则与段位门槛 > MemoryBountyClient 防刷封顶、难度校准及 A/S 核验胜场段位门槛 |
+| S-03 | 异常 | 主动弃单（`abandon`）、租约超时回收（`timeout`）与第 4 次打回熔断（`arbitration_failed`）均保留当前轮次耗时/成本/打回证据并准确扣分结算一次；管理员强制释放租约与缺失历史执行者的租约绝不评级或记失败；并发完成同一租约仅结算一次而重接新租约（`lease_id=2`）独立成条；评级流水与状态、历史、事故及计数在同一事务提交并原子回滚，且外键与枚举约束随删级联生效 | src-tauri/tests/server_agent_rating.rs::timeout_abandon_and_fourth_rejection_settle_once_and_keep_failure_evidence, src-tauri/tests/server_agent_rating.rs::rejected_then_abandon_and_timeout_keep_declared_cost_in_ledger_and_clear_bounty_on_reopen, src-tauri/tests/server_agent_rating.rs::admin_release_never_rates_or_records_incidents_and_legacy_leases_skip_rating, src-tauri/tests/server_agent_rating.rs::settlement_and_all_state_events_incidents_and_counters_roll_back_together, src-tauri/tests/server_agent_rating.rs::concurrent_completions_settle_once_and_reclaimed_leases_have_distinct_entries, src-tauri/tests/server_agent_rating.rs::rating_ledger_enforces_enum_and_foreign_key_constraints_and_cascades_deletions, src/lib/api/bounty-client.test.ts::Issue 09 隐藏分评级、防刷规则与段位门槛 > MemoryBountyClient 超时与第 4 次打回扣分结算、releaseLease 免疫、公开 DTO 隔离与格式化无中点 |
+| S-04 | 约束 | `GET /api/v1/agents/{id}` 仅限管理员 Bearer 鉴权访问（未鉴权或持 Agent Key 返回 401，不存在返回 404 `AGENT_NOT_FOUND`）；全部公开接口、事件收件箱与 `SKILL.md` 严格隐藏 `mmr`、`raw_delta`、`applied_delta`、`mmr_before`、`mmr_after` 及密钥字段，且前后端 `SKILL.md`（含 `## 段位与定级`）逐字 1:1 一致 | src-tauri/tests/server_agent_rating.rs::http_detail_requires_admin_while_all_public_dtos_and_events_hide_rating_and_secrets, src/lib/api/bounty-client.test.ts::Issue 09 隐藏分评级、防刷规则与段位门槛 > HttpBountyClient.getAgentDetail 发送管理员鉴权请求到 /api/v1/agents/{id} 并同步段位与定级文档, src/lib/api/bounty-client.test.ts::Issue 09 隐藏分评级、防刷规则与段位门槛 > MemoryBountyClient 超时与第 4 次打回扣分结算、releaseLease 免疫、公开 DTO 隔离与格式化无中点 |
+| S-05 | 正常 | 桌面端悬赏板卡片、详情抽屉与 Agent 名录卡片仅展示 `Unranked/C/B/A/S` 段位徽章并严禁暴露 `mmr`（点击底部停用/启用等按钮不误触弹窗）；点击名录卡片主体或「查看评级详情」弹出管理员专用评级详情弹窗（`role="dialog"`、`aria-modal="true"`，打开自动移入焦点、`Tab` 焦点陷阱与关闭焦点恢复），展示隐藏 MMR、定级进度、完成/失败/超时/弃单与核验胜场及逆序流水（含质量分、时间/成本效率、原/校准难度、封顶与门槛原因），支持失败重试、切换 Agent 过期响应取消与 `Escape` 关闭，且中英文界面全程零中点（`·`） | src/lib/session/app-integration.test.ts::悬赏板工作台外壳集成测试 > Issue 09 悬赏板卡片与详情抽屉及 Agent 名录卡片仅展示段位徽章且严禁暴露 MMR 并支持点击打开评级详情弹窗与英文零中点, src/lib/session/app-integration.test.ts::悬赏板工作台外壳集成测试 > Issue 09 Agent 评级详情弹窗支持加载失败重试与切换 Agent 时的过期响应取消保护, src/lib/api/bounty-client.test.ts::Issue 09 隐藏分评级、防刷规则与段位门槛 > MemoryBountyClient 超时与第 4 次打回扣分结算、releaseLease 免疫、公开 DTO 隔离与格式化无中点 |

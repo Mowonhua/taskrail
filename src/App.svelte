@@ -184,6 +184,7 @@
   let agentStatusFilter = $state<'ALL' | AgentStatus>('ALL');
   let skillGuideOpen = $state(false);
   let skillDocument = $state<SkillDocument | null>(null);
+  let agentDetailOpen = $state(false);
 
   let composerOpen = $state(false);
   let editingBounty = $state<BountyTask | null>(null);
@@ -1812,6 +1813,9 @@
 
   function selectSection(section: WorkspaceSection): void {
     activeSection = section;
+    if (section !== 'agents') {
+      agentDetailOpen = false;
+    }
     preferences = { ...preferences, workspaceSection: section };
     mobileSidebarOpen = false;
     if (serviceConnected) {
@@ -2037,6 +2041,7 @@
             updateDialogOpen ||
             composerOpen ||
             skillGuideOpen ||
+            agentDetailOpen ||
             activeDetail !== null,
           setOpen: open => {
             mobileSidebarOpen = open;
@@ -2630,6 +2635,10 @@
             onDisableAgent={handleDisableAgent}
             onEnableAgent={handleEnableAgent}
             onRevokeAgent={handleRevokeAgent}
+            onLoadAgentDetail={id => activeBountyApi.getAgentDetail(id)}
+            onAgentDetailOpenChange={open => {
+              agentDetailOpen = open;
+            }}
             onOpenSkillGuide={() => void handleOpenSkillGuide()}
             onCloseSkillGuide={() => {
               skillDocRequestSeq += 1;

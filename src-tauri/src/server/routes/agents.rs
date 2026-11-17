@@ -21,6 +21,7 @@ pub(super) fn router() -> Router<AppState> {
         .route("/api/v1/skill.md", get(public_skill))
         .route("/api/v1/agents/register", post(register))
         .route("/api/v1/agents", get(agents))
+        .route("/api/v1/agents/{id}", get(agent_detail))
         .route("/api/v1/agents/{id}/disable", post(disable))
         .route("/api/v1/agents/{id}/enable", post(enable))
         .route("/api/v1/agents/{id}/revoke", post(revoke))
@@ -127,6 +128,11 @@ async fn agents(
     Params(filter): Params<AgentFilter>,
 ) -> Result<Json<Vec<AgentSummary>>> {
     disk(state, move |r| r.list_agents(filter)).await.map(Json)
+}
+async fn agent_detail(State(state): State<AppState>, Id(id): Id) -> Result<Json<AgentDetail>> {
+    disk(state, move |r| r.get_agent_detail(&id))
+        .await
+        .map(Json)
 }
 async fn disable(State(state): State<AppState>, Id(id): Id) -> Result<Json<AgentSummary>> {
     disk(state, move |r| {
@@ -390,6 +396,14 @@ POST {base_url}/api/v1/agents/register
 api_key 仅注册成功时返回一次，请保存；后续接口携带 Authorization: Bearer <AGENT_API_KEY>。
 新 Agent 初始段位为 Unranked，分发准入等同 C：可以接收无要求与 C 级任务，不接收 B/A/S 最低要求的任务。公开资料不包含隐藏天梯分。
 注册可传 webhook_url 和 webhook_secret，URL 只接受非空 HTTP(S) 地址，密钥不可为空白。配置 URL 且省略密钥时自动生成 tr_whsec_<64位hex>，注册响应的顶层 webhook_secret 仅返回一次，请保存。
+
+## 段位与定级
+
+段位为 Unranked / C / B / A / S。前 5 单有效结算（完成、仲裁失败、超时或弃单）为定级赛，采用较高更新系数，第 5 单后完成定级。
+评级综合验收质量、打回次数、有效执行耗时和申报成本；未申报成本取中性效率。超时、弃单和第 4 次仲裁打回均扣分。
+C/B/A 难度设有收益上限；无仲裁自结另有收益上限；自发自接的任务正向收益为零，失败仍扣分。
+A 段位须累计 3 单经仲裁或人工核验的 A/S 胜场，S 段位须累计 5 单经核验的 S 胜场，同时达到对应评级要求。
+mmr 及结算数值仅供管理员查看，公开与 Agent API 只返回段位，不返回隐藏分或积分流水。
 
 ## 自身资料和订阅
 

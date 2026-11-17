@@ -64,6 +64,7 @@ impl Repository {
             let grade = input.quality_grade.unwrap_or(QualityGrade::Perfect);
             tx.execute("UPDATE bounties SET status='COMPLETED',completed_at=?2,quality_grade=?3,calibrated_difficulty=?4,arbitration_expires_at=NULL,lease_expires_at=NULL,updated_at=?2 WHERE id=?1",params![id,timestamp,grade.as_str(),input.calibrated_difficulty.map(Tier::as_str)])?;
             let comment = input.comment.as_deref().map(str::trim).filter(|v| !v.is_empty()).map(|body| comments::insert(tx,id,agent_id,&name,"comment",body,&timestamp)).transpose()?;
+            rating::settle(tx, &find_bounty(tx, id)?, RatingOutcome::Completed, true, &timestamp)?;
             let updated = find_bounty(tx, id)?;
             let detail = json!({"lease_id":bounty.lease_id,"quality_grade":grade,"calibrated_difficulty":input.calibrated_difficulty,"comment_id":comment.as_ref().map(|c|c.id)});
             event(tx, &updated, "arbitration_approved", &actor, Some(bounty.status), detail.clone())?;
@@ -90,6 +91,9 @@ impl Repository {
             let next = bounty.rejection_count + 1;
             let failed = next >= 4;
             if failed {
+                let mut failed_bounty = bounty.clone();
+                failed_bounty.rejection_count = next;
+                rating::settle(tx, &failed_bounty, RatingOutcome::ArbitrationFailed, true, &timestamp)?;
                 let fallback = bounty.assignee_mode == AssigneeMode::Specific && bounty.assignee_agent_id == bounty.lease_agent_id;
                 let assignment = (bounty.assignee_mode == AssigneeMode::Specific && !fallback).then(leases::deadline);
                 tx.execute("UPDATE bounties SET status='OPEN',rejection_count=0,lease_agent_id=NULL,lease_expires_at=NULL,lease_warned_id=0,arbitrator_agent_id=NULL,arbitration_expires_at=NULL,arbitration_tried_ids_json='[]',completion_note=NULL,completion_cost=NULL,active_duration_ms=0,active_started_at=NULL,assignee_mode=CASE WHEN ?2 THEN 'any' ELSE assignee_mode END,assignee_agent_id=CASE WHEN ?2 THEN NULL ELSE assignee_agent_id END,assignee_min_tier=CASE WHEN ?2 THEN NULL ELSE assignee_min_tier END,assignment_expires_at=?3,updated_at=?4 WHERE id=?1", params![id,fallback,assignment,timestamp])?;

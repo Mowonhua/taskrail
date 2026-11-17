@@ -31,12 +31,18 @@ import {
   formatCommentAuthorRole,
   formatCommentKind,
   formatCompletionCost,
+  formatEfficiencyPercent,
   formatEventActor,
   formatEventLabel,
   formatInviteTokenStatus,
   formatLeaseCountdown,
+  formatMmrDelta,
+  formatMmrValue,
   formatQualityGrade,
+  formatRatingCapReason,
+  formatRatingOutcome,
   formatServiceError,
+  formatTierGateReason,
 } from '../bounty/helpers';
 import { setLocalePreference } from '../i18n';
 import {
@@ -3341,5 +3347,565 @@ describe('Issue 08 仲裁顺位配置、裁判回避与仲裁验收闭环', () =
     expect(openWithToken.content).toBe(
       renderExpectedFromRust('http://127.0.0.1:8420', true, openInvite.raw_token),
     );
+  });
+});
+
+describe('Issue 09 隐藏分评级、防刷规则与段位门槛', () => {
+  it('HttpBountyClient.getAgentDetail 发送管理员鉴权请求到 /api/v1/agents/{id} 并同步段位与定级文档', async () => {
+    const calls: Array<{ url: string; method: string; auth: string | null }> = [];
+    const sampleDetail = {
+      agent: {
+        id: 'agent 1',
+        name: 'rated-worker',
+        description: '',
+        capabilities: ['rust'],
+        api_key_prefix: 'tr_ag_1234',
+        tier: 'B',
+        placement_completed: true,
+        subscribe_all_projects: true,
+        project_ids: [],
+        status: 'active',
+        invite_token_id: null,
+        active_lease_count: 0,
+        timeout_count: 0,
+        abandon_count: 0,
+        last_seen_at: null,
+        channel_status: 'offline',
+        stream_connected: false,
+        webhook_configured: false,
+        webhook_url: null,
+        last_pushed_at: null,
+        created_at: '2026-11-17T00:00:00.000Z',
+        updated_at: '2026-11-17T00:00:00.000Z',
+      },
+      mmr: 1325.5,
+      placement_count: 5,
+      placement_required: 5,
+      completed_count: 5,
+      failed_count: 0,
+      verified_as_wins: 1,
+      verified_s_wins: 0,
+      ledger: [],
+    };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const headers = new Headers(init?.headers);
+      calls.push({
+        url: String(input),
+        method: init?.method ?? 'GET',
+        auth: headers.get('Authorization'),
+      });
+      return new Response(JSON.stringify(sampleDetail), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
+
+    const http = new HttpBountyClient('http://127.0.0.1:8420', 'admin-secret', fetchMock as typeof fetch);
+    const detail = await http.getAgentDetail('agent 1');
+    expect(detail).toEqual(sampleDetail);
+    expect(calls).toEqual([
+      {
+        url: 'http://127.0.0.1:8420/api/v1/agents/agent%201',
+        method: 'GET',
+        auth: 'Bearer admin-secret',
+      },
+    ]);
+
+    const mem = createMemoryBountyClient();
+    const skill = await mem.getSkillMarkdown();
+    expect(skill.content).toContain('## 段位与定级');
+    expect(skill.content).toContain('前 5 单有效结算（完成、仲裁失败、超时或弃单）为定级赛');
+  });
+
+  it('MemoryBountyClient 定级期与评级公式 1:1 校验（前 5 单 K=80 与第 6 单 K=32 及效率质量衰减）', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-11-17T10:00:00.000Z'));
+      const client = createMemoryBountyClient({ lan_open_registration: true });
+      const project = await client.createProject({ name: 'Rating Math' });
+      const worker = await client.registerAgent({ name: 'math-worker' });
+      const judge = await client.registerAgent({ name: 'math-judge' });
+      await client.updateArbitrationConfig({ arbitrator_chain: [judge.agent.id] });
+
+      const initialDetail = await client.getAgentDetail(worker.agent.id);
+      expect(initialDetail.mmr).toBe(1000);
+      expect(initialDetail.agent.tier).toBe('Unranked');
+      expect(initialDetail.agent.placement_completed).toBe(false);
+      expect(initialDetail.placement_count).toBe(0);
+      expect(initialDetail.placement_required).toBe(5);
+      expect(initialDetail.ledger).toEqual([]);
+
+      // 第 1 单：C 级仲裁完美交付，0ms，未申报成本 (phi_cost = 0.5)
+      const b1 = await client.createBounty({
+        project_id: project.id,
+        title: 'Placement-1',
+        difficulty: 'C',
+        assignee_mode: 'any',
+        require_arbitration: true,
+        status: 'OPEN',
+      });
+      const c1 = await client.agentClaimBounty(worker.api_key, b1.id);
+      await client.agentSubmitArbitration(worker.api_key, b1.id, { lease_id: c1.lease_id });
+      await client.agentApproveArbitration(judge.api_key, b1.id, { quality_grade: 'perfect' });
+
+      const d1 = await client.getAgentDetail(worker.agent.id);
+      const expectedTimeEff1 = 1 / (1 + d1.ledger[0].active_duration_ms / 600_000);
+      const expectedActual1 = 1.0 * (0.75 + 0.15 * expectedTimeEff1 + 0.1 * 0.5);
+      const expectedMmr1 = 1000 + 80 * (expectedActual1 - 0.5);
+      expect(d1.mmr).toBeCloseTo(expectedMmr1, 8);
+      expect(d1.agent.tier).toBe('Unranked');
+      expect(d1.placement_count).toBe(1);
+      expect(d1.ledger[0].k_factor).toBe(80);
+      expect(d1.ledger[0].is_placement).toBe(true);
+      expect(d1.ledger[0].cost_efficiency).toBeCloseTo(0.5, 8);
+      expect(d1.ledger[0].time_efficiency).toBeCloseTo(expectedTimeEff1, 8);
+      expect(d1.ledger[0].quality_score).toBeCloseTo(1.0, 8);
+
+      // 第 2 单：B 级仲裁有瑕疵且打回 1 次，耗时 >= 1,200,000ms，成本 3.0 (phi_cost=0.5)
+      const b2 = await client.createBounty({
+        project_id: project.id,
+        title: 'Placement-2',
+        difficulty: 'B',
+        assignee_mode: 'any',
+        require_arbitration: true,
+        status: 'OPEN',
+      });
+      const c2 = await client.agentClaimBounty(worker.api_key, b2.id);
+      vi.advanceTimersByTime(600_000);
+      await client.agentHeartbeatBounty(worker.api_key, b2.id, { lease_id: c2.lease_id });
+      vi.advanceTimersByTime(600_000);
+      await client.agentSubmitArbitration(worker.api_key, b2.id, {
+        lease_id: c2.lease_id,
+        completion_cost: 3.0,
+      });
+      await client.agentRejectArbitration(judge.api_key, b2.id, { comment: 'need fix' });
+      await client.agentSubmitArbitration(worker.api_key, b2.id, {
+        lease_id: c2.lease_id,
+        completion_cost: 3.0,
+      });
+      await client.agentApproveArbitration(judge.api_key, b2.id, { quality_grade: 'flawed' });
+
+      const d2 = await client.getAgentDetail(worker.agent.id);
+      const expectedTimeEff2 = 1 / (1 + d2.ledger[0].active_duration_ms / 1_200_000);
+      expect(d2.ledger[0].bounty_title).toBe('Placement-2');
+      expect(d2.ledger[0].quality_grade).toBe('flawed');
+      expect(d2.ledger[0].rejection_count).toBe(1);
+      expect(d2.ledger[0].quality_score).toBeCloseTo(0.85 * 0.85, 8);
+      expect(d2.ledger[0].time_efficiency).toBeCloseTo(expectedTimeEff2, 8);
+      expect(d2.ledger[0].cost_efficiency).toBeCloseTo(0.5, 8);
+      expect(d2.agent.tier).toBe('Unranked');
+      expect(d2.agent.placement_completed).toBe(false);
+
+      // 第 3~5 单：完成定级赛后立即分配段位，第 6 单切换为 K=32
+      for (const title of ['Placement-3', 'Placement-4', 'Placement-5']) {
+        const b = await client.createBounty({
+          project_id: project.id,
+          title,
+          difficulty: 'B',
+          assignee_mode: 'any',
+          require_arbitration: true,
+          status: 'OPEN',
+        });
+        const c = await client.agentClaimBounty(worker.api_key, b.id);
+        await client.agentSubmitArbitration(worker.api_key, b.id, {
+          lease_id: c.lease_id,
+          completion_cost: 0,
+        });
+        await client.agentApproveArbitration(judge.api_key, b.id, { quality_grade: 'perfect' });
+      }
+
+      const d5 = await client.getAgentDetail(worker.agent.id);
+      expect(d5.placement_count).toBe(5);
+      expect(d5.agent.placement_completed).toBe(true);
+      expect(d5.agent.tier).toBe('B');
+      expect(d5.completed_count).toBe(5);
+      expect(d5.failed_count).toBe(0);
+      expect(d5.ledger.map(item => item.id)).toEqual([5, 4, 3, 2, 1]);
+
+      const b6 = await client.createBounty({
+        project_id: project.id,
+        title: 'Regular-6',
+        difficulty: 'B',
+        assignee_mode: 'any',
+        require_arbitration: true,
+        status: 'OPEN',
+      });
+      const c6 = await client.agentClaimBounty(worker.api_key, b6.id);
+      await client.agentSubmitArbitration(worker.api_key, b6.id, {
+        lease_id: c6.lease_id,
+        completion_cost: 0,
+      });
+      await client.agentApproveArbitration(judge.api_key, b6.id, { quality_grade: 'perfect' });
+
+      const d6 = await client.getAgentDetail(worker.agent.id);
+      expect(d6.ledger[0].k_factor).toBe(32);
+      expect(d6.ledger[0].is_placement).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('MemoryBountyClient 防刷封顶、难度校准及 A/S 核验胜场段位门槛', async () => {
+    const client = createMemoryBountyClient({ lan_open_registration: true });
+    const project = await client.createProject({ name: 'Anti-Farming', agent_draft_policy: 'open' });
+    const worker = await client.registerAgent({ name: 'farm-worker' });
+    const judge = await client.registerAgent({ name: 'farm-judge' });
+    await client.updateArbitrationConfig({ arbitrator_chain: [judge.agent.id] });
+
+    // 1. 自发自接：正向零收益 (self_deal) 而弃单仍扣分
+    const ownDirect = await client.agentCreateBounty(worker.api_key, {
+      project_id: project.id,
+      title: 'Self-Deal Win',
+      difficulty: 'S',
+      assignee_mode: 'any',
+      require_arbitration: false,
+    });
+    const ownWinClaim = await client.agentClaimBounty(worker.api_key, ownDirect.id);
+    await client.agentCompleteBounty(worker.api_key, ownDirect.id, {
+      lease_id: ownWinClaim.lease_id,
+      completion_cost: 0,
+    });
+    const afterSelfWin = await client.getAgentDetail(worker.agent.id);
+    expect(afterSelfWin.mmr).toBe(1000);
+    expect(afterSelfWin.ledger[0].self_dealt).toBe(true);
+    expect(afterSelfWin.ledger[0].cap_reason).toBe('self_deal');
+    expect(afterSelfWin.ledger[0].applied_delta).toBe(0);
+    expect(afterSelfWin.placement_count).toBe(1);
+
+    const ownFail = await client.agentCreateBounty(worker.api_key, {
+      project_id: project.id,
+      title: 'Self-Deal Abandon',
+      difficulty: 'C',
+      assignee_mode: 'any',
+      require_arbitration: false,
+    });
+    const ownFailClaim = await client.agentClaimBounty(worker.api_key, ownFail.id);
+    await client.agentAbandonBounty(worker.api_key, ownFail.id, {
+      lease_id: ownFailClaim.lease_id,
+    });
+    const afterSelfAbandon = await client.getAgentDetail(worker.agent.id);
+    expect(afterSelfAbandon.mmr).toBeLessThan(1000);
+    expect(afterSelfAbandon.ledger[0].cap_reason).toBeNull();
+    expect(afterSelfAbandon.ledger[0].applied_delta).toBeLessThan(0);
+    expect(afterSelfAbandon.placement_count).toBe(2);
+
+    // 2. 完成定级并把 MMR 推至 1499（B 难度上限），同时校验无仲裁 S 封顶 1350 (unarbitrated_cap)
+    for (let i = 1; i <= 30; i += 1) {
+      if ((await client.getAgentDetail(worker.agent.id)).mmr >= 1495) break;
+      const bTask = await client.createBounty({
+        project_id: project.id,
+        title: `Climb-B-${i}`,
+        difficulty: 'B',
+        assignee_mode: 'any',
+        require_arbitration: true,
+        status: 'OPEN',
+      });
+      const bClaim = await client.agentClaimBounty(worker.api_key, bTask.id);
+      await client.agentSubmitArbitration(worker.api_key, bTask.id, {
+        lease_id: bClaim.lease_id,
+        completion_cost: 0,
+      });
+      await client.agentApproveArbitration(judge.api_key, bTask.id, { quality_grade: 'perfect' });
+    }
+    const atBPeak = await client.getAgentDetail(worker.agent.id);
+    expect(atBPeak.mmr).toBeGreaterThanOrEqual(1495);
+    expect(atBPeak.verified_as_wins).toBe(0);
+    expect(atBPeak.agent.tier).toBe('B');
+
+    const unarbS = await client.createBounty({
+      project_id: project.id,
+      title: 'Unarbitrated-S',
+      difficulty: 'S',
+      assignee_mode: 'any',
+      require_arbitration: false,
+      status: 'OPEN',
+    });
+    const unarbClaim = await client.agentClaimBounty(worker.api_key, unarbS.id);
+    await client.agentCompleteBounty(worker.api_key, unarbS.id, {
+      lease_id: unarbClaim.lease_id,
+      completion_cost: 0,
+    });
+    const afterUnarb = await client.getAgentDetail(worker.agent.id);
+    expect(afterUnarb.mmr).toBe(atBPeak.mmr);
+    expect(afterUnarb.ledger[0].cap_reason).toBe('unarbitrated_cap');
+    expect(afterUnarb.ledger[0].applied_delta).toBe(0);
+
+    // 3. 验证 calibrated_difficulty (B -> A) 与 A/S 核验胜场门槛 (needs_as_wins 1..3，第 3 场人工/Agent核验解锁 A)
+    for (let win = 1; win <= 3; win += 1) {
+      const aTask = await client.createBounty({
+        project_id: project.id,
+        title: `Unlock-A-${win}`,
+        difficulty: 'B',
+        assignee_mode: 'any',
+        require_arbitration: true,
+        status: 'OPEN',
+      });
+      const claimed = await client.agentClaimBounty(worker.api_key, aTask.id);
+      await client.agentSubmitArbitration(worker.api_key, aTask.id, {
+        lease_id: claimed.lease_id,
+        completion_cost: 0,
+      });
+      const approved =
+        win % 2 === 1
+          ? await client.approveArbitration(aTask.id, {
+              quality_grade: 'perfect',
+              calibrated_difficulty: 'A',
+            })
+          : await client.agentApproveArbitration(judge.api_key, aTask.id, {
+              quality_grade: 'perfect',
+              calibrated_difficulty: 'A',
+            });
+      const detail = await client.getAgentDetail(worker.agent.id);
+      expect(detail.verified_as_wins).toBe(win);
+      expect(detail.ledger[0].original_difficulty).toBe('B');
+      expect(detail.ledger[0].effective_difficulty).toBe('A');
+      if (win < 3) {
+        expect(detail.agent.tier).toBe('B');
+        expect(approved.lease_agent_tier).toBe('B');
+        expect(detail.ledger[0].tier_gate_reason).toBe('needs_as_wins');
+      } else {
+        expect(detail.agent.tier).toBe('A');
+        expect(approved.lease_agent_tier).toBe('A');
+        expect(detail.ledger[0].tier_gate_reason).toBeNull();
+      }
+    }
+
+    // 4. 推高到 A 上限 1799，校验 C 难度封顶 (difficulty_cap)，再验证 S 核验胜场门槛 (needs_s_wins) 第 5 场解锁 S
+    for (let i = 1; i <= 30; i += 1) {
+      if ((await client.getAgentDetail(worker.agent.id)).mmr >= 1795) break;
+      const pushA = await client.createBounty({
+        project_id: project.id,
+        title: `Climb-A-${i}`,
+        difficulty: 'A',
+        assignee_mode: 'any',
+        require_arbitration: true,
+        status: 'OPEN',
+      });
+      const claimed = await client.agentClaimBounty(worker.api_key, pushA.id);
+      await client.agentSubmitArbitration(worker.api_key, pushA.id, {
+        lease_id: claimed.lease_id,
+        completion_cost: 0,
+      });
+      await client.agentApproveArbitration(judge.api_key, pushA.id, { quality_grade: 'perfect' });
+    }
+
+    const cTask = await client.createBounty({
+      project_id: project.id,
+      title: 'C-Capped',
+      difficulty: 'C',
+      assignee_mode: 'any',
+      require_arbitration: true,
+      status: 'OPEN',
+    });
+    const cClaim = await client.agentClaimBounty(worker.api_key, cTask.id);
+    await client.agentSubmitArbitration(worker.api_key, cTask.id, {
+      lease_id: cClaim.lease_id,
+      completion_cost: 0,
+    });
+    await client.agentApproveArbitration(judge.api_key, cTask.id, { quality_grade: 'perfect' });
+    expect((await client.getAgentDetail(worker.agent.id)).ledger[0].cap_reason).toBe('difficulty_cap');
+
+    for (let sWin = 1; sWin <= 5; sWin += 1) {
+      const sTask = await client.createBounty({
+        project_id: project.id,
+        title: `Unlock-S-${sWin}`,
+        difficulty: 'S',
+        assignee_mode: 'any',
+        require_arbitration: true,
+        status: 'OPEN',
+      });
+      const claimed = await client.agentClaimBounty(worker.api_key, sTask.id);
+      await client.agentSubmitArbitration(worker.api_key, sTask.id, {
+        lease_id: claimed.lease_id,
+        completion_cost: 0,
+      });
+      const approved = await client.agentApproveArbitration(judge.api_key, sTask.id, {
+        quality_grade: 'perfect',
+      });
+      const detail = await client.getAgentDetail(worker.agent.id);
+      expect(detail.mmr).toBeGreaterThanOrEqual(1800);
+      expect(detail.verified_s_wins).toBe(sWin);
+      if (sWin < 5) {
+        expect(detail.agent.tier).toBe('A');
+        expect(approved.lease_agent_tier).toBe('A');
+        expect(detail.ledger[0].tier_gate_reason).toBe('needs_s_wins');
+      } else {
+        expect(detail.agent.tier).toBe('S');
+        expect(approved.lease_agent_tier).toBe('S');
+        expect(detail.ledger[0].tier_gate_reason).toBeNull();
+      }
+    }
+  });
+
+  it('MemoryBountyClient 超时与第 4 次打回扣分结算、releaseLease 免疫、公开 DTO 隔离与格式化无中点', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-11-17T12:00:00.000Z'));
+      const client = createMemoryBountyClient({ lan_open_registration: true });
+      const project = await client.createProject({ name: 'Failures & Privacy' });
+      const worker = await client.registerAgent({ name: 'failure-worker' });
+      const judge = await client.registerAgent({ name: 'failure-judge' });
+      await client.updateArbitrationConfig({ arbitrator_chain: [judge.agent.id] });
+
+      // 1. releaseLease 绝不结算评级或记失败
+      const releaseTask = await client.createBounty({
+        project_id: project.id,
+        title: 'Admin Release',
+        difficulty: 'B',
+        assignee_mode: 'any',
+        status: 'OPEN',
+      });
+      await client.agentClaimBounty(worker.api_key, releaseTask.id);
+      await client.releaseLease(releaseTask.id);
+      expect((await client.getAgentDetail(worker.agent.id)).ledger).toHaveLength(0);
+      expect((await client.getAgentDetail(worker.agent.id)).mmr).toBe(1000);
+
+      // 2. 租约超时触发 timeout 结算一次
+      const timeoutTask = await client.createBounty({
+        project_id: project.id,
+        title: 'Timeout Task',
+        difficulty: 'B',
+        assignee_mode: 'any',
+        status: 'OPEN',
+      });
+      await client.agentClaimBounty(worker.api_key, timeoutTask.id);
+      vi.advanceTimersByTime(16 * 60 * 1000);
+      await client.sweepLeases(Date.now());
+      await client.sweepLeases(Date.now());
+      const afterTimeout = await client.getAgentDetail(worker.agent.id);
+      expect(afterTimeout.ledger).toHaveLength(1);
+      expect(afterTimeout.ledger[0].outcome).toBe('timeout');
+      expect(afterTimeout.failed_count).toBe(1);
+      expect(afterTimeout.mmr).toBeLessThan(1000);
+
+      // 3. 第 4 次仲裁打回触发 arbitration_failed 结算一次
+      const arbTask = await client.createBounty({
+        project_id: project.id,
+        title: '4th Reject Fail',
+        difficulty: 'B',
+        assignee_mode: 'any',
+        require_arbitration: true,
+        status: 'OPEN',
+      });
+      const arbClaim = await client.agentClaimBounty(worker.api_key, arbTask.id);
+      for (let round = 1; round <= 4; round += 1) {
+        await client.agentSubmitArbitration(worker.api_key, arbTask.id, {
+          lease_id: arbClaim.lease_id,
+          completion_cost: 2,
+        });
+        await client.agentRejectArbitration(judge.api_key, arbTask.id, {
+          comment: `reject-${round}`,
+        });
+      }
+      const afterRejectFail = await client.getAgentDetail(worker.agent.id);
+      expect(afterRejectFail.ledger).toHaveLength(2);
+      expect(afterRejectFail.ledger[0].outcome).toBe('arbitration_failed');
+      expect(afterRejectFail.ledger[0].rejection_count).toBe(4);
+      expect(afterRejectFail.failed_count).toBe(2);
+
+      // 3b. 打回一次后弃单或租约超时，流水须保留已申报 completion_cost=7 与 rejection_count=1，重开任务清零
+      const rejAbandonTask = await client.createBounty({
+        project_id: project.id,
+        title: 'Reject Then Abandon',
+        difficulty: 'B',
+        assignee_mode: 'any',
+        require_arbitration: true,
+        status: 'OPEN',
+      });
+      const rejAbandonClaim = await client.agentClaimBounty(worker.api_key, rejAbandonTask.id);
+      await client.agentSubmitArbitration(worker.api_key, rejAbandonTask.id, {
+        lease_id: rejAbandonClaim.lease_id,
+        completion_note: 'partial work',
+        completion_cost: 7,
+      });
+      await client.agentRejectArbitration(judge.api_key, rejAbandonTask.id, {
+        comment: 'reject once before abandon',
+      });
+      const reopenedAfterAbandon = await client.agentAbandonBounty(worker.api_key, rejAbandonTask.id, {
+        lease_id: rejAbandonClaim.lease_id,
+        reason: 'handoff',
+      });
+      expect(reopenedAfterAbandon.status).toBe('OPEN');
+      expect(reopenedAfterAbandon.rejection_count).toBe(0);
+      expect(reopenedAfterAbandon.completion_cost).toBeNull();
+      expect(reopenedAfterAbandon.completion_note).toBeNull();
+      const afterRejAbandon = await client.getAgentDetail(worker.agent.id);
+      expect(afterRejAbandon.ledger[0].outcome).toBe('abandon');
+      expect(afterRejAbandon.ledger[0].rejection_count).toBe(1);
+      expect(afterRejAbandon.ledger[0].completion_cost).toBe(7);
+      expect(afterRejAbandon.ledger[0].cost_efficiency).toBe(0);
+
+      const rejTimeoutTask = await client.createBounty({
+        project_id: project.id,
+        title: 'Reject Then Timeout',
+        difficulty: 'B',
+        assignee_mode: 'any',
+        require_arbitration: true,
+        status: 'OPEN',
+      });
+      const rejTimeoutClaim = await client.agentClaimBounty(worker.api_key, rejTimeoutTask.id);
+      await client.agentSubmitArbitration(worker.api_key, rejTimeoutTask.id, {
+        lease_id: rejTimeoutClaim.lease_id,
+        completion_note: 'partial timeout work',
+        completion_cost: 7,
+      });
+      await client.agentRejectArbitration(judge.api_key, rejTimeoutTask.id, {
+        comment: 'reject once before timeout',
+      });
+      vi.advanceTimersByTime(16 * 60 * 1000);
+      await client.sweepLeases(Date.now());
+      const reopenedAfterTimeout = (await client.getBountyDetail(rejTimeoutTask.id)).bounty;
+      expect(reopenedAfterTimeout.status).toBe('OPEN');
+      expect(reopenedAfterTimeout.rejection_count).toBe(0);
+      expect(reopenedAfterTimeout.completion_cost).toBeNull();
+      expect(reopenedAfterTimeout.completion_note).toBeNull();
+      const afterRejTimeout = await client.getAgentDetail(worker.agent.id);
+      expect(afterRejTimeout.ledger[0].outcome).toBe('timeout');
+      expect(afterRejTimeout.ledger[0].rejection_count).toBe(1);
+      expect(afterRejTimeout.ledger[0].completion_cost).toBe(7);
+      expect(afterRejTimeout.ledger[0].cost_efficiency).toBe(0);
+
+      // 4. 公开 DTO 与事件严禁泄漏 mmr 或 delta
+      const publicSummary = await client.agentGetMe(worker.api_key);
+      const listedAgents = await client.listAgents();
+      const bountyDetail = await client.getBountyDetail(arbTask.id);
+      const agentEvents = await client.agentListEvents(worker.api_key);
+      for (const payload of [publicSummary, listedAgents, bountyDetail, agentEvents]) {
+        const serialized = JSON.stringify(payload);
+        expect(serialized).not.toContain('"mmr"');
+        expect(serialized).not.toContain('"raw_delta"');
+        expect(serialized).not.toContain('"applied_delta"');
+        expect(serialized).not.toContain('"mmr_before"');
+        expect(serialized).not.toContain('"mmr_after"');
+      }
+
+      // 5. 评级格式化函数在中英文下均不含中点
+      for (const loc of ['zh-CN', 'en'] as const) {
+        setLocalePreference(loc);
+        const samples = [
+          formatRatingOutcome('completed'),
+          formatRatingOutcome('arbitration_failed'),
+          formatRatingOutcome('timeout'),
+          formatRatingOutcome('abandon'),
+          formatRatingCapReason('self_deal'),
+          formatRatingCapReason('unarbitrated_cap'),
+          formatRatingCapReason('difficulty_cap'),
+          formatTierGateReason('needs_as_wins'),
+          formatTierGateReason('needs_s_wins'),
+          formatEfficiencyPercent(0.875),
+          formatMmrValue(1425.34),
+          formatMmrDelta(18.4),
+          formatMmrDelta(-12.6),
+          formatMmrDelta(0),
+        ];
+        for (const text of samples) {
+          expect(text).toBeTruthy();
+          expect(text).not.toContain('·');
+        }
+      }
+      setLocalePreference('zh-CN');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

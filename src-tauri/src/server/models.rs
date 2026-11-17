@@ -25,6 +25,59 @@ string_enum!(AgentTier { Unranked => "Unranked", C => "C", B => "B", A => "A", S
 string_enum!(AgentStatus { Active => "active", Disabled => "disabled", Revoked => "revoked" });
 string_enum!(AgentActivity { Idle => "idle", Busy => "busy" });
 
+string_enum!(RatingOutcome { Completed => "completed", ArbitrationFailed => "arbitration_failed", Timeout => "timeout", Abandon => "abandon" });
+
+/// 结构职责：仅管理员详情使用的结算快照；不得嵌入公开资料、悬赏或事件。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentRatingLedgerEntry {
+    pub id: i64,
+    pub agent_id: String,
+    pub bounty_id: String,
+    pub bounty_title: String,
+    pub project_id: String,
+    pub lease_id: i64,
+    pub outcome: RatingOutcome,
+    pub arbitrated: bool,
+    pub self_dealt: bool,
+    pub original_difficulty: Tier,
+    pub effective_difficulty: Tier,
+    pub quality_grade: Option<QualityGrade>,
+    pub rejection_count: i64,
+    pub quality_score: f64,
+    pub active_duration_ms: i64,
+    pub time_efficiency: f64,
+    pub completion_cost: Option<f64>,
+    pub cost_efficiency: f64,
+    pub actual_score: f64,
+    pub expected_score: f64,
+    pub k_factor: f64,
+    pub is_placement: bool,
+    pub raw_delta: f64,
+    pub applied_delta: f64,
+    pub mmr_before: f64,
+    pub mmr_after: f64,
+    pub tier_before: AgentTier,
+    pub tier_after: AgentTier,
+    pub cap_reason: Option<String>,
+    pub tier_gate_reason: Option<String>,
+    pub created_at: String,
+}
+
+/// 结构职责：管理员专用评级详情；公开资料继续使用 AgentSummary。
+/// 约束条件：进度、统计和倒序流水来自同一个数据库读快照；进度最多为 5。
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AgentDetail {
+    pub agent: AgentSummary,
+    pub mmr: f64,
+    pub placement_count: i64,
+    pub placement_required: i64,
+    pub completed_count: i64,
+    pub failed_count: i64,
+    pub verified_as_wins: i64,
+    pub verified_s_wins: i64,
+    pub ledger: Vec<AgentRatingLedgerEntry>,
+}
+
 /// 结构职责：邀请令牌的公开摘要；永远不包含摘要密钥或明文凭证。
 #[derive(Debug, Serialize, Deserialize)]
 pub struct InviteTokenSummary {

@@ -4373,4 +4373,268 @@ describe('悬赏板工作台外壳集成测试', () => {
     const updatedProj = (await bountyApi.listProjects(true)).find(item => item.id === proj.id)!;
     expect(updatedProj.arbitrator_chain).toEqual([rawProjectSymbol]);
   });
+
+  it('Issue 09 悬赏板卡片与详情抽屉及 Agent 名录卡片仅展示段位徽章且严禁暴露 MMR 并支持点击打开评级详情弹窗与英文零中点', async () => {
+    const { port } = createMemoryPort({
+      preferences: { ...emptyAppConfig().preferences, workspaceSection: 'bounties' },
+    });
+    const bountyApi = createMemoryBountyClient({ lan_open_registration: true });
+    const project = await bountyApi.createProject({ name: 'Hidden Rating UI Project', agent_draft_policy: 'open' });
+    const worker = await bountyApi.registerAgent({ name: 'ui-rated-worker', capabilities: ['svelte'] });
+    const judge = await bountyApi.registerAgent({ name: 'ui-rated-judge', capabilities: ['review'] });
+    await bountyApi.updateArbitrationConfig({ arbitrator_chain: [judge.agent.id] });
+
+    // 让 worker 完成 5 单定级 + 1 单无仲裁超上限 + 1 单自我发单自接（产生 calibrated_difficulty、未申报成本、self_deal、unarbitrated_cap）
+    for (let i = 1; i <= 5; i += 1) {
+      const task = await bountyApi.createBounty({
+        project_id: project.id,
+        title: `UI-Placement-${i}`,
+        difficulty: 'B',
+        assignee_mode: 'any',
+        require_arbitration: true,
+        status: 'OPEN',
+      });
+      const claim = await bountyApi.agentClaimBounty(worker.api_key, task.id);
+      await bountyApi.agentSubmitArbitration(worker.api_key, task.id, {
+        lease_id: claim.lease_id,
+        completion_cost: i === 1 ? undefined : 0,
+      });
+      await bountyApi.agentApproveArbitration(judge.api_key, task.id, {
+        quality_grade: i === 2 ? 'flawed' : 'perfect',
+        calibrated_difficulty: i === 5 ? 'A' : undefined,
+      });
+    }
+
+    // 再做一单自发自接与一单主动弃单
+    const selfTask = await bountyApi.agentCreateBounty(worker.api_key, {
+      project_id: project.id,
+      title: 'UI-Self-Deal',
+      difficulty: 'S',
+      assignee_mode: 'any',
+      require_arbitration: false,
+    });
+    const selfClaim = await bountyApi.agentClaimBounty(worker.api_key, selfTask.id);
+    await bountyApi.agentCompleteBounty(worker.api_key, selfTask.id, {
+      lease_id: selfClaim.lease_id,
+      completion_cost: 1.5,
+    });
+
+    const abandonTask = await bountyApi.createBounty({
+      project_id: project.id,
+      title: 'UI-Abandon',
+      difficulty: 'B',
+      assignee_mode: 'any',
+      require_arbitration: false,
+      status: 'OPEN',
+    });
+    const abandonClaim = await bountyApi.agentClaimBounty(worker.api_key, abandonTask.id);
+    await bountyApi.agentAbandonBounty(worker.api_key, abandonTask.id, {
+      lease_id: abandonClaim.lease_id,
+      reason: 'hand off',
+    });
+
+    const truthDetail = await bountyApi.getAgentDetail(worker.agent.id);
+    const exactMmrText = truthDetail.mmr.toFixed(1);
+
+    instance = mount(App, { target, props: { files: port, bountyApi } });
+    await flush();
+
+    // 1. 悬赏板卡片与详情抽屉仅见段位，绝不出现隐藏 MMR 数值或 delta
+    const boardView = target.querySelector<HTMLElement>('[data-view="bounties"]')!;
+    expect(boardView.textContent).not.toContain(exactMmrText);
+    expect(boardView.textContent?.toLowerCase()).not.toContain('mmr');
+
+    const completedCardBtn = boardView.querySelector<HTMLButtonElement>(
+      `[data-bounty-id="${selfTask.id}"] .bounty-card-button`,
+    )!;
+    completedCardBtn.click();
+    await flush();
+
+    const drawer = target.querySelector<HTMLElement>('[data-dialog="bounty-detail"]')!;
+    expect(drawer).not.toBeNull();
+    expect(drawer.textContent).not.toContain(exactMmrText);
+    expect(drawer.textContent?.toLowerCase()).not.toContain('mmr');
+    expect(drawer.textContent).not.toContain('·');
+
+    // 关闭详情抽屉并切换至 Agent 名录
+    drawer.querySelector<HTMLButtonElement>('[aria-label="关闭对话框"]')?.click();
+    await flush();
+    target.querySelector<HTMLButtonElement>('[data-nav-section="agents"]')!.click();
+    await flush();
+
+    const agentList = target.querySelector<HTMLElement>('[data-slot="agent-list"]')!;
+    const workerCard = agentList.querySelector<HTMLElement>(`[data-agent-id="${worker.agent.id}"]`)!;
+    expect(workerCard.querySelector('[data-agent-tier-badge]')?.textContent).toContain('[B]');
+    expect(agentList.textContent).not.toContain(exactMmrText);
+    expect(agentList.textContent?.toLowerCase()).not.toContain('mmr');
+    expect(agentList.textContent).not.toContain('·');
+
+    // 2. 点击底部「停用」按钮不应误触发 Agent 详情弹窗
+    workerCard.querySelector<HTMLButtonElement>('[data-action="disable-agent"]')!.click();
+    await flush();
+    expect(target.querySelector('[data-dialog="agent-detail"]')).toBeNull();
+    expect(
+      target.querySelector<HTMLElement>(`[data-agent-id="${worker.agent.id}"]`)?.dataset.agentStatus,
+    ).toBe('disabled');
+    target
+      .querySelector<HTMLButtonElement>(
+        `[data-agent-id="${worker.agent.id}"] [data-action="enable-agent"]`,
+      )!
+      .click();
+    await flush();
+
+    // 3. 点击卡片主体打开 Agent 评级详情弹窗并校验完整数据与逆序流水，同时校验键盘焦点进入与 Tab 陷阱
+    const openDetailCardBtn = target.querySelector<HTMLButtonElement>(
+      `[data-agent-id="${worker.agent.id}"] [data-action="open-agent-detail"]`,
+    )!;
+    openDetailCardBtn.focus();
+    openDetailCardBtn.click();
+    await flush();
+
+    const dialog = target.querySelector<HTMLElement>('[data-dialog="agent-detail"]')!;
+    expect(dialog).not.toBeNull();
+    expect(dialog.getAttribute('role')).toBe('dialog');
+    expect(dialog.getAttribute('aria-modal')).toBe('true');
+    expect(dialog.contains(document.activeElement)).toBe(true);
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true }));
+    expect(dialog.contains(document.activeElement)).toBe(true);
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, bubbles: true }));
+    expect(dialog.contains(document.activeElement)).toBe(true);
+    const backgroundRefreshBtn = target.querySelector<HTMLButtonElement>('[data-action="refresh-agents"]')!;
+    backgroundRefreshBtn.focus();
+    expect(dialog.contains(document.activeElement)).toBe(true);
+    expect(dialog.querySelector('[data-slot="agent-detail-mmr"]')?.textContent?.trim()).toBe(exactMmrText);
+    expect(dialog.querySelector('[data-slot="agent-detail-placement"]')?.textContent).toContain('已完成定级 (5/5)');
+    expect(dialog.querySelector('[data-slot="agent-detail-completed"]')?.textContent?.trim()).toBe('6');
+    expect(dialog.querySelector('[data-slot="agent-detail-failed"]')?.textContent?.trim()).toBe('1');
+    expect(dialog.querySelector('[data-slot="agent-detail-abandon"]')?.textContent?.trim()).toBe('1');
+    expect(dialog.querySelector('[data-slot="agent-detail-as-wins"]')?.textContent?.trim()).toBe('1');
+
+    const entries = Array.from(dialog.querySelectorAll<HTMLElement>('[data-ledger-id]'));
+    expect(entries).toHaveLength(7);
+    expect(entries[0].textContent).toContain('UI-Abandon');
+    expect(entries[1].textContent).toContain('UI-Self-Deal');
+    expect(entries[1].querySelector('[data-slot="ledger-cap-reason"]')?.textContent?.trim()).toBe('自发自接封顶');
+    expect(entries[1].querySelector('[data-slot="ledger-self-dealt"]')?.textContent?.trim()).toBe('自发自接');
+    expect(entries[2].textContent).toContain('UI-Placement-5');
+    expect(entries[2].querySelector('[data-slot="ledger-difficulty"]')?.textContent).toContain('难度 B 校准为 A');
+    expect(entries[6].textContent).toContain('UI-Placement-1');
+    expect(entries[6].querySelector('[data-slot="ledger-cost-efficiency"]')?.textContent).toContain('未申报（中性 50%）');
+    expect(dialog.textContent).not.toContain('·');
+
+    // 4. 切换英文语言后，弹窗内所有翻译仍不含中点
+    setLocalePreference('en');
+    await flush();
+    expect(dialog.textContent).toContain('Agent rating details');
+    expect(dialog.textContent).toContain('Hidden MMR');
+    expect(dialog.textContent).toContain('Self-deal gain cap');
+    expect(dialog.textContent).not.toContain('·');
+
+    // 5. 按 Escape 关闭弹窗并恢复焦点至触发按钮
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    await flush();
+    expect(target.querySelector('[data-dialog="agent-detail"]')).toBeNull();
+    expect(document.activeElement).toBe(openDetailCardBtn);
+  });
+
+  it('Issue 09 Agent 评级详情弹窗支持加载失败重试与切换 Agent 时的过期响应取消保护', async () => {
+    const { port } = createMemoryPort({
+      preferences: { ...emptyAppConfig().preferences, workspaceSection: 'agents' },
+    });
+    const bountyApi = createMemoryBountyClient({ lan_open_registration: true });
+    const agentA = await bountyApi.registerAgent({ name: 'detail-agent-a' });
+    const agentB = await bountyApi.registerAgent({ name: 'detail-agent-b' });
+
+    const originalGetDetail = bountyApi.getAgentDetail.bind(bountyApi);
+    const detailASnapshot = await originalGetDetail(agentA.agent.id);
+    const detailBSnapshot = await originalGetDetail(agentB.agent.id);
+
+    let resolveRetryA!: (value: typeof detailASnapshot) => void;
+    let resolvePendingA!: (value: typeof detailASnapshot) => void;
+    const getDetailSpy = vi
+      .spyOn(bountyApi, 'getAgentDetail')
+      .mockRejectedValueOnce(new Error('DETAIL_FETCH_503'))
+      .mockImplementationOnce(
+        () =>
+          new Promise(resolve => {
+            resolveRetryA = resolve;
+          }),
+      )
+      .mockImplementationOnce(
+        () =>
+          new Promise(resolve => {
+            resolvePendingA = resolve;
+          }),
+      )
+      .mockResolvedValueOnce(detailBSnapshot);
+
+    instance = mount(App, { target, props: { files: port, bountyApi } });
+    await flush();
+
+    // 1. 首次打开失败展示错误并支持重试恢复，同时验证多可聚焦控件 Tab 闭环与重试持有焦点不逃逸
+    const triggerA = target.querySelector<HTMLButtonElement>(
+      `[data-agent-id="${agentA.agent.id}"] [data-action="view-agent-detail"]`,
+    )!;
+    triggerA.focus();
+    triggerA.click();
+    await flush();
+
+    const errorDialog = target.querySelector<HTMLElement>('[data-dialog="agent-detail"]')!;
+    const closeDialogBtn = errorDialog.querySelector<HTMLButtonElement>('[aria-label="关闭对话框"]')!;
+    const retryBtn = errorDialog.querySelector<HTMLButtonElement>('[data-action="retry-agent-detail"]')!;
+    const errorBanner = errorDialog.querySelector<HTMLElement>('[data-status="agent-detail-error"]');
+    expect(errorBanner).not.toBeNull();
+    expect(errorBanner!.textContent).toContain('DETAIL_FETCH_503');
+    expect(document.activeElement).toBe(closeDialogBtn);
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, bubbles: true }));
+    expect(document.activeElement).toBe(retryBtn);
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true }));
+    expect(document.activeElement).toBe(closeDialogBtn);
+
+    retryBtn.focus();
+    expect(document.activeElement).toBe(retryBtn);
+    retryBtn.click();
+    await flush();
+    expect(errorDialog.contains(document.activeElement)).toBe(true);
+    expect(document.activeElement).toBe(closeDialogBtn);
+
+    resolveRetryA(detailASnapshot);
+    await flush();
+    expect(errorDialog.contains(document.activeElement)).toBe(true);
+    expect(document.activeElement).toBe(closeDialogBtn);
+    expect(target.querySelector('[data-status="agent-detail-error"]')).toBeNull();
+    expect(
+      target.querySelector('[data-dialog="agent-detail"] [data-slot="agent-detail-mmr"]')?.textContent?.trim(),
+    ).toBe('1000.0');
+
+    // 关闭后焦点恢复至 triggerA；再打开 A（挂起），随即关闭并改开 B；晚到的 A 响应不得覆盖 B
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    await flush();
+    expect(document.activeElement).toBe(triggerA);
+
+    triggerA.click();
+    await vi.waitFor(() => expect(resolvePendingA).toBeTypeOf('function'));
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    await flush();
+    expect(target.querySelector('[data-dialog="agent-detail"]')).toBeNull();
+    expect(document.activeElement).toBe(triggerA);
+
+    target
+      .querySelector<HTMLButtonElement>(
+        `[data-agent-id="${agentB.agent.id}"] [data-action="view-agent-detail"]`,
+      )!
+      .click();
+    await flush();
+
+    resolvePendingA(detailASnapshot);
+    await flush();
+
+    const activeDialog = target.querySelector<HTMLElement>('[data-dialog="agent-detail"]')!;
+    expect(activeDialog).not.toBeNull();
+    expect(activeDialog.dataset.agentId).toBe(agentB.agent.id);
+    expect(activeDialog.textContent).toContain('detail-agent-b');
+    expect(activeDialog.textContent).not.toContain('detail-agent-a');
+    expect(getDetailSpy).toHaveBeenCalledTimes(4);
+  });
 });

@@ -19,6 +19,7 @@ mod arbitration;
 mod comments;
 mod events;
 mod leases;
+mod rating;
 
 /// 结构职责：可克隆的文件数据库入口；每次调用独立连接，可跨进程共享同一文件。
 /// 约束条件：同步接口应在阻塞线程执行，不接受 :memory:，以保证多连接共享数据。
@@ -56,13 +57,13 @@ impl Repository {
             [],
             |r| r.get(0),
         )?;
-        if version > 7 {
+        if version > 8 {
             return Err(ApiError::internal("数据库版本高于当前服务支持版本"));
         }
         if version == 0 {
             tx.execute_batch(include_str!("schema.sql"))?;
             tx.execute(
-                "INSERT INTO schema_migrations(version,applied_at) VALUES(7,?1)",
+                "INSERT INTO schema_migrations(version,applied_at) VALUES(8,?1)",
                 [now()],
             )?;
         } else {
@@ -74,6 +75,7 @@ impl Repository {
                 (5, include_str!("schema_v5.sql")),
                 (6, include_str!("schema_v6.sql")),
                 (7, include_str!("schema_v7.sql")),
+                (8, include_str!("schema_v8.sql")),
             ] {
                 if version < target {
                     tx.execute_batch(schema)?;
@@ -609,7 +611,7 @@ mod tests {
         Repository::open(&path).unwrap();
         let conn = Connection::open(&path).unwrap();
         conn.execute(
-            "INSERT INTO schema_migrations(version,applied_at) VALUES(8,'future')",
+            "INSERT INTO schema_migrations(version,applied_at) VALUES(9,'future')",
             [],
         )
         .unwrap();
@@ -618,7 +620,7 @@ mod tests {
             conn.query_row("SELECT MAX(version) FROM schema_migrations", [], |r| r
                 .get::<_, i64>(0))
                 .unwrap(),
-            8
+            9
         );
     }
 
@@ -663,7 +665,7 @@ mod tests {
             conn.query_row("SELECT MAX(version) FROM schema_migrations", [], |r| r
                 .get::<_, i64>(0))
                 .unwrap(),
-            7
+            8
         );
         repo.create_bounty_comment(
             "b",

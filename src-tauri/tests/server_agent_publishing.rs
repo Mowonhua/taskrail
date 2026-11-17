@@ -749,7 +749,7 @@ fn v3_upgrade_preserves_data_identity_defaults_foreign_key_and_index() {
             |r| r.get::<_, String>(0)
         )
         .unwrap(),
-        "1,2,3,4,5,6,7"
+        "1,2,3,4,5,6,7,8"
     );
     assert_eq!(
         conn.query_row(
@@ -822,14 +822,14 @@ fn v4_failure_rolls_back_all_prior_migrations_and_future_schema_is_untouched() {
     let path = dir.path().join("future.db");
     Repository::open(&path).unwrap();
     let conn = Connection::open(&path).unwrap();
-    conn.execute("INSERT INTO schema_migrations VALUES(8,'future')", [])
+    conn.execute("INSERT INTO schema_migrations VALUES(9,'future')", [])
         .unwrap();
     assert_eq!(Repository::open(&path).unwrap_err().code, "INTERNAL_ERROR");
     assert_eq!(
         conn.query_row("SELECT MAX(version) FROM schema_migrations", [], |r| r
             .get::<_, i64>(0))
             .unwrap(),
-        8
+        9
     );
     assert_eq!(count(&conn, "schema_migrations"), 2);
 }

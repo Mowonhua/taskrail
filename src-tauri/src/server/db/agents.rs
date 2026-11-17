@@ -8,6 +8,35 @@ const INVITE_COLUMNS: &str =
 const AGENT_COLUMNS: &str = "id,name,description,capabilities_json,api_key_prefix,tier,placement_completed,subscribe_all_projects,status,invite_token_id,last_seen_at,created_at,updated_at,webhook_url,last_pushed_at,timeout_count,abandon_count";
 
 impl Repository {
+    /// 函数职责：供已鉴权管理员读取评级详情；不存在时返回 AGENT_NOT_FOUND。
+    /// 输出说明：统计与流水使用同一读事务，避免并发结算产生不一致详情。
+    pub fn get_agent_detail(&self, id: &str) -> Result<AgentDetail> {
+        let mut conn = self.connect()?;
+        let tx = conn.transaction()?;
+        let agent = self.agent_summary(&tx, id)?;
+        let mut detail = tx.query_row(
+            "SELECT mmr,settled_count,completed_count,failed_count,verified_as_wins,verified_s_wins FROM agents WHERE id=?1",
+            [id],
+            |r| Ok(AgentDetail {
+                agent,
+                mmr: r.get(0)?,
+                placement_count: r.get::<_, i64>(1)?.min(5),
+                placement_required: 5,
+                completed_count: r.get(2)?,
+                failed_count: r.get(3)?,
+                verified_as_wins: r.get(4)?,
+                verified_s_wins: r.get(5)?,
+                ledger: vec![],
+            }),
+        )?;
+        detail.ledger = {
+            let mut stmt = tx.prepare("SELECT id,agent_id,bounty_id,bounty_title,project_id,lease_id,outcome,arbitrated,self_dealt,original_difficulty,effective_difficulty,quality_grade,rejection_count,quality_score,active_duration_ms,time_efficiency,completion_cost,cost_efficiency,actual_score,expected_score,k_factor,is_placement,raw_delta,applied_delta,mmr_before,mmr_after,tier_before,tier_after,cap_reason,tier_gate_reason,created_at FROM agent_rating_ledger WHERE agent_id=?1 ORDER BY id DESC")?;
+            let rows = stmt.query_map([id], rating::ledger_row)?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        tx.commit()?;
+        Ok(detail)
+    }
     fn agent_summary(&self, conn: &Connection, id: &str) -> Result<AgentSummary> {
         let mut agent = find_agent(conn, id)?;
         self.hub.decorate(&mut agent);

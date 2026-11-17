@@ -91,8 +91,10 @@ impl Repository {
         self.write(|tx| {
             agents::active_agent(tx, agent_id)?;
             let timestamp = now();
-            let bounty = fenced_bounty(tx, id, agent_id, input.lease_id, &timestamp)?;
+            let mut bounty = fenced_bounty(tx, id, agent_id, input.lease_id, &timestamp)?;
             let active_duration_ms = settle_active(tx, &bounty, &timestamp)?;
+            bounty.active_duration_ms = active_duration_ms;
+            rating::settle(tx, &bounty, RatingOutcome::Abandon, bounty.require_arbitration, &timestamp)?;
             let updated = reopen(tx, &bounty, &timestamp)?;
             incident(tx, &bounty, "abandon", &timestamp)?;
             event(
@@ -128,6 +130,7 @@ impl Repository {
             settle_active(tx, &bounty, &timestamp)?;
             let note = input.completion_note.map(|note| note.trim().to_owned()).filter(|note| !note.is_empty());
             tx.execute("UPDATE bounties SET status='COMPLETED',completion_note=?2,completion_cost=?3,completed_at=?4,lease_expires_at=NULL,lease_warned_id=0,updated_at=?4 WHERE id=?1", params![id,note,input.completion_cost,timestamp])?;
+            rating::settle(tx, &find_bounty(tx, id)?, RatingOutcome::Completed, false, &timestamp)?;
             let updated = find_bounty(tx, id)?;
             event(tx, &updated, "completed", &format!("agent:{agent_id}"), Some(bounty.status), json!({"lease_id":bounty.lease_id,"lease_agent_id":agent_id,"lease_agent_name":bounty.lease_agent_name,"completion_note":updated.completion_note,"completion_cost":updated.completion_cost}))?;
             Ok(updated)
@@ -167,7 +170,7 @@ impl Repository {
                 let rows = stmt.query_map(params![timestamp,warning_until], bounty_row)?;
                 rows.collect::<rusqlite::Result<Vec<_>>>()?
             };
-            for bounty in candidates {
+            for mut bounty in candidates {
                 if bounty.status == BountyStatus::Open {
                     clear_assignment(tx, &bounty.id, &timestamp)?;
                     let updated = find_bounty(tx, &bounty.id)?;
@@ -177,6 +180,8 @@ impl Repository {
                     events::dispatch(tx, &updated, false)?;
                 } else if bounty.lease_expires_at.as_deref().is_some_and(|expires| expires <= timestamp.as_str()) {
                     let active_duration_ms = settle_active(tx, &bounty, &timestamp)?;
+                    bounty.active_duration_ms = active_duration_ms;
+                    rating::settle(tx, &bounty, RatingOutcome::Timeout, bounty.require_arbitration, &timestamp)?;
                     let updated = reopen(tx, &bounty, &timestamp)?;
                     incident(tx, &bounty, "timeout", &timestamp)?;
                     let mut detail = lease_detail(&bounty);

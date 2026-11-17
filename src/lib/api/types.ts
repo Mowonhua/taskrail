@@ -316,6 +316,58 @@ export interface AgentSummary {
   updated_at: string;
 }
 
+export type RatingOutcome =
+  | 'completed'
+  | 'arbitration_failed'
+  | 'timeout'
+  | 'abandon';
+
+export interface AgentRatingLedgerEntry {
+  id: number;
+  agent_id: string;
+  bounty_id: string;
+  bounty_title: string;
+  project_id: string;
+  lease_id: number;
+  outcome: RatingOutcome;
+  arbitrated: boolean;
+  self_dealt: boolean;
+  original_difficulty: BountyDifficulty;
+  effective_difficulty: BountyDifficulty;
+  quality_grade: QualityGrade | null;
+  rejection_count: number;
+  quality_score: number;
+  active_duration_ms: number;
+  time_efficiency: number;
+  completion_cost: number | null;
+  cost_efficiency: number;
+  actual_score: number;
+  expected_score: number;
+  k_factor: number;
+  is_placement: boolean;
+  raw_delta: number;
+  applied_delta: number;
+  mmr_before: number;
+  mmr_after: number;
+  tier_before: AgentTier;
+  tier_after: AgentTier;
+  cap_reason: string | null;
+  tier_gate_reason: string | null;
+  created_at: string;
+}
+
+export interface AgentDetail {
+  agent: AgentSummary;
+  mmr: number;
+  placement_count: number;
+  placement_required: number;
+  completed_count: number;
+  failed_count: number;
+  verified_as_wins: number;
+  verified_s_wins: number;
+  ledger: AgentRatingLedgerEntry[];
+}
+
 export interface AgentFilter {
   status?: AgentStatus;
   activity?: AgentActivity;

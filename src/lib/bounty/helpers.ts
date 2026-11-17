@@ -17,6 +17,7 @@ import {
   type BountyTask,
   type InviteTokenSummary,
   type QualityGrade,
+  type RatingOutcome,
 } from '../api/types';
 import { errorMessage } from '../errors';
 import { translate } from '../i18n';
@@ -474,4 +475,60 @@ export function formatServiceError(error: unknown): string {
     }
   }
   return errorMessage(error);
+}
+
+export function formatRatingOutcome(outcome: RatingOutcome): string {
+  switch (outcome) {
+    case 'completed':
+      return translate('完成交付');
+    case 'arbitration_failed':
+      return translate('仲裁打回失败');
+    case 'timeout':
+      return translate('租约超时');
+    case 'abandon':
+      return translate('主动弃单');
+  }
+}
+
+export function formatRatingCapReason(reason: string | null | undefined): string | null {
+  if (!reason) return null;
+  switch (reason) {
+    case 'self_deal':
+      return translate('自发自接封顶');
+    case 'unarbitrated_cap':
+      return translate('无仲裁自结上限');
+    case 'difficulty_cap':
+      return translate('难度收益上限');
+    default:
+      return reason;
+  }
+}
+
+export function formatTierGateReason(reason: string | null | undefined): string | null {
+  if (!reason) return null;
+  switch (reason) {
+    case 'needs_as_wins':
+      return translate('待累计 3 场核验 A/S 胜场');
+    case 'needs_s_wins':
+      return translate('待累计 5 场核验 S 胜场');
+    default:
+      return reason;
+  }
+}
+
+export function formatEfficiencyPercent(value: number): string {
+  if (!Number.isFinite(value)) return '0%';
+  const clamped = Math.min(1, Math.max(0, value));
+  const pct = Math.round(clamped * 1000) / 10;
+  return `${Number.isInteger(pct) ? String(pct) : pct.toFixed(1)}%`;
+}
+
+export function formatMmrValue(mmr: number): string {
+  if (!Number.isFinite(mmr)) return '0.0';
+  return Math.max(0, mmr).toFixed(1);
+}
+
+export function formatMmrDelta(delta: number): string {
+  if (!Number.isFinite(delta) || Math.abs(delta) < 0.05) return '0.0';
+  return delta > 0 ? `+${delta.toFixed(1)}` : delta.toFixed(1);
 }

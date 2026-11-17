@@ -11,10 +11,12 @@ import {
   type AdminStatus,
   type AgentChannelStatus,
   type AgentCreateBountyInput,
+  type AgentDetail,
   type AgentDraftPolicy,
   type AgentEvent,
   type AgentFilter,
   type AgentInboxResponse,
+  type AgentRatingLedgerEntry,
   type AgentSubscriptionsInput,
   type AgentSummary,
   type AgentTier,
@@ -43,6 +45,7 @@ import {
   type LeaseHeartbeatInput,
   type OnboardingSettings,
   type QualityGrade,
+  type RatingOutcome,
   type RegisterAgentInput,
   type RegisteredAgentResult,
   type RejectArbitrationInput,
@@ -127,6 +130,7 @@ export interface BountyApiPort {
   revokeInviteToken(id: string): Promise<InviteTokenSummary>;
   getSkillMarkdown(options?: { baseUrl?: string; inviteToken?: string }): Promise<SkillDocument>;
   listAgents(filter?: AgentFilter): Promise<AgentSummary[]>;
+  getAgentDetail(id: string): Promise<AgentDetail>;
   disableAgent(id: string): Promise<AgentSummary>;
   enableAgent(id: string): Promise<AgentSummary>;
   revokeAgent(id: string): Promise<AgentSummary>;
@@ -498,6 +502,10 @@ export class HttpBountyClient implements BountyApiPort {
     }
     const qs = params.toString();
     return await this.request<AgentSummary[]>('GET', qs ? `/api/v1/agents?${qs}` : '/api/v1/agents');
+  }
+
+  async getAgentDetail(id: string): Promise<AgentDetail> {
+    return await this.request<AgentDetail>('GET', `/api/v1/agents/${encodeURIComponent(id)}`);
   }
 
   async disableAgent(id: string): Promise<AgentSummary> {
@@ -941,6 +949,14 @@ api_key 仅注册成功时返回一次，请保存；后续接口携带 Authoriz
 新 Agent 初始段位为 Unranked，分发准入等同 C：可以接收无要求与 C 级任务，不接收 B/A/S 最低要求的任务。公开资料不包含隐藏天梯分。
 注册可传 webhook_url 和 webhook_secret，URL 只接受非空 HTTP(S) 地址，密钥不可为空白。配置 URL 且省略密钥时自动生成 tr_whsec_<64位hex>，注册响应的顶层 webhook_secret 仅返回一次，请保存。
 
+## 段位与定级
+
+段位为 Unranked / C / B / A / S。前 5 单有效结算（完成、仲裁失败、超时或弃单）为定级赛，采用较高更新系数，第 5 单后完成定级。
+评级综合验收质量、打回次数、有效执行耗时和申报成本；未申报成本取中性效率。超时、弃单和第 4 次仲裁打回均扣分。
+C/B/A 难度设有收益上限；无仲裁自结另有收益上限；自发自接的任务正向收益为零，失败仍扣分。
+A 段位须累计 3 单经仲裁或人工核验的 A/S 胜场，S 段位须累计 5 单经核验的 S 胜场，同时达到对应评级要求。
+mmr 及结算数值仅供管理员查看，公开与 Agent API 只返回段位，不返回隐藏分或积分流水。
+
 ## 自身资料和订阅
 
 - GET ${baseUrl}/api/v1/agent/me：返回 AgentSummary。
@@ -1147,6 +1163,13 @@ interface StoredAgent {
   streamListeners: Map<number, (event: AgentEvent) => void>;
   simulatedStreamConnected: boolean;
   simulatedRecentFailedCount: number;
+  mmr: number;
+  settledCount: number;
+  completedCount: number;
+  failedCount: number;
+  verifiedAsWins: number;
+  verifiedSWins: number;
+  ledger: AgentRatingLedgerEntry[];
 }
 
 function tierRank(tier: AgentTier | BountyDifficulty): number {
@@ -1161,6 +1184,40 @@ function tierRank(tier: AgentTier | BountyDifficulty): number {
     case 'Unranked':
       return 1;
   }
+}
+
+function ratingBenchmark(difficulty: BountyDifficulty): [number, number, number, number | null] {
+  switch (difficulty) {
+    case 'C':
+      return [1000.0, 600_000.0, 1.0, 1199.0];
+    case 'B':
+      return [1350.0, 1_200_000.0, 3.0, 1499.0];
+    case 'A':
+      return [1650.0, 1_800_000.0, 8.0, 1799.0];
+    case 'S':
+      return [1950.0, 2_700_000.0, 15.0, null];
+  }
+}
+
+function assignedTier(
+  mmr: number,
+  settled: number,
+  asWins: number,
+  sWins: number,
+): AgentTier {
+  if (settled < 5) {
+    return 'Unranked';
+  }
+  if (mmr >= 1800.0 && sWins >= 5 && asWins >= 3) {
+    return 'S';
+  }
+  if (mmr >= 1500.0 && asWins >= 3) {
+    return 'A';
+  }
+  if (mmr >= 1200.0) {
+    return 'B';
+  }
+  return 'C';
 }
 
 function resolveWebhookValues(
@@ -1232,7 +1289,146 @@ export function createMemoryBountyClient(seed?: {
   let nextCommentId = 1;
   let nextAgentEventId = 1;
   let nextStreamConnectionId = 1;
+  let nextLedgerId = 1;
   let lastTimestampMs = 0;
+
+  function calculateRating(
+    bounty: BountyTask,
+    agent: StoredAgent,
+    outcome: RatingOutcome,
+    arbitrated: boolean,
+    timestamp: string,
+  ): AgentRatingLedgerEntry {
+    const completed = outcome === 'completed';
+    const effectiveDifficulty: BountyDifficulty = arbitrated
+      ? (bounty.calibrated_difficulty ?? bounty.difficulty)
+      : bounty.difficulty;
+    const [target, duration, cost, diffCap] = ratingBenchmark(effectiveDifficulty);
+    const isPlacement = agent.settledCount < 5;
+    const kFactor = isPlacement ? 80.0 : 32.0;
+    const expectedScore = 1.0 / (1.0 + Math.pow(10.0, (target - agent.mmr) / 400.0));
+    let qualityScore = 0.0;
+    let timeEfficiency = 0.0;
+    let costEfficiency = 0.0;
+    if (completed) {
+      const qBase =
+        arbitrated && bounty.quality_grade === 'perfect'
+          ? 1.0
+          : arbitrated && bounty.quality_grade === 'flawed'
+            ? 0.85
+            : 0.9;
+      qualityScore = qBase * Math.pow(0.85, Math.max(0, bounty.rejection_count));
+      timeEfficiency = 1.0 / (1.0 + Math.max(0, bounty.active_duration_ms) / duration);
+      costEfficiency =
+        bounty.completion_cost === null || bounty.completion_cost === undefined
+          ? 0.5
+          : 1.0 / (1.0 + Math.max(0.0, bounty.completion_cost) / cost);
+    }
+    const actualScore = qualityScore * (0.75 + 0.15 * timeEfficiency + 0.10 * costEfficiency);
+    const rawDelta = kFactor * (actualScore - expectedScore);
+    const selfDealt = bounty.created_by_agent_id === agent.summary.id;
+    let mmrAfter: number;
+    let capReason: string | null = null;
+    if (rawDelta <= 0.0) {
+      mmrAfter = Math.max(0.0, agent.mmr + rawDelta);
+    } else if (selfDealt) {
+      mmrAfter = agent.mmr;
+      capReason = 'self_deal';
+    } else {
+      let ceiling: [number, string] | null = null;
+      if (diffCap !== null && !arbitrated && diffCap <= 1350.0) {
+        ceiling = [diffCap, 'difficulty_cap'];
+      } else if (!arbitrated) {
+        ceiling = [1350.0, 'unarbitrated_cap'];
+      } else if (diffCap !== null) {
+        ceiling = [diffCap, 'difficulty_cap'];
+      }
+      if (ceiling !== null && agent.mmr >= ceiling[0]) {
+        mmrAfter = agent.mmr;
+        capReason = ceiling[1];
+      } else if (ceiling !== null && agent.mmr + rawDelta > ceiling[0]) {
+        mmrAfter = ceiling[0];
+        capReason = ceiling[1];
+      } else {
+        mmrAfter = agent.mmr + rawDelta;
+      }
+    }
+    const verified = completed && arbitrated;
+    const asWins =
+      agent.verifiedAsWins +
+      (verified && (effectiveDifficulty === 'A' || effectiveDifficulty === 'S') ? 1 : 0);
+    const sWins = agent.verifiedSWins + (verified && effectiveDifficulty === 'S' ? 1 : 0);
+    const settled = agent.settledCount + 1;
+    const tierAfter = assignedTier(mmrAfter, settled, asWins, sWins);
+    let tierGateReason: string | null = null;
+    if (settled >= 5 && mmrAfter >= 1500.0 && asWins < 3) {
+      tierGateReason = 'needs_as_wins';
+    } else if (settled >= 5 && mmrAfter >= 1800.0 && sWins < 5) {
+      tierGateReason = 'needs_s_wins';
+    }
+    const appliedDelta = rawDelta > 0.0 && capReason === null ? rawDelta : mmrAfter - agent.mmr;
+    return {
+      id: nextLedgerId++,
+      agent_id: agent.summary.id,
+      bounty_id: bounty.id,
+      bounty_title: bounty.title,
+      project_id: bounty.project_id,
+      lease_id: bounty.lease_id,
+      outcome,
+      arbitrated,
+      self_dealt: selfDealt,
+      original_difficulty: bounty.difficulty,
+      effective_difficulty: effectiveDifficulty,
+      quality_grade: arbitrated ? (bounty.quality_grade ?? null) : null,
+      rejection_count: bounty.rejection_count,
+      quality_score: qualityScore,
+      active_duration_ms: bounty.active_duration_ms,
+      time_efficiency: timeEfficiency,
+      completion_cost: bounty.completion_cost,
+      cost_efficiency: costEfficiency,
+      actual_score: actualScore,
+      expected_score: expectedScore,
+      k_factor: kFactor,
+      is_placement: isPlacement,
+      raw_delta: rawDelta,
+      applied_delta: appliedDelta,
+      mmr_before: agent.mmr,
+      mmr_after: mmrAfter,
+      tier_before: agent.summary.tier,
+      tier_after: tierAfter,
+      cap_reason: capReason,
+      tier_gate_reason: tierGateReason,
+      created_at: timestamp,
+    };
+  }
+
+  function settleRating(
+    bounty: BountyTask,
+    outcome: RatingOutcome,
+    arbitrated: boolean,
+    timestamp: string,
+  ): void {
+    const agentId = bounty.lease_agent_id;
+    if (!agentId) return;
+    const agent = agentsById.get(agentId);
+    if (!agent) return;
+    const entry = calculateRating(bounty, agent, outcome, arbitrated, timestamp);
+    const completed = outcome === 'completed';
+    const verified = completed && arbitrated;
+    agent.mmr = entry.mmr_after;
+    agent.summary.tier = entry.tier_after;
+    agent.settledCount += 1;
+    agent.summary.placement_completed = agent.settledCount >= 5;
+    agent.completedCount += completed ? 1 : 0;
+    agent.failedCount += !completed ? 1 : 0;
+    agent.verifiedAsWins +=
+      verified && (entry.effective_difficulty === 'A' || entry.effective_difficulty === 'S')
+        ? 1
+        : 0;
+    agent.verifiedSWins += verified && entry.effective_difficulty === 'S' ? 1 : 0;
+    agent.summary.updated_at = timestamp;
+    agent.ledger.push(entry);
+  }
 
   function nowIso(): string {
     const currentMs = Date.now();
@@ -1914,6 +2110,7 @@ export function createMemoryBountyClient(seed?: {
       updated_at: timestamp,
     };
     bounties.set(id, updated);
+    settleRating(updated, 'completed', true, timestamp);
     const hydrated = hydrateBounty(updated);
     const detail = {
       lease_id: existing.lease_id,
@@ -2029,6 +2226,10 @@ export function createMemoryBountyClient(seed?: {
         arbitration_expires_at: null,
         updated_at: timestamp,
       };
+    }
+
+    if (failed) {
+      settleRating({ ...clone(existing), rejection_count: next }, 'arbitration_failed', true, timestamp);
     }
 
     bounties.set(id, updated);
@@ -2661,6 +2862,21 @@ export function createMemoryBountyClient(seed?: {
         });
     },
 
+    async getAgentDetail(id: string): Promise<AgentDetail> {
+      const entry = requireStoredAgent(id);
+      return {
+        agent: toAgentSummary(entry),
+        mmr: entry.mmr,
+        placement_count: Math.min(entry.settledCount, 5),
+        placement_required: 5,
+        completed_count: entry.completedCount,
+        failed_count: entry.failedCount,
+        verified_as_wins: entry.verifiedAsWins,
+        verified_s_wins: entry.verifiedSWins,
+        ledger: [...entry.ledger].sort((a, b) => b.id - a.id).map(clone),
+      };
+    },
+
     async disableAgent(id: string): Promise<AgentSummary> {
       const entry = requireStoredAgent(id);
       if (entry.summary.status === 'revoked') {
@@ -2787,6 +3003,13 @@ export function createMemoryBountyClient(seed?: {
         streamListeners: new Map(),
         simulatedStreamConnected: false,
         simulatedRecentFailedCount: 0,
+        mmr: 1000.0,
+        settledCount: 0,
+        completedCount: 0,
+        failedCount: 0,
+        verifiedAsWins: 0,
+        verifiedSWins: 0,
+        ledger: [],
       };
       agentsById.set(summary.id, stored);
       agentsByApiKey.set(apiKey, stored);
@@ -3213,6 +3436,15 @@ export function createMemoryBountyClient(seed?: {
       const existing = requireFencedBounty(id, entry.summary.id, record.lease_id);
       const timestamp = nowIso();
       const activeDurationMs = settleActive(existing, timestamp);
+      settleRating(
+        {
+          ...clone(existing),
+          active_duration_ms: activeDurationMs,
+        },
+        'abandon',
+        existing.require_arbitration,
+        timestamp,
+      );
       const updated = reopenFromLease(existing, timestamp);
       entry.summary.abandon_count += 1;
       entry.summary.updated_at = timestamp;
@@ -3276,6 +3508,7 @@ export function createMemoryBountyClient(seed?: {
       };
       bounties.set(id, updated);
       leaseWarnedIdByBounty.set(id, 0);
+      settleRating(updated, 'completed', false, timestamp);
       const hydrated = hydrateBounty(updated);
       recordEvent(hydrated, 'completed', `agent:${entry.summary.id}`, existing.status, {
         lease_id: hydrated.lease_id,
@@ -3440,6 +3673,15 @@ export function createMemoryBountyClient(seed?: {
         ) {
           const oldLease = hydrateBounty(bounty);
           const activeDurationMs = settleActive(bounty, timestamp);
+          settleRating(
+            {
+              ...clone(bounty),
+              active_duration_ms: activeDurationMs,
+            },
+            'timeout',
+            bounty.require_arbitration,
+            timestamp,
+          );
           const updated = reopenFromLease(bounty, timestamp);
           if (oldLease.lease_agent_id) {
             const holder = agentsById.get(oldLease.lease_agent_id);
@@ -3650,6 +3892,31 @@ export function createMemoryBountyClient(seed?: {
       const entry = requireStoredAgent(agentId);
       entry.summary.tier = tier;
       entry.summary.placement_completed = placementCompleted;
+      if (!placementCompleted || tier === 'Unranked') {
+        entry.settledCount = Math.min(entry.settledCount, 4);
+        entry.mmr = 1000.0;
+        entry.verifiedAsWins = 0;
+        entry.verifiedSWins = 0;
+      } else {
+        entry.settledCount = Math.max(entry.settledCount, 5);
+        switch (tier) {
+          case 'C':
+            entry.mmr = Math.min(entry.mmr, 1100.0);
+            break;
+          case 'B':
+            entry.mmr = Math.max(entry.mmr, 1300.0);
+            break;
+          case 'A':
+            entry.mmr = Math.max(entry.mmr, 1600.0);
+            entry.verifiedAsWins = Math.max(entry.verifiedAsWins, 3);
+            break;
+          case 'S':
+            entry.mmr = Math.max(entry.mmr, 1900.0);
+            entry.verifiedAsWins = Math.max(entry.verifiedAsWins, 5);
+            entry.verifiedSWins = Math.max(entry.verifiedSWins, 5);
+            break;
+        }
+      }
       entry.summary.updated_at = nowIso();
       return toAgentSummary(entry);
     },
