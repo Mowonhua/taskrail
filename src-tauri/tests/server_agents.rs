@@ -26,7 +26,11 @@ async fn request(
     let text = response.text().await.unwrap();
     (
         status,
-        serde_json::from_str(&text).unwrap_or_else(|_| panic!("{status}: {text}")),
+        if text.is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_str(&text).unwrap_or_else(|_| panic!("{status}: {text}"))
+        },
     )
 }
 
@@ -831,6 +835,50 @@ async fn skill_documents_follow_request_address_and_never_export_admin_credentia
             "/admin/invite-tokens/missing/revoke",
             admin,
             None
+        )
+        .await
+        .1["error"]["code"],
+        "INVITE_TOKEN_NOT_FOUND"
+    );
+    let (_, disposable) = request(
+        &client,
+        base,
+        Method::POST,
+        "/admin/invite-tokens",
+        admin,
+        Some(json!({"label":"delete-me"})),
+    )
+    .await;
+    let disposable_id = disposable["token"]["id"].as_str().unwrap();
+    let disposable_raw = disposable["raw_token"].as_str().unwrap();
+    let (delete_status, delete_body) = request(
+        &client,
+        base,
+        Method::DELETE,
+        &format!("/admin/invite-tokens/{disposable_id}"),
+        admin,
+        None,
+    )
+    .await;
+    assert_eq!(delete_status, StatusCode::NO_CONTENT);
+    assert!(delete_body.is_null());
+    assert_eq!(
+        client
+            .get(format!("{base}/skill.md?token={disposable_raw}"))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        request(
+            &client,
+            base,
+            Method::DELETE,
+            &format!("/admin/invite-tokens/{disposable_id}"),
+            admin,
+            None,
         )
         .await
         .1["error"]["code"],

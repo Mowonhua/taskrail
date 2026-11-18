@@ -101,6 +101,7 @@ cargo run --manifest-path src-tauri/Cargo.toml --bin taskrail-server -- --bind 1
 | `GET /api/v1/admin/invite-tokens` | 无 | 200 `InviteTokenSummary[]` |
 | `POST /api/v1/admin/invite-tokens` | `CreateInviteToken` | 201 `{token:InviteTokenSummary,raw_token:string}` |
 | `POST /api/v1/admin/invite-tokens/{id}/revoke` | 无请求正文 | 200 `InviteTokenSummary` |
+| `DELETE /api/v1/admin/invite-tokens/{id}` | 无请求正文 | 204 空响应 |
 | `GET /api/v1/admin/skill.md` | 可选 `base_url`、`invite_token` | 200 `{base_url,content,filename:"SKILL.md"}` |
 | `GET /skill.md`、`GET /api/v1/skill.md` | 公开，可选邀请凭证 | 200 Markdown |
 | `POST /api/v1/agents/register` | `RegisterAgent`，公开准入入口 | 201 `{agent:AgentSummary,api_key:string}` |
@@ -244,7 +245,7 @@ WAITING_INFO 和 PENDING_ARBITRATION 不参与租约到期扫描。关闭服务�
 
 ## 注册准入与邀请
 
-`Onboarding` 包含 `lan_open_registration` 和 `invite_tokens`。免审注册默认关闭；开关控制服务是否接受无邀请注册，不检查调用方 IP。邀请作废不影响已注册 Agent 的凭证。
+`Onboarding` 包含 `lan_open_registration` 和 `invite_tokens`。免审注册默认关闭；开关控制服务是否接受无邀请注册，不检查调用方 IP。邀请作废或删除均不影响已注册 Agent 的凭证；删除会永久移除邀请并在同一事务中清除 Agent 的 `invite_token_id` 关联，不存在的邀请返回 `404 INVITE_TOKEN_NOT_FOUND`。
 
 `CreateInviteToken` 可传 `label`（默认空字符串）、`max_uses`（正整数或 null）和 `expires_in_hours`（有限正数或 null，允许小数）。null 表示不限次数或不过期。`InviteTokenSummary` 包含 `id`、`label`、`token_prefix`、`max_uses`、`use_count`、`expires_at`、`revoked_at`、`created_at`。列表按 `created_at DESC,id DESC` 排序。
 

@@ -3242,124 +3242,431 @@ button.ghost-action:hover:not(:disabled) {
   background: transparent;
 }
 
+/* 邀请令牌：单层列表，宽容器列对齐；空间不足时自动换行，不产生横向滚动。 */
+.invite-token-manager {
+  container-type: inline-size;
+  gap: 14px;
+}
+
+.invite-token-section-title {
+  margin: 0;
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.5;
+}
+
 .invite-token-form {
   display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.invite-token-inputs {
-  display: grid;
-  grid-template-columns: minmax(140px, 1.5fr) minmax(110px, 1fr) minmax(110px, 1fr);
-  gap: 10px;
-}
-
-.created-invite-banner {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 10px 14px;
-  border: 1px solid var(--accent);
-  border-radius: var(--field-radius, 8px);
-  background: var(--accent-soft);
   flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px;
 }
 
-:root:not([data-monochrome="true"]) .created-invite-banner {
-  border-color: color-mix(in srgb, var(--accent) 32%, transparent);
-}
-
-.created-invite-copy {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
+.invite-token-form > .project-form-field {
+  flex: 1 1 150px;
   min-width: 0;
-  flex: 1;
 }
 
-.created-invite-hint {
-  font-size: 12px;
-  font-weight: 500;
+.invite-token-form > .invite-token-field-label {
+  flex: 2 1 240px;
+}
+
+.invite-token-create {
+  flex: none;
+  min-height: 34px;
+  padding-inline: 16px;
+}
+
+.created-token-dialog {
+  width: min(500px, calc(100vw - 32px));
+  margin: auto;
   color: var(--ink);
 }
 
-.created-invite-code {
-  padding: 3px 6px;
-  border-radius: var(--control-radius, 6px);
-  background: var(--surface);
-  color: var(--accent);
-  font-family: var(--font-mono);
-  font-size: 12px;
-  word-break: break-all;
-}
-
-.created-invite-actions {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-
-.invite-token-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
+dialog.created-token-dialog[open] {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 14px;
 }
 
-.invite-token-item {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 10px 14px;
+dialog.modal-dialog:modal {
+  overscroll-behavior: contain;
+}
+
+dialog.modal-dialog::backdrop {
+  background: var(--backdrop-background, rgba(15, 18, 22, 0.36));
+  backdrop-filter: blur(4px);
+  overflow: hidden;
+  overscroll-behavior: contain;
+}
+
+dialog.created-token-dialog[open]:not(:modal) {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+}
+
+.created-token-header {
+  margin-bottom: 0;
+}
+
+.created-token-desc {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.created-token-box {
+  padding: 12px 14px;
   border: 1px solid var(--field-border, var(--line));
   border-radius: var(--field-radius, 8px);
   background: var(--field-background, var(--canvas));
-  flex-wrap: wrap;
 }
 
-.invite-token-main {
+.created-token-code {
+  display: block;
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+
+.created-token-meta {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 10px 16px;
+  margin: 0;
+  padding-top: 10px;
+  border-top: 1px solid var(--divider-color, var(--line));
+}
+
+.created-token-meta-item {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 2px;
   min-width: 0;
-  flex: 1;
 }
 
-.invite-token-title-row {
-  display: flex;
+.created-token-meta-item dt {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11.5px;
+  font-weight: 500;
+}
+
+.created-token-meta-item dd {
+  margin: 0;
+  color: var(--ink);
+  font-size: 12.5px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.created-token-actions {
+  margin-top: 2px;
+}
+
+.invite-token-table {
+  border: 1px solid var(--field-border, var(--line));
+  border-radius: var(--field-radius, 8px);
+  background: var(--field-background, var(--canvas));
+}
+
+.invite-token-head,
+.invite-token-row {
+  display: grid;
+  grid-template-columns:
+    minmax(170px, 1.6fr)
+    minmax(76px, 0.55fr)
+    minmax(108px, 0.85fr)
+    minmax(120px, 1fr)
+    32px;
   align-items: center;
+  gap: 12px;
+  padding-inline: 14px;
+}
+
+.invite-token-head {
+  min-height: 32px;
+  padding-block: 6px;
+  border-bottom: 1px solid var(--divider-color, var(--line));
+  border-start-start-radius: var(--field-radius, 8px);
+  border-start-end-radius: var(--field-radius, 8px);
+  color: var(--muted);
+  font-size: 11.5px;
+  font-weight: 500;
+  line-height: 1.4;
+}
+
+.invite-token-head-action {
+  width: 32px;
+}
+
+.invite-token-list {
+  display: flex;
+  flex-direction: column;
+  max-height: 140px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.invite-token-row {
+  min-height: 46px;
+  padding-block: 8px;
+  font-size: 12.5px;
+  transition: background 0.12s ease;
+}
+
+.invite-token-row:last-child {
+  border-end-start-radius: var(--field-radius, 8px);
+  border-end-end-radius: var(--field-radius, 8px);
+}
+
+.invite-token-row:hover {
+  background: var(--hover);
+}
+
+.invite-token-row + .invite-token-row {
+  border-top: 1px solid var(--divider-color, var(--line));
+}
+
+.invite-token-identity {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: baseline;
   gap: 8px;
-  flex-wrap: wrap;
+  min-width: 0;
 }
 
 .invite-token-prefix,
 .agent-key-prefix {
-  padding: 1px 6px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.agent-key-prefix {
+  padding: 2px 6px;
   border-radius: var(--control-radius, 4px);
   background: var(--code);
   color: var(--ink);
-  font-family: var(--font-mono);
-  font-size: 11.5px;
+}
+
+.invite-token-prefix {
+  flex: none;
+  color: var(--muted);
+  letter-spacing: -0.01em;
+}
+
+.invite-token-prefix-primary {
+  color: var(--ink);
+  font-size: 12.5px;
+  font-weight: 500;
 }
 
 .invite-token-label {
-  font-size: 12.5px;
-  font-weight: 600;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.invite-token-row[data-invite-token-status="revoked"] .invite-token-label,
+.invite-token-row[data-invite-token-status="expired"] .invite-token-label,
+.invite-token-row[data-invite-token-status="exhausted"] .invite-token-label,
+.invite-token-row[data-invite-token-status="revoked"] .invite-token-prefix-primary,
+.invite-token-row[data-invite-token-status="expired"] .invite-token-prefix-primary,
+.invite-token-row[data-invite-token-status="exhausted"] .invite-token-prefix-primary {
+  color: var(--muted);
+}
+
+.invite-token-status-cell {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.invite-token-usage,
+.invite-token-expiry {
+  min-width: 0;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.invite-token-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.invite-token-menu-trigger[aria-expanded="true"] {
+  background: var(--hover);
   color: var(--ink);
 }
 
-.invite-token-meta {
+.invite-token-menu {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 148px;
+  max-width: min(240px, calc(100vw - 16px));
+  width: max-content;
+  padding: 4px;
+}
+
+.invite-token-menu[hidden] {
+  display: none;
+}
+
+.invite-token-menu-item {
+  justify-content: flex-start;
+  width: 100%;
+  min-height: 32px;
+  padding: 5px 10px;
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+  font-size: 13px;
+  text-align: left;
+}
+
+.invite-token-menu-item:hover:not(:disabled),
+.invite-token-menu-item:focus-visible {
+  border-color: transparent;
+  background: var(--hover);
+  box-shadow: none;
+  transform: none;
+}
+
+.invite-token-menu-item:focus-visible {
+  outline-offset: -2px;
+}
+
+.invite-token-menu-sep {
+  width: 100%;
+  height: 1px;
+  margin: 2px 0;
+  border: 0;
+  background: var(--divider-color, var(--line));
+}
+
+.invite-token-menu-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 8px 10px;
+}
+
+.invite-token-menu-confirm-text {
+  margin: 0;
+  color: var(--ink);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
+.invite-token-menu-confirm-actions {
   display: flex;
   align-items: center;
-  gap: 12px;
-  font-size: 11.5px;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.invite-token-menu-confirm-actions .secondary-action {
+  min-height: 28px;
+  padding: 3px 10px;
+}
+
+.invite-token-manager > .project-list-empty {
+  margin: 0;
   color: var(--muted);
-  flex-wrap: wrap;
+}
+
+/* 窄容器退化为紧凑双行：身份与「更多操作」占首行，状态与元信息在第二行自然换行。 */
+@container (inline-size < 580px) {
+  .invite-token-head {
+    display: none;
+  }
+
+  .invite-token-list {
+    max-height: 236px;
+  }
+
+  .invite-token-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 12px;
+    padding: 10px 12px;
+  }
+
+  .invite-token-row:first-child {
+    border-start-start-radius: var(--field-radius, 8px);
+    border-start-end-radius: var(--field-radius, 8px);
+  }
+
+  .invite-token-identity {
+    flex: 1 1 calc(100% - 48px);
+    flex-wrap: wrap;
+    gap: 2px 8px;
+    order: 1;
+  }
+
+  .invite-token-prefix {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .invite-token-actions {
+    flex: none;
+    order: 2;
+  }
+
+  .invite-token-status-cell {
+    order: 3;
+  }
+
+  .invite-token-usage,
+  .invite-token-expiry {
+    white-space: normal;
+  }
+
+  .invite-token-usage {
+    order: 4;
+  }
+
+  .invite-token-expiry {
+    order: 5;
+  }
+}
+
+@media (pointer: coarse) {
+  .invite-token-menu-trigger,
+  .invite-token-menu-item,
+  .invite-token-menu-confirm-actions .secondary-action,
+  .created-token-actions .secondary-action,
+  .invite-token-create {
+    min-height: 44px;
+  }
+
+  .invite-token-menu-trigger {
+    width: 44px;
+  }
 }
 
 .status-pill[data-token-status="active"],
@@ -3407,6 +3714,10 @@ button.ghost-action:hover:not(:disabled) {
 :root:not([data-monochrome="true"]) .status-pill[data-agent-status-pill="revoked"] {
   border-color: color-mix(in srgb, var(--danger) 30%, transparent);
   background: color-mix(in srgb, var(--danger) 9%, transparent);
+}
+
+:root:not([data-monochrome="true"]) .invite-token-list .status-pill[data-token-status] {
+  border-color: transparent;
 }
 
 .skill-md-header {
@@ -4316,7 +4627,6 @@ button.ghost-action:hover:not(:disabled) {
   .bounty-card-grid,
   .composer-grid-row,
   .detail-arbitration-grid,
-  .invite-token-inputs,
   .agent-card-meta,
   .agent-detail-stats,
   .rating-ledger-metrics {

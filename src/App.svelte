@@ -1249,6 +1249,25 @@
     return revoked;
   }
 
+  async function handleDeleteInviteToken(id: string): Promise<void> {
+    const serviceSeq = serviceReconnectSeq;
+    const api = activeBountyApi;
+    await api.deleteInviteToken(id);
+    if (serviceSeq === serviceReconnectSeq && api === activeBountyApi) {
+      onboardingSettings = {
+        ...onboardingSettings,
+        invite_tokens: onboardingSettings.invite_tokens.filter(item => item.id !== id),
+      };
+      skillDocument = null;
+      skillDocRequestSeq += 1;
+      try {
+        await refreshOnboarding();
+      } catch {
+        // 删除已在服务端提交；刷新失败只保留错误提示，不恢复已删除令牌或旧文档缓存。
+      }
+    }
+  }
+
   async function handleExportSkillMarkdown(doc: SkillDocument): Promise<boolean> {
     const serviceSeq = serviceReconnectSeq;
     const api = activeBountyApi;
@@ -2768,6 +2787,7 @@
               onToggleLanRegistration={handleToggleLanRegistration}
               onCreateInviteToken={handleCreateInviteToken}
               onRevokeInviteToken={handleRevokeInviteToken}
+              onDeleteInviteToken={handleDeleteInviteToken}
               onLoadSkillMarkdown={loadSkillMarkdown}
               onExportSkillMarkdown={handleExportSkillMarkdown}
               onNotify={showToast}

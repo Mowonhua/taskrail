@@ -162,6 +162,7 @@ export interface BountyApiPort {
   listInviteTokens(): Promise<InviteTokenSummary[]>;
   createInviteToken(input?: CreateInviteTokenInput): Promise<CreatedInviteToken>;
   revokeInviteToken(id: string): Promise<InviteTokenSummary>;
+  deleteInviteToken(id: string): Promise<void>;
   getSkillMarkdown(options?: { baseUrl?: string; inviteToken?: string }): Promise<SkillDocument>;
   listAgents(filter?: AgentFilter): Promise<AgentSummary[]>;
   getAgentDetail(id: string): Promise<AgentDetail>;
@@ -538,6 +539,13 @@ export class HttpBountyClient implements BountyApiPort {
     return await this.request<InviteTokenSummary>(
       'POST',
       `/api/v1/admin/invite-tokens/${encodeURIComponent(id)}/revoke`,
+    );
+  }
+
+  async deleteInviteToken(id: string): Promise<void> {
+    await this.request<void>(
+      'DELETE',
+      `/api/v1/admin/invite-tokens/${encodeURIComponent(id)}`,
     );
   }
 
@@ -3261,6 +3269,20 @@ export function createMemoryBountyClient(seed?: {
         stored.summary.revoked_at = nowIso();
       }
       return clone(stored.summary);
+    },
+
+    async deleteInviteToken(id: string): Promise<void> {
+      const stored = inviteTokensById.get(id);
+      if (!stored) {
+        throw new ServiceApiError('INVITE_TOKEN_NOT_FOUND', 404, '邀请令牌不存在');
+      }
+      inviteTokensById.delete(id);
+      inviteTokensByRaw.delete(stored.rawToken);
+      for (const agent of agentsById.values()) {
+        if (agent.summary.invite_token_id === id) {
+          agent.summary.invite_token_id = null;
+        }
+      }
     },
 
     async getSkillMarkdown(options?: {

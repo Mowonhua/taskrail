@@ -1,11 +1,21 @@
 /** 文件职责：提供设置下拉菜单共用的锚点定位与展开期间的事件生命周期。 */
 
+export interface AnchoredPopoverOptions {
+  /** 'stretch' 保持与触发器同宽；'end' 保持浮层固有宽度并与触发器右缘对齐。 */
+  align?: 'stretch' | 'end';
+}
+
 /**
  * 函数职责：把已展开的浮层限制在可视视口内；锚点完全离开裁切祖先时请求关闭。
  * 输入说明：调用方须先更新 DOM 并显示 popover，浮层采用 fixed 定位。
  * 输出说明：只更新浮层几何；不改变焦点、选择值或组件的展开状态。
  */
-export function positionAnchoredPopover(trigger: HTMLElement, popup: HTMLElement, close: () => void): void {
+export function positionAnchoredPopover(
+  trigger: HTMLElement,
+  popup: HTMLElement,
+  close: () => void,
+  options: AnchoredPopoverOptions = {},
+): void {
   const bounds = trigger.getBoundingClientRect();
   // 顶层浮层不受父容器裁切；锚点滚出任一裁切祖先时收起，避免菜单脱离字段悬浮。
   for (let ancestor = trigger.parentElement; ancestor; ancestor = ancestor.parentElement) {
@@ -29,10 +39,21 @@ export function positionAnchoredPopover(trigger: HTMLElement, popup: HTMLElement
   const desiredHeight = Math.min(popup.scrollHeight, 320);
   const placeAbove = below < desiredHeight && above > below;
   const availableHeight = Math.max(0, placeAbove ? above : below);
-  const width = Math.min(bounds.width, Math.max(0, viewportWidth - margin * 2));
-  popup.style.width = `${width}px`;
+  const maxViewportWidth = Math.max(0, viewportWidth - margin * 2);
+  let width: number;
+  let desiredLeft: number;
+  if (options.align === 'end') {
+    popup.style.width = '';
+    const measuredWidth = popup.getBoundingClientRect().width || popup.offsetWidth || popup.scrollWidth;
+    width = Math.min(measuredWidth, maxViewportWidth);
+    desiredLeft = bounds.right - width;
+  } else {
+    width = Math.min(bounds.width, maxViewportWidth);
+    popup.style.width = `${width}px`;
+    desiredLeft = bounds.left;
+  }
   popup.style.maxHeight = `${Math.min(320, availableHeight)}px`;
-  popup.style.left = `${Math.max(viewportLeft + margin, Math.min(bounds.left, viewportLeft + viewportWidth - margin - width))}px`;
+  popup.style.left = `${Math.max(viewportLeft + margin, Math.min(desiredLeft, viewportLeft + viewportWidth - margin - width))}px`;
   popup.style.top = `${placeAbove ? Math.max(viewportTop + margin, bounds.top - gap - popup.getBoundingClientRect().height) : bounds.bottom + gap}px`;
 }
 
@@ -42,8 +63,13 @@ export function positionAnchoredPopover(trigger: HTMLElement, popup: HTMLElement
  * 输出说明：外部按下请求关闭，滚动和视口变化重新定位；清理还会退出 manual popover 顶层。
  * 实现思路：不监听 focusout，避免滚动条取得焦点时误关菜单。
  */
-export function observeAnchoredPopover(trigger: HTMLElement, popup: HTMLElement, close: () => void): () => void {
-  const position = () => positionAnchoredPopover(trigger, popup, close);
+export function observeAnchoredPopover(
+  trigger: HTMLElement,
+  popup: HTMLElement,
+  close: () => void,
+  options: AnchoredPopoverOptions = {},
+): () => void {
+  const position = () => positionAnchoredPopover(trigger, popup, close, options);
   const onPointerdown = (event: PointerEvent) => {
     const path = event.composedPath();
     if (!path.includes(trigger) && !path.includes(popup)) close();

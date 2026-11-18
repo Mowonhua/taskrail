@@ -108,6 +108,20 @@ impl Repository {
         })
     }
 
+    /// 函数职责：永久删除任意状态的邀请，同时清除已注册 Agent 的邀请关联。
+    /// 输出说明：关联清理与删除在同一事务提交；Agent 及其独立 api_key 不受影响，不存在时返回 INVITE_TOKEN_NOT_FOUND。
+    pub fn delete_invite_token(&self, id: &str) -> Result<()> {
+        self.write(|tx| {
+            find_invite(tx, id)?;
+            tx.execute(
+                "UPDATE agents SET invite_token_id=NULL WHERE invite_token_id=?1",
+                [id],
+            )?;
+            tx.execute("DELETE FROM invite_tokens WHERE id=?1", [id])?;
+            Ok(())
+        })
+    }
+
     /// 函数职责：校验显式用于文档的邀请，绝不消耗使用次数。
     pub fn validate_invite_token(&self, raw: &str) -> Result<()> {
         valid_invite(&self.connect()?, raw, &now()).map(|_| ())

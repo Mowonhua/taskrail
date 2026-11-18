@@ -81,6 +81,7 @@
     onToggleLanRegistration?: (enabled: boolean) => Promise<OnboardingSettings>;
     onCreateInviteToken?: (input?: CreateInviteTokenInput) => Promise<CreatedInviteToken>;
     onRevokeInviteToken?: (id: string) => Promise<InviteTokenSummary>;
+    onDeleteInviteToken?: (id: string) => Promise<void>;
     onLoadSkillMarkdown?: (options?: {
       baseUrl?: string;
       inviteToken?: string;
@@ -149,6 +150,9 @@
       throw new Error('Not configured');
     },
     onRevokeInviteToken = async () => {
+      throw new Error('Not configured');
+    },
+    onDeleteInviteToken = async () => {
       throw new Error('Not configured');
     },
     onLoadSkillMarkdown = async () => {
@@ -981,6 +985,7 @@
       {onToggleLanRegistration}
       {onCreateInviteToken}
       {onRevokeInviteToken}
+      {onDeleteInviteToken}
       {onLoadSkillMarkdown}
       {onExportSkillMarkdown}
       {onNotify}

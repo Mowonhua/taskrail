@@ -1564,26 +1564,32 @@ describe('悬赏板工作台外壳集成测试', () => {
     onboardingSection.querySelector<HTMLButtonElement>('[data-action="create-invite-token"]')!.click();
     await flush();
 
-    const rawBanner = onboardingSection.querySelector<HTMLElement>('[data-slot="created-invite-raw-token"]');
-    expect(rawBanner).not.toBeNull();
-    const rawTokenText = rawBanner!.querySelector('code')?.textContent?.trim() ?? '';
+    const rawDialog = onboardingSection.querySelector<HTMLElement>('[data-slot="created-invite-raw-token"]');
+    expect(rawDialog).not.toBeNull();
+    expect(rawDialog!.querySelector('[data-action="preview-skill-with-token"]')).toBeNull();
+    const rawTokenText = rawDialog!.querySelector('code')?.textContent?.trim() ?? '';
     expect(rawTokenText.startsWith('tr_inv_')).toBe(true);
 
-    // 复制一次性明文令牌
-    rawBanner!.querySelector<HTMLButtonElement>('[data-action="copy-invite-token"]')!.click();
+    // 在弹窗内复制一次性明文令牌，然后关闭弹窗
+    rawDialog!.querySelector<HTMLButtonElement>('[data-action="copy-invite-token"]')!.click();
     await flush();
     expect(copySpy).toHaveBeenCalledWith(rawTokenText);
-    expect(onboardingSection.querySelector('[data-status="onboarding-feedback"]')?.textContent).toContain(
-      '令牌已复制',
+    expect(rawDialog!.querySelector('[data-action="copy-invite-token"]')?.textContent).toContain(
+      '已复制令牌',
     );
+    expect(onboardingSection.querySelector('[data-status="onboarding-feedback"]')).toBeNull();
+    expect(target.querySelector('.toast-bar')).toBeNull();
+    rawDialog!.querySelector<HTMLButtonElement>('[data-action="dismiss-created-invite-dialog"]')!.click();
+    await flush();
+    expect(onboardingSection.querySelector('[data-slot="created-invite-raw-token"]')).toBeNull();
 
     // 邀请令牌列表展示备注、前缀与有效状态
     const tokenList = onboardingSection.querySelector<HTMLElement>('[data-slot="invite-token-list"]')!;
     expect(tokenList.textContent).toContain('本地 Codex 接入');
     expect(tokenList.textContent).toContain('有效');
 
-    // 使用刚生成的令牌预览 SKILL.md（免审已开启 + 内嵌真实令牌）
-    rawBanner!.querySelector<HTMLButtonElement>('[data-action="preview-skill-with-token"]')!.click();
+    // 自动开启「附带邀请令牌」后预览 SKILL.md（免审已开启 + 内嵌真实令牌）
+    onboardingSection.querySelector<HTMLButtonElement>('[data-action="preview-skill-md"]')!.click();
     await flush();
     const skillPreview = onboardingSection.querySelector<HTMLElement>('[data-slot="skill-md-preview"]')!;
     expect(skillPreview).not.toBeNull();
@@ -1612,11 +1618,22 @@ describe('悬赏板工作台外壳集成测试', () => {
       '<INVITE_TOKEN>',
     );
 
-    // 作废邀请令牌后状态变为已作废，且隐藏「用此令牌预览」与附带开关
+    // 打开「更多操作」菜单后作废邀请令牌，状态变为已作废，且隐藏「用此令牌预览」与附带开关
+    const menuTrigger = tokenList.querySelector<HTMLButtonElement>('[data-action="toggle-invite-token-menu"]')!;
+    expect(menuTrigger.getAttribute('aria-expanded')).toBe('false');
+    menuTrigger.click();
+    await flush();
+    expect(menuTrigger.getAttribute('aria-expanded')).toBe('true');
     tokenList.querySelector<HTMLButtonElement>('[data-action="revoke-invite-token"]')!.click();
     await flush();
+    expect(menuTrigger.getAttribute('aria-expanded')).toBe('false');
     expect(tokenList.textContent).toContain('已作废');
+    menuTrigger.click();
+    await flush();
     expect(tokenList.querySelector('[data-action="revoke-invite-token"]')).toBeNull();
+    tokenList.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    await flush();
+    expect(menuTrigger.getAttribute('aria-expanded')).toBe('false');
     expect(onboardingSection.querySelector('[data-action="preview-skill-with-token"]')).toBeNull();
     expect(onboardingSection.querySelector('#attach-invite-token-switch')).toBeNull();
 
@@ -1625,6 +1642,63 @@ describe('悬赏板工作台外壳集成测试', () => {
     await flush();
     expect(lanSwitch.checked).toBe(false);
     expect((await bountyApi.getOnboardingSettings()).lan_open_registration).toBe(false);
+  });
+
+  it('邀请令牌需二次确认后删除，取消不删除且刷新失败仍清理本地明文与缓存', async () => {
+    const { port } = createMemoryPort({
+      preferences: { ...emptyAppConfig().preferences, workspaceSection: 'settings' },
+    });
+    const bountyApi = createMemoryBountyClient();
+    const originalGetOnboarding = bountyApi.getOnboardingSettings.bind(bountyApi);
+
+    instance = mount(App, { target, props: { files: port, bountyApi } });
+    await flush();
+
+    const onboardingSection = target.querySelector<HTMLElement>('[data-section="agent-onboarding"]')!;
+    onboardingSection.querySelector<HTMLButtonElement>('[data-action="create-invite-token"]')!.click();
+    await flush();
+    expect(onboardingSection.querySelector('[data-slot="created-invite-raw-token"]')).not.toBeNull();
+    onboardingSection
+      .querySelector<HTMLButtonElement>('[data-action="dismiss-created-invite-dialog"]')!
+      .click();
+    await flush();
+
+    onboardingSection.querySelector<HTMLButtonElement>('[data-action="preview-skill-md"]')!.click();
+    await flush();
+    expect(onboardingSection.querySelector('[data-slot="skill-md-preview"]')).not.toBeNull();
+
+    const tokenRow = onboardingSection.querySelector<HTMLElement>('[data-invite-token-id]')!;
+    tokenRow.querySelector<HTMLButtonElement>('[data-action="toggle-invite-token-menu"]')!.click();
+    await flush();
+    tokenRow.querySelector<HTMLButtonElement>('[data-action="delete-invite-token"]')!.click();
+    await flush();
+    expect(tokenRow.querySelector('[data-action="confirm-delete-invite-token"]')).not.toBeNull();
+    tokenRow.querySelector<HTMLButtonElement>('[data-action="cancel-delete-invite-token"]')!.click();
+    await flush();
+    expect(onboardingSection.querySelector('[data-invite-token-id]')).not.toBeNull();
+    expect(await bountyApi.listInviteTokens()).toHaveLength(1);
+
+    vi.spyOn(bountyApi, 'getOnboardingSettings')
+      .mockRejectedValueOnce(new Error('ONBOARDING_REFRESH_503'))
+      .mockImplementation(() => originalGetOnboarding());
+
+    const refreshedRow = onboardingSection.querySelector<HTMLElement>('[data-invite-token-id]')!;
+    refreshedRow.querySelector<HTMLButtonElement>('[data-action="toggle-invite-token-menu"]')!.click();
+    await flush();
+    refreshedRow.querySelector<HTMLButtonElement>('[data-action="delete-invite-token"]')!.click();
+    await flush();
+    refreshedRow.querySelector<HTMLButtonElement>('[data-action="confirm-delete-invite-token"]')!.click();
+    await flush();
+
+    expect(onboardingSection.querySelector('[data-invite-token-id]')).toBeNull();
+    expect(onboardingSection.querySelector('[data-slot="created-invite-raw-token"]')).toBeNull();
+    expect(onboardingSection.querySelector('[data-slot="skill-md-preview"]')).toBeNull();
+    expect(onboardingSection.querySelector('[data-status="onboarding-feedback"]')).toBeNull();
+    expect(target.querySelector('.toast-bar')?.textContent).toContain('已删除邀请令牌');
+    expect(onboardingSection.querySelector('[data-status="onboarding-load-error"]')?.textContent).toContain(
+      'ONBOARDING_REFRESH_503',
+    );
+    expect(await bountyApi.listInviteTokens()).toEqual([]);
   });
 
   it('支持 Agent 名录筛选、订阅范围与段位展示（不暴露 MMR）、停用启用与二次确认吊销凭证及 SKILL.md 接入指南弹窗', async () => {
@@ -1952,9 +2026,9 @@ describe('悬赏板工作台外壳集成测试', () => {
     expect(anchorClickSpy).toHaveBeenCalledTimes(1);
     expect(revokeObjectUrlSpy).toHaveBeenCalledWith('blob:mock-skill-url');
     expect(
-      target.querySelector('[data-section="agent-onboarding"] [data-status="onboarding-feedback"]')
-        ?.textContent,
-    ).toContain('SKILL.md 已导出');
+      target.querySelector('[data-section="agent-onboarding"] [data-status="onboarding-feedback"]'),
+    ).toBeNull();
+    expect(target.querySelector('.toast-bar')?.textContent).toContain('SKILL.md 已导出');
   });
 
   it('修改服务地址覆盖、关闭附带令牌或作废令牌后复制/导出 SKILL.md 必重新拉取最新参数且失败时不误报成功', async () => {
@@ -1979,7 +2053,11 @@ describe('悬赏板工作台外壳集成测试', () => {
     expect(rawToken.startsWith('tr_inv_')).toBe(true);
 
     onboardingSection
-      .querySelector<HTMLButtonElement>('[data-action="preview-skill-with-token"]')!
+      .querySelector<HTMLButtonElement>('[data-action="dismiss-created-invite-dialog"]')!
+      .click();
+    await flush();
+    onboardingSection
+      .querySelector<HTMLButtonElement>('[data-action="preview-skill-md"]')!
       .click();
     await flush();
     expect(onboardingSection.querySelector('[data-slot="skill-md-preview"]')?.textContent).toContain(
@@ -2029,6 +2107,10 @@ describe('悬赏板工作台外壳集成测试', () => {
       rawToken,
     );
 
+    onboardingSection
+      .querySelector<HTMLButtonElement>('[data-action="toggle-invite-token-menu"]')!
+      .click();
+    await flush();
     onboardingSection
       .querySelector<HTMLButtonElement>('[data-action="revoke-invite-token"]')!
       .click();
@@ -2248,7 +2330,11 @@ describe('悬赏板工作台外壳集成测试', () => {
     expect(rawToken.startsWith('tr_inv_')).toBe(true);
 
     onboardingSection
-      .querySelector<HTMLButtonElement>('[data-action="preview-skill-with-token"]')!
+      .querySelector<HTMLButtonElement>('[data-action="dismiss-created-invite-dialog"]')!
+      .click();
+    await flush();
+    onboardingSection
+      .querySelector<HTMLButtonElement>('[data-action="preview-skill-md"]')!
       .click();
     await flush();
     expect(onboardingSection.querySelector('[data-slot="skill-md-preview"]')?.textContent).toContain(
@@ -2262,6 +2348,10 @@ describe('悬赏板工作台外壳集成测试', () => {
 
     const callsBeforeRevoke = getSkillSpy.mock.calls.length;
     onboardingSection
+      .querySelector<HTMLButtonElement>('[data-action="toggle-invite-token-menu"]')!
+      .click();
+    await flush();
+    onboardingSection
       .querySelector<HTMLButtonElement>('[data-action="revoke-invite-token"]')!
       .click();
     await flush();
@@ -2271,15 +2361,14 @@ describe('悬赏板工作台外壳集成测试', () => {
       onboardingSection.querySelector('[data-status="onboarding-load-error"]')?.textContent,
     ).toContain('ONBOARDING_REFRESH_503');
     expect(onboardingSection.querySelector('[data-status="onboarding-error"]')).toBeNull();
-    expect(onboardingSection.querySelector('[data-status="onboarding-feedback"]')?.textContent).toContain(
-      '已作废邀请令牌',
-    );
+    expect(onboardingSection.querySelector('[data-status="onboarding-feedback"]')).toBeNull();
+    expect(target.querySelector('.toast-bar')?.textContent).toContain('已作废邀请令牌');
     expect(
       onboardingSection.querySelector<HTMLElement>('[data-invite-token-status]')?.dataset
         .inviteTokenStatus,
     ).toBe('revoked');
     expect(onboardingSection.querySelector('#attach-invite-token-switch')).toBeNull();
-    expect(onboardingSection.querySelector('[data-action="preview-skill-with-token"]')).toBeNull();
+    expect(onboardingSection.querySelector('[data-slot="created-invite-raw-token"]')).toBeNull();
     expect(onboardingSection.querySelector('[data-slot="skill-md-preview"]')).toBeNull();
 
     // 点击复制 SKILL.md 必须重新拉取不含已作废令牌的新文档
@@ -2442,6 +2531,11 @@ describe('悬赏板工作台外壳集成测试', () => {
       ).toContain('Clipboard text writing is unavailable');
       expect(onboardingSection.querySelector('[data-status="onboarding-feedback"]')).toBeNull();
       expect(target.querySelector('.toast-bar')).toBeNull();
+
+      onboardingSection
+        .querySelector<HTMLButtonElement>('[data-action="dismiss-created-invite-dialog"]')!
+        .click();
+      await flush();
 
       onboardingSection
         .querySelector<HTMLButtonElement>('[data-action="copy-skill-md"]')!

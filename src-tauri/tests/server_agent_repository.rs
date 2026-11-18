@@ -179,6 +179,37 @@ fn invite_revocation_expiration_and_lan_gate_are_enforced() {
 }
 
 #[test]
+fn invite_deletion_preserves_agents_and_invalidates_raw_token() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = Repository::open(dir.path().join("agents.db")).unwrap();
+    let invite = repo.create_invite_token(Default::default()).unwrap();
+    let registered = repo
+        .register_agent(register(" survives-delete ", Some(&invite.raw_token)))
+        .unwrap();
+
+    repo.delete_invite_token(&invite.token.id).unwrap();
+
+    assert!(repo.list_invite_tokens().unwrap().is_empty());
+    assert_eq!(
+        repo.register_agent(register("deleted-invite", Some(&invite.raw_token)))
+            .err()
+            .unwrap()
+            .code,
+        "INVITE_TOKEN_INVALID"
+    );
+    let agent = repo.authenticate_agent(&registered.api_key).unwrap();
+    assert_eq!(agent.status, AgentStatus::Active);
+    assert_eq!(agent.invite_token_id, None);
+    assert_eq!(
+        repo.delete_invite_token(&invite.token.id)
+            .err()
+            .unwrap()
+            .code,
+        "INVITE_TOKEN_NOT_FOUND"
+    );
+}
+
+#[test]
 fn subscription_defaults_and_empty_selections_remain_distinct() {
     let dir = tempfile::tempdir().unwrap();
     let repo = Repository::open(dir.path().join("agents.db")).unwrap();

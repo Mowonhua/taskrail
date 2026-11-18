@@ -495,6 +495,7 @@ describe('Issue 03 HTTP 客户端（管理员准入/名录 + Agent 门户）', (
     await client.listInviteTokens();
     await client.createInviteToken({ label: 'CI', max_uses: 3, expires_in_hours: 12 });
     await client.revokeInviteToken('tok/1');
+    await client.deleteInviteToken('tok/1');
     await client.getSkillMarkdown({ baseUrl: 'http://192.168.1.5:8420', inviteToken: 'tr_inv_abc' });
     await client.listAgents({ status: 'active', activity: 'busy' });
     await client.disableAgent('ag/1');
@@ -507,6 +508,7 @@ describe('Issue 03 HTTP 客户端（管理员准入/名录 + Agent 门户）', (
       'GET http://127.0.0.1:8420/api/v1/admin/invite-tokens',
       'POST http://127.0.0.1:8420/api/v1/admin/invite-tokens',
       'POST http://127.0.0.1:8420/api/v1/admin/invite-tokens/tok%2F1/revoke',
+      'DELETE http://127.0.0.1:8420/api/v1/admin/invite-tokens/tok%2F1',
       'GET http://127.0.0.1:8420/api/v1/admin/skill.md?base_url=http%3A%2F%2F192.168.1.5%3A8420&invite_token=tr_inv_abc',
       'GET http://127.0.0.1:8420/api/v1/agents?status=active&activity=busy',
       'POST http://127.0.0.1:8420/api/v1/agents/ag%2F1/disable',
@@ -519,7 +521,8 @@ describe('Issue 03 HTTP 客户端（管理员准入/名录 + Agent 门户）', (
     expect(JSON.parse(calls[1].body!)).toEqual({ lan_open_registration: true });
     expect(JSON.parse(calls[3].body!)).toEqual({ label: 'CI', max_uses: 3, expires_in_hours: 12 });
     expect(calls[4].body).toBeUndefined();
-    expect(calls[7].body).toBeUndefined();
+    expect(calls[5].body).toBeUndefined();
+    expect(calls[8].body).toBeUndefined();
   });
 
   it('HttpAgentClient 与 registerAgent 正确构造公开文档、注册及 Agent 鉴权请求', async () => {
@@ -670,6 +673,18 @@ describe('createMemoryBountyClient (Issue 03 Agent 准入、订阅与隔离)', (
     const reg2 = await client.registerAgent({ name: 'agent-beta' });
     expect(reg2.agent.invite_token_id).toBeNull();
     expect(reg2.agent.tier).toBe('Unranked');
+
+    await client.deleteInviteToken(invite2.token.id);
+    await client.deleteInviteToken(createdInvite.token.id);
+    expect(await client.listInviteTokens()).toEqual([]);
+    expect((await client.getAgentDetail(reg1.agent.id)).agent.invite_token_id).toBeNull();
+    await expect(
+      client.getPublicSkillMarkdown({ inviteToken: createdInvite.raw_token }),
+    ).rejects.toMatchObject({ code: 'INVITE_TOKEN_INVALID', status: 401 });
+    await expect(client.deleteInviteToken(createdInvite.token.id)).rejects.toMatchObject({
+      code: 'INVITE_TOKEN_NOT_FOUND',
+      status: 404,
+    });
   });
 
   it('支持订阅替换校验、项目归档拒绝、停用/启用/吊销鉴权拦截与名录活跃度筛选', async () => {

@@ -16,6 +16,10 @@ pub(super) fn router() -> Router<AppState> {
             "/api/v1/admin/invite-tokens/{id}/revoke",
             post(revoke_invite),
         )
+        .route(
+            "/api/v1/admin/invite-tokens/{id}",
+            axum::routing::delete(delete_invite),
+        )
         .route("/api/v1/admin/skill.md", get(admin_skill))
         .route("/skill.md", get(public_skill))
         .route("/api/v1/skill.md", get(public_skill))
@@ -108,6 +112,10 @@ async fn revoke_invite(
     disk(state, move |r| r.revoke_invite_token(&id))
         .await
         .map(Json)
+}
+async fn delete_invite(State(state): State<AppState>, Id(id): Id) -> Result<StatusCode> {
+    disk(state, move |r| r.delete_invite_token(&id)).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 async fn register(
     State(state): State<AppState>,

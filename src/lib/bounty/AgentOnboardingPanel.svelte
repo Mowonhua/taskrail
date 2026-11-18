@@ -1,8 +1,9 @@
 <script lang="ts">
   /**
-   * 文件职责：在设置页面集中管理外部 Agent 准入与协议（局域网免审注册开关、邀请令牌生成与作废、SKILL.md 在线预览与导出）。
+   * 文件职责：在设置页面集中管理外部 Agent 准入与协议（局域网免审注册开关、邀请令牌生成、作废与删除、SKILL.md 在线预览与导出）。
    * 定义范围：免审状态切换、一次性明文令牌横幅展示、邀请令牌状态徽章及动态 SKILL.md 预览复制下载。
    */
+  import { tick } from 'svelte';
   import type {
     CreatedInviteToken,
     CreateInviteTokenInput,
@@ -30,6 +31,7 @@
     onToggleLanRegistration: (enabled: boolean) => Promise<OnboardingSettings>;
     onCreateInviteToken: (input?: CreateInviteTokenInput) => Promise<CreatedInviteToken>;
     onRevokeInviteToken: (id: string) => Promise<InviteTokenSummary>;
+    onDeleteInviteToken: (id: string) => Promise<void>;
     onLoadSkillMarkdown: (options?: {
       baseUrl?: string;
       inviteToken?: string;
@@ -49,6 +51,7 @@
     onToggleLanRegistration,
     onCreateInviteToken,
     onRevokeInviteToken,
+    onDeleteInviteToken,
     onLoadSkillMarkdown,
     onExportSkillMarkdown,
     onNotify,
@@ -64,6 +67,10 @@
   let baseUrlDraft = $state('');
   let attachLatestToken = $state(false);
   let latestCreatedToken = $state<CreatedInviteToken | null>(null);
+  let createdTokenDialog = $state<HTMLDialogElement | undefined>(undefined);
+  let createdTokenDialogOpen = $state(false);
+  let createdTokenCopied = $state(false);
+  let createdDialogPressedOutside = false;
   let loadedSkill = $state<{ doc: SkillDocument; contextKey: string } | null>(null);
 
   let busy = $state(false);
@@ -71,9 +78,10 @@
   let loadingSkill = $state(false);
   let retryingOnboarding = $state(false);
   let panelError = $state('');
-  let feedbackMessage = $state('');
   let syncedConnectionKey = $state<string | null>(null);
   let revokedTokenIds = $state(new Set<string>());
+  let openMenuTokenId = $state<string | null>(null);
+  let confirmingDeleteTokenId = $state<string | null>(null);
   let skillLoadSeq = 0;
   let opSeq = 0;
   let retrySeq = 0;
@@ -88,12 +96,160 @@
     }
   }
 
+  function closeTokenMenu(options: { restoreFocus?: boolean } = {}): void {
+    const closingId = openMenuTokenId;
+    openMenuTokenId = null;
+    confirmingDeleteTokenId = null;
+    if (closingId) {
+      const popup = document.getElementById(`invite-token-menu-${closingId}`);
+      if (typeof popup?.hidePopover === 'function' && popup.matches(':popover-open')) {
+        popup.hidePopover();
+      }
+      if (options.restoreFocus) {
+        document.getElementById(`invite-token-menu-trigger-${closingId}`)?.focus();
+      }
+    }
+  }
+
+  async function openTokenMenu(tokenId: string, focusFirstItem = false): Promise<void> {
+    if (busy) return;
+    closeLanHelp();
+    if (openMenuTokenId && openMenuTokenId !== tokenId) {
+      closeTokenMenu();
+    }
+    confirmingDeleteTokenId = null;
+    openMenuTokenId = tokenId;
+    await tick();
+    if (openMenuTokenId !== tokenId) return;
+    const trigger = document.getElementById(`invite-token-menu-trigger-${tokenId}`);
+    const popup = document.getElementById(`invite-token-menu-${tokenId}`);
+    if (!trigger || !popup || !popup.isConnected) return;
+    if (typeof popup.showPopover === 'function' && !popup.matches(':popover-open')) {
+      popup.showPopover();
+    }
+    positionAnchoredPopover(trigger, popup, () => closeTokenMenu(), { align: 'end' });
+    if (focusFirstItem) {
+      popup.querySelector<HTMLButtonElement>('[role="menuitem"]:not(:disabled)')?.focus();
+    }
+  }
+
+  function toggleTokenMenu(tokenId: string, event: MouseEvent): void {
+    if (openMenuTokenId === tokenId) {
+      closeTokenMenu();
+      return;
+    }
+    void openTokenMenu(tokenId, event.detail === 0);
+  }
+
+  function handleMenuTriggerKeydown(event: KeyboardEvent, tokenId: string): void {
+    if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      void openTokenMenu(tokenId, true);
+    }
+  }
+
+  function handleTokenMenuKeydown(event: KeyboardEvent, tokenId: string): void {
+    if (event.key === 'Tab') {
+      closeTokenMenu();
+      return;
+    }
+    if (confirmingDeleteTokenId === tokenId) return;
+    if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+    const popup = event.currentTarget as HTMLElement;
+    const items = [...popup.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not(:disabled)')];
+    if (items.length === 0) return;
+    const current = items.indexOf(document.activeElement as HTMLButtonElement);
+    const next =
+      event.key === 'Home'
+        ? 0
+        : event.key === 'End'
+          ? items.length - 1
+          : current < 0
+            ? 0
+            : (current + (event.key === 'ArrowUp' ? -1 : 1) + items.length) % items.length;
+    event.preventDefault();
+    items[next].focus();
+  }
+
+  async function openDeleteConfirmInMenu(tokenId: string): Promise<void> {
+    confirmingDeleteTokenId = tokenId;
+    await tick();
+    if (openMenuTokenId !== tokenId || confirmingDeleteTokenId !== tokenId) return;
+    const trigger = document.getElementById(`invite-token-menu-trigger-${tokenId}`);
+    const popup = document.getElementById(`invite-token-menu-${tokenId}`);
+    if (trigger && popup) {
+      positionAnchoredPopover(trigger, popup, () => closeTokenMenu(), { align: 'end' });
+      popup.querySelector<HTMLButtonElement>('[data-action="cancel-delete-invite-token"]')?.focus();
+    }
+  }
+
+  function closeCreatedTokenDialog(): void {
+    createdTokenDialogOpen = false;
+    panelError = '';
+    if (createdTokenDialog?.open && typeof createdTokenDialog.close === 'function') {
+      createdTokenDialog.close();
+    }
+  }
+
+  function isOutsideDialog(event: PointerEvent, dialog: HTMLDialogElement): boolean {
+    const r = dialog.getBoundingClientRect();
+    return (
+      event.clientX < r.left ||
+      event.clientX > r.right ||
+      event.clientY < r.top ||
+      event.clientY > r.bottom
+    );
+  }
+
+  function handleCreatedDialogPointerDown(event: PointerEvent): void {
+    if (!createdTokenDialog || 'closedBy' in HTMLDialogElement.prototype) return;
+    createdDialogPressedOutside = isOutsideDialog(event, createdTokenDialog);
+  }
+
+  function handleCreatedDialogPointerUp(event: PointerEvent): void {
+    if (!createdTokenDialog || 'closedBy' in HTMLDialogElement.prototype) return;
+    if (createdDialogPressedOutside && isOutsideDialog(event, createdTokenDialog)) {
+      closeCreatedTokenDialog();
+    }
+    createdDialogPressedOutside = false;
+  }
+
+  $effect(() => {
+    const dialog = createdTokenDialog;
+    if (!createdTokenDialogOpen || !dialog) return;
+    if (typeof dialog.showModal === 'function') {
+      if (!dialog.open) {
+        dialog.showModal();
+        dialog.querySelector<HTMLButtonElement>('[data-action="copy-invite-token"]')?.focus();
+      }
+      return () => {
+        if (dialog.open) {
+          dialog.close();
+        }
+      };
+    }
+    dialog.setAttribute('open', '');
+    const onKeydown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        event.stopPropagation();
+        closeCreatedTokenDialog();
+      }
+    };
+    document.addEventListener('keydown', onKeydown, true);
+    return () => {
+      document.removeEventListener('keydown', onKeydown, true);
+      dialog.removeAttribute('open');
+    };
+  });
+
   function toggleLanHelp(): void {
     lanHelpOpen = !lanHelpOpen;
     if (!lanHelpOpen) {
       closeLanHelp();
       return;
     }
+    closeTokenMenu();
     if (
       typeof lanHelpBubble?.showPopover === 'function' &&
       !lanHelpBubble.matches(':popover-open')
@@ -102,6 +258,37 @@
     }
     positionAnchoredPopover(lanHelpButton, lanHelpBubble, closeLanHelp);
   }
+
+  $effect(() => {
+    const activeId = openMenuTokenId;
+    if (!activeId) return;
+    const trigger = document.getElementById(`invite-token-menu-trigger-${activeId}`);
+    const popup = document.getElementById(`invite-token-menu-${activeId}`);
+    if (!trigger || !popup) return;
+    const stopObserve = observeAnchoredPopover(trigger, popup, () => closeTokenMenu(), {
+      align: 'end',
+    });
+    const onKeydown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        event.stopPropagation();
+        closeTokenMenu({ restoreFocus: true });
+      }
+    };
+    const onFocusin = (event: FocusEvent) => {
+      const target = event.target as Node | null;
+      if (target && !trigger.contains(target) && !popup.contains(target)) {
+        closeTokenMenu();
+      }
+    };
+    document.addEventListener('keydown', onKeydown, true);
+    document.addEventListener('focusin', onFocusin, true);
+    return () => {
+      document.removeEventListener('keydown', onKeydown, true);
+      document.removeEventListener('focusin', onFocusin, true);
+      stopObserve();
+    };
+  });
 
   $effect(() => {
     if (!lanHelpOpen) return;
@@ -128,6 +315,9 @@
       opSeq += 1;
       retrySeq += 1;
       closeLanHelp();
+      closeTokenMenu();
+      createdTokenDialogOpen = false;
+      createdTokenCopied = false;
       busy = false;
       creatingToken = false;
       loadingSkill = false;
@@ -139,9 +329,9 @@
       latestCreatedToken = null;
       attachLatestToken = false;
       revokedTokenIds = new Set();
+      confirmingDeleteTokenId = null;
       loadedSkill = null;
       panelError = '';
-      feedbackMessage = '';
     }
   });
 
@@ -200,7 +390,6 @@
   }
 
   function showFeedback(message: string): void {
-    feedbackMessage = message;
     onNotify?.(message);
   }
 
@@ -249,7 +438,6 @@
     const seq = ++opSeq;
     const targetChecked = input.checked;
     panelError = '';
-    feedbackMessage = '';
     busy = true;
     try {
       const updated = await onToggleLanRegistration(targetChecked);
@@ -269,7 +457,6 @@
   async function handleCreateToken(): Promise<void> {
     if (busy || creatingToken) return;
     panelError = '';
-    feedbackMessage = '';
 
     const trimmedLabel = String(labelDraft ?? '').trim();
     const trimmedMaxUses = String(maxUsesDraft ?? '').trim();
@@ -308,12 +495,16 @@
       });
       if (!isSameConnection(epoch, connKey) || seq !== opSeq) return;
       latestCreatedToken = created;
+      createdTokenCopied = false;
+      createdTokenDialogOpen = true;
+      confirmingDeleteTokenId = null;
       attachLatestToken = true;
       labelDraft = '';
       maxUsesDraft = '';
       expiresHoursDraft = '';
     } catch (error) {
       if (!isSameConnection(epoch, connKey) || seq !== opSeq) return;
+      closeTokenMenu();
       panelError = formatServiceError(error);
     } finally {
       if (isSameConnection(epoch, connKey) && seq === opSeq) {
@@ -329,12 +520,12 @@
     const connKey = syncedConnectionKey;
     const seq = ++opSeq;
     panelError = '';
-    feedbackMessage = '';
     busy = true;
     try {
       const revoked = await onRevokeInviteToken(id);
       if (!isSameConnection(epoch, connKey)) return;
       revokedTokenIds = new Set([...revokedTokenIds, id]);
+      closeTokenMenu();
       loadedSkill = null;
       skillLoadSeq += 1;
       loadingSkill = false;
@@ -343,6 +534,7 @@
           ...latestCreatedToken,
           token: revoked,
         };
+        createdTokenDialogOpen = false;
         attachLatestToken = false;
       }
       if (seq === opSeq) {
@@ -350,6 +542,41 @@
       }
     } catch (error) {
       if (!isSameConnection(epoch, connKey) || seq !== opSeq) return;
+      closeTokenMenu();
+      panelError = formatServiceError(error);
+    } finally {
+      if (isSameConnection(epoch, connKey) && seq === opSeq) {
+        busy = false;
+      }
+    }
+  }
+
+  async function handleDeleteToken(id: string): Promise<void> {
+    if (busy) return;
+    const epoch = serviceEpoch;
+    const connKey = syncedConnectionKey;
+    const seq = ++opSeq;
+    panelError = '';
+    busy = true;
+    try {
+      await onDeleteInviteToken(id);
+      if (!isSameConnection(epoch, connKey)) return;
+      closeTokenMenu();
+      loadedSkill = null;
+      skillLoadSeq += 1;
+      loadingSkill = false;
+      if (latestCreatedToken?.token.id === id) {
+        latestCreatedToken = null;
+        createdTokenDialogOpen = false;
+        createdTokenCopied = false;
+        attachLatestToken = false;
+      }
+      if (seq === opSeq) {
+        showFeedback($t('已删除邀请令牌'));
+      }
+    } catch (error) {
+      if (!isSameConnection(epoch, connKey) || seq !== opSeq) return;
+      closeTokenMenu();
       panelError = formatServiceError(error);
     } finally {
       if (isSameConnection(epoch, connKey) && seq === opSeq) {
@@ -364,11 +591,10 @@
     const connKey = syncedConnectionKey;
     const rawToken = latestCreatedToken.raw_token;
     panelError = '';
-    feedbackMessage = '';
     try {
       await copyToClipboard(rawToken);
       if (!isSameConnection(epoch, connKey)) return;
-      showFeedback($t('令牌已复制'));
+      createdTokenCopied = true;
     } catch (error) {
       if (!isSameConnection(epoch, connKey)) return;
       panelError = formatServiceError(error);
@@ -422,12 +648,6 @@
     }
   }
 
-  async function handlePreviewWithCreatedToken(): Promise<void> {
-    if (!latestCreatedToken || !latestTokenStillValid) return;
-    attachLatestToken = true;
-    await resolveSkillDoc(latestCreatedToken.raw_token);
-  }
-
   async function handlePreviewSkill(): Promise<void> {
     await resolveSkillDoc();
   }
@@ -437,7 +657,6 @@
     const connKey = syncedConnectionKey;
     const targetContextKey = currentSkillContext;
     panelError = '';
-    feedbackMessage = '';
     const doc = freshSkillDoc ?? (await resolveSkillDoc());
     if (!doc || !isSameConnection(epoch, connKey) || targetContextKey !== currentSkillContext) {
       return;
@@ -457,7 +676,6 @@
     const connKey = syncedConnectionKey;
     const targetContextKey = currentSkillContext;
     panelError = '';
-    feedbackMessage = '';
     const doc = freshSkillDoc ?? (await resolveSkillDoc());
     if (!doc || !isSameConnection(epoch, connKey) || targetContextKey !== currentSkillContext) {
       return;
@@ -586,110 +804,66 @@
     </div>
   {/if}
 
-  {#if panelError}
+  {#if panelError && !createdTokenDialogOpen}
     <p class="dialog-error settings-error" role="alert" data-status="onboarding-error">
       {panelError}
     </p>
   {/if}
 
-  {#if feedbackMessage}
-    <p class="service-feedback-success" role="status" data-status="onboarding-feedback">
-      {feedbackMessage}
-    </p>
-  {/if}
-
-  <div class="onboarding-block" data-slot="invite-token-manager">
-    <h4 class="project-form-title">{$t('邀请令牌')}</h4>
+  <div class="onboarding-block invite-token-manager" data-slot="invite-token-manager">
+    <h4 class="invite-token-section-title">{$t('邀请令牌')}</h4>
 
     <div class="invite-token-form" data-slot="invite-token-form">
-      <div class="invite-token-inputs">
-        <div class="project-form-field">
-          <label class="composer-label" for="invite-token-label-input">{$t('令牌备注')}</label>
-          <input
-            id="invite-token-label-input"
-            type="text"
-            class="settings-text-input"
-            aria-label={$t('令牌备注')}
-            placeholder={$t('例如：本地 Codex 测试')}
-            bind:value={labelDraft}
-          />
-        </div>
-
-        <div class="project-form-field">
-          <label class="composer-label" for="invite-token-max-uses-input">{$t('最大使用次数')}</label>
-          <input
-            id="invite-token-max-uses-input"
-            type="number"
-            min="1"
-            step="1"
-            class="settings-text-input"
-            aria-label={$t('最大使用次数')}
-            placeholder={$t('不限次数')}
-            bind:value={maxUsesDraft}
-          />
-        </div>
-
-        <div class="project-form-field">
-          <label class="composer-label" for="invite-token-expires-input">{$t('有效期（小时）')}</label>
-          <input
-            id="invite-token-expires-input"
-            type="number"
-            min="1"
-            step="1"
-            class="settings-text-input"
-            aria-label={$t('有效期（小时）')}
-            placeholder={$t('永不过期')}
-            bind:value={expiresHoursDraft}
-          />
-        </div>
+      <div class="project-form-field invite-token-field-label">
+        <label class="composer-label" for="invite-token-label-input">{$t('令牌备注')}</label>
+        <input
+          id="invite-token-label-input"
+          type="text"
+          class="settings-text-input"
+          aria-label={$t('令牌备注')}
+          placeholder={$t('例如：本地 Codex 测试')}
+          bind:value={labelDraft}
+        />
       </div>
 
-      <div class="inline-project-actions">
-        <button
-          type="button"
-          class="primary secondary-action"
-          data-action="create-invite-token"
-          disabled={busy || creatingToken}
-          onclick={() => void handleCreateToken()}
-        >
-          {$t(creatingToken ? '正在生成…' : '生成令牌')}
-        </button>
+      <div class="project-form-field invite-token-field-uses">
+        <label class="composer-label" for="invite-token-max-uses-input">{$t('最大使用次数')}</label>
+        <input
+          id="invite-token-max-uses-input"
+          type="number"
+          min="1"
+          step="1"
+          class="settings-text-input"
+          aria-label={$t('最大使用次数')}
+          placeholder={$t('不限次数')}
+          bind:value={maxUsesDraft}
+        />
       </div>
-    </div>
 
-    {#if latestCreatedToken}
-      <div
-        class="created-invite-banner"
-        role="status"
-        data-slot="created-invite-raw-token"
+      <div class="project-form-field invite-token-field-expiry">
+        <label class="composer-label" for="invite-token-expires-input">{$t('有效期（小时）')}</label>
+        <input
+          id="invite-token-expires-input"
+          type="number"
+          min="1"
+          step="1"
+          class="settings-text-input"
+          aria-label={$t('有效期（小时）')}
+          placeholder={$t('永不过期')}
+          bind:value={expiresHoursDraft}
+        />
+      </div>
+
+      <button
+        type="button"
+        class="primary secondary-action invite-token-create"
+        data-action="create-invite-token"
+        disabled={busy || creatingToken}
+        onclick={() => void handleCreateToken()}
       >
-        <div class="created-invite-copy">
-          <span class="created-invite-hint">{$t('明文令牌仅显示一次，请立即复制保存：')}</span>
-          <code class="created-invite-code">{latestCreatedToken.raw_token}</code>
-        </div>
-        <div class="created-invite-actions">
-          <button
-            type="button"
-            class="secondary-action"
-            data-action="copy-invite-token"
-            onclick={() => void handleCopyRawToken()}
-          >
-            {$t('复制令牌')}
-          </button>
-          {#if latestTokenStillValid}
-            <button
-              type="button"
-              class="secondary-action"
-              data-action="preview-skill-with-token"
-              disabled={loadingSkill}
-              onclick={() => void handlePreviewWithCreatedToken()}
-            >
-              {$t('用此令牌预览 SKILL.md')}
-            </button>
-          {/if}
-        </div>
-      </div>
-    {/if}
+        {$t(creatingToken ? '正在生成…' : '生成令牌')}
+      </button>
+    </div>
 
     {#if !onboardingLoaded && onboardingLoadError}
       <p class="project-list-empty" data-slot="invite-token-list">
@@ -700,67 +874,148 @@
         {$t('暂无邀请令牌')}
       </p>
     {:else}
-      <ul class="invite-token-list" data-slot="invite-token-list">
-        {#each inviteTokens as token (token.id)}
-          {@const statusInfo = (() => {
-            const _lang = $locale;
-            if (revokedTokenIds.has(token.id) && token.revoked_at === null) {
-              return { kind: 'revoked' as const, label: $t('已作废') };
-            }
-            return formatInviteTokenStatus(token);
-          })()}
-          <li
-            class="invite-token-item"
-            data-invite-token-id={token.id}
-            data-invite-token-status={statusInfo.kind}
-          >
-            <div class="invite-token-main">
-              <div class="invite-token-title-row">
-                <code class="invite-token-prefix">{token.token_prefix}…</code>
+      <!-- 单层列表：宽容器对齐列，窄容器自动双行换行，不产生横向滚动。 -->
+      <div class="invite-token-table">
+        <div class="invite-token-head" aria-hidden="true">
+          <span>{$t('令牌')}</span>
+          <span>{$t('状态')}</span>
+          <span>{$t('使用次数')}</span>
+          <span>{$t('有效期')}</span>
+          <span class="invite-token-head-action"></span>
+        </div>
+        <ul class="invite-token-list" data-slot="invite-token-list">
+          {#each inviteTokens as token (token.id)}
+            {@const statusInfo = (() => {
+              const _lang = $locale;
+              if (revokedTokenIds.has(token.id) && token.revoked_at === null) {
+                return { kind: 'revoked' as const, label: $t('已作废') };
+              }
+              return formatInviteTokenStatus(token);
+            })()}
+            {@const isMenuOpen = openMenuTokenId === token.id}
+            <li
+              class="invite-token-row"
+              data-invite-token-id={token.id}
+              data-invite-token-status={statusInfo.kind}
+            >
+              <div class="invite-token-identity">
                 {#if token.label}
-                  <span class="invite-token-label">{token.label}</span>
+                  <span class="invite-token-label" title={token.label}>{token.label}</span>
+                  <code class="invite-token-prefix">{token.token_prefix}…</code>
+                {:else}
+                  <code class="invite-token-prefix invite-token-prefix-primary">
+                    {token.token_prefix}…
+                  </code>
                 {/if}
-                <span
-                  class="status-pill"
-                  data-token-status={statusInfo.kind}
-                >
+              </div>
+              <div class="invite-token-status-cell">
+                <span class="status-pill" data-token-status={statusInfo.kind}>
                   {statusInfo.label}
                 </span>
               </div>
-              <div class="invite-token-meta">
-                <span>
-                  {token.max_uses !== null
-                    ? $t('已使用 {used} / {max} 次', {
-                        used: token.use_count,
-                        max: token.max_uses,
-                      })
-                    : $t('已使用 {used} 次', { used: token.use_count })}
-                </span>
-                <span>
-                  {token.expires_at
-                    ? $t('过期于 {time}', { time: formatTimestamp(token.expires_at) })
-                    : $t('永不过期')}
-                </span>
-              </div>
-            </div>
-
-            {#if statusInfo.kind === 'active'}
-              <div class="project-item-actions">
+              <span class="invite-token-usage">
+                {token.max_uses !== null
+                  ? $t('已使用 {used} / {max} 次', {
+                      used: token.use_count,
+                      max: token.max_uses,
+                    })
+                  : $t('已使用 {used} 次', { used: token.use_count })}
+              </span>
+              <span class="invite-token-expiry">
+                {token.expires_at
+                  ? $t('过期于 {time}', { time: formatTimestamp(token.expires_at) })
+                  : $t('永不过期')}
+              </span>
+              <div class="invite-token-actions">
                 <button
                   type="button"
-                  class="secondary-action danger-text"
-                  data-action="revoke-invite-token"
+                  class="icon-button invite-token-menu-trigger"
+                  id={`invite-token-menu-trigger-${token.id}`}
+                  data-action="toggle-invite-token-menu"
+                  aria-label={`${$t('更多操作')} ${token.label || token.token_prefix}`}
+                  aria-haspopup="menu"
+                  aria-expanded={isMenuOpen}
+                  aria-controls={`invite-token-menu-${token.id}`}
                   disabled={busy}
-                  aria-label={`${$t('作废邀请令牌')} ${token.label || token.token_prefix}`}
-                  onclick={() => void handleRevokeToken(token.id)}
+                  onclick={event => toggleTokenMenu(token.id, event)}
+                  onkeydown={event => handleMenuTriggerKeydown(event, token.id)}
                 >
-                  {$t('作废')}
+                  <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+                    <circle cx="3.25" cy="8" r="1.25" />
+                    <circle cx="8" cy="8" r="1.25" />
+                    <circle cx="12.75" cy="8" r="1.25" />
+                  </svg>
                 </button>
+                <div
+                  id={`invite-token-menu-${token.id}`}
+                  class="invite-token-menu dropdown"
+                  role={confirmingDeleteTokenId === token.id ? 'alertdialog' : 'menu'}
+                  aria-labelledby={`invite-token-menu-trigger-${token.id}`}
+                  popover="manual"
+                  hidden={!isMenuOpen}
+                  style="position: fixed; margin: 0; bottom: auto; right: auto; box-sizing: border-box;"
+                  onkeydown={event => handleTokenMenuKeydown(event, token.id)}
+                >
+                  {#if confirmingDeleteTokenId === token.id}
+                    <div class="invite-token-menu-confirm">
+                      <p class="invite-token-menu-confirm-text">{$t('确认永久删除该令牌？')}</p>
+                      <div class="invite-token-menu-confirm-actions">
+                        <button
+                          type="button"
+                          class="secondary-action"
+                          data-action="cancel-delete-invite-token"
+                          disabled={busy}
+                          onclick={() => closeTokenMenu({ restoreFocus: true })}
+                        >
+                          {$t('取消')}
+                        </button>
+                        <button
+                          type="button"
+                          class="secondary-action danger-text"
+                          data-action="confirm-delete-invite-token"
+                          disabled={busy}
+                          aria-label={`${$t('确认删除')} ${token.label || token.token_prefix}`}
+                          onclick={() => void handleDeleteToken(token.id)}
+                        >
+                          {$t(busy ? '正在删除…' : '确认删除')}
+                        </button>
+                      </div>
+                    </div>
+                  {:else}
+                    {#if statusInfo.kind === 'active'}
+                      <button
+                        type="button"
+                        class="invite-token-menu-item"
+                        role="menuitem"
+                        data-action="revoke-invite-token"
+                        disabled={busy}
+                        aria-label={`${$t('作废邀请令牌')} ${token.label || token.token_prefix}`}
+                        onpointerdown={event => event.preventDefault()}
+                        onclick={() => void handleRevokeToken(token.id)}
+                      >
+                        {$t('作废')}
+                      </button>
+                      <hr class="invite-token-menu-sep" />
+                    {/if}
+                    <button
+                      type="button"
+                      class="invite-token-menu-item danger-text"
+                      role="menuitem"
+                      data-action="delete-invite-token"
+                      disabled={busy}
+                      aria-label={`${$t('删除邀请令牌')} ${token.label || token.token_prefix}`}
+                      onpointerdown={event => event.preventDefault()}
+                      onclick={() => void openDeleteConfirmInMenu(token.id)}
+                    >
+                      {$t('删除')}
+                    </button>
+                  {/if}
+                </div>
               </div>
-            {/if}
-          </li>
-        {/each}
-      </ul>
+            </li>
+          {/each}
+        </ul>
+      </div>
     {/if}
   </div>
 
@@ -842,4 +1097,120 @@
       <pre class="skill-md-preview" data-slot="skill-md-preview"><code>{freshSkillDoc.content}</code></pre>
     {/if}
   </div>
+
+  {#if createdTokenDialogOpen && latestCreatedToken}
+    <dialog
+      bind:this={createdTokenDialog}
+      class="modal-dialog created-token-dialog"
+      aria-labelledby="created-invite-dialog-title"
+      closedby="any"
+      data-slot="created-invite-raw-token"
+      onpointerdown={handleCreatedDialogPointerDown}
+      onpointerup={handleCreatedDialogPointerUp}
+      oncancel={event => {
+        event.preventDefault();
+        closeCreatedTokenDialog();
+      }}
+      onclose={() => {
+        createdTokenDialogOpen = false;
+      }}
+    >
+      <div class="modal-header created-token-header">
+        <h2 id="created-invite-dialog-title" class="modal-title">{$t('邀请令牌已生成')}</h2>
+        <button
+          type="button"
+          class="icon-button"
+          data-action="close-created-invite-dialog"
+          aria-label={$t('关闭对话框')}
+          onclick={closeCreatedTokenDialog}
+        >
+          <svg
+            width="14"
+            height="14"
+            viewBox="0 0 16 16"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.6"
+            stroke-linecap="round"
+            aria-hidden="true"
+          >
+            <path d="M4 4l8 8M12 4l-8 8" />
+          </svg>
+        </button>
+      </div>
+
+      <p class="created-token-desc">{$t('明文令牌仅显示一次，请立即复制保存。')}</p>
+
+      <div class="created-token-box">
+        <code class="created-token-code">{latestCreatedToken.raw_token}</code>
+      </div>
+
+      <dl class="created-token-meta">
+        {#if latestCreatedToken.token.label}
+          <div class="created-token-meta-item">
+            <dt>{$t('令牌备注')}</dt>
+            <dd>{latestCreatedToken.token.label}</dd>
+          </div>
+        {/if}
+        <div class="created-token-meta-item">
+          <dt>{$t('使用上限')}</dt>
+          <dd>
+            {latestCreatedToken.token.max_uses !== null
+              ? $t('{max} 次', { max: latestCreatedToken.token.max_uses })
+              : $t('不限次数')}
+          </dd>
+        </div>
+        <div class="created-token-meta-item">
+          <dt>{$t('有效期')}</dt>
+          <dd>
+            {latestCreatedToken.token.expires_at
+              ? formatTimestamp(latestCreatedToken.token.expires_at)
+              : $t('永不过期')}
+          </dd>
+        </div>
+      </dl>
+
+      {#if panelError}
+        <p class="dialog-error settings-error" role="alert" data-status="onboarding-error">
+          {panelError}
+        </p>
+      {/if}
+
+      <div class="modal-actions created-token-actions">
+        <button
+          type="button"
+          class="secondary-action"
+          data-action="dismiss-created-invite-dialog"
+          onclick={closeCreatedTokenDialog}
+        >
+          {$t('完成')}
+        </button>
+        <button
+          type="button"
+          class="primary secondary-action"
+          data-action="copy-invite-token"
+          onclick={() => void handleCopyRawToken()}
+        >
+          {#if createdTokenCopied}
+            <svg
+              width="14"
+              height="14"
+              viewBox="0 0 16 16"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.8"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M3.5 8.5 6.5 11.5 12.5 4.5" />
+            </svg>
+            {$t('已复制令牌')}
+          {:else}
+            {$t('复制令牌')}
+          {/if}
+        </button>
+      </div>
+    </dialog>
+  {/if}
 </div>
