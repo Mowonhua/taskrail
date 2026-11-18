@@ -313,7 +313,7 @@ impl Repository {
             return Err(ApiError::new(
                 StatusCode::NOT_FOUND,
                 "BOUNTY_NOT_FOUND",
-                "悬赏不存在",
+                "任务不存在",
             ));
         }
         dependencies::redact_detail(&tx, &mut detail, agent_id)?;

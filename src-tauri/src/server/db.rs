@@ -1,4 +1,4 @@
-//! 文件职责：SQLite 初始化、项目存储与悬赏状态机；所有写入由仓储维护不变量。
+//! 文件职责：SQLite 初始化、项目存储与任务状态机；所有写入由仓储维护不变量。
 use super::{
     error::{ApiError, Result},
     models::*,
@@ -130,7 +130,7 @@ impl Repository {
             if referenced {
                 return Err(ApiError::conflict(
                     "PROJECT_HAS_BOUNTIES",
-                    "项目已有悬赏，不能删除",
+                    "项目已有任务，不能删除",
                 ));
             }
             tx.execute("DELETE FROM projects WHERE id=?1", [id])?;
@@ -167,7 +167,7 @@ impl Repository {
         })
     }
 
-    /// 函数职责：以认证 Agent 身份提交悬赏，按目标项目当前策略决定公开或待审。
+    /// 函数职责：以认证 Agent 身份提交任务，按目标项目当前策略决定公开或待审。
     /// 输出说明：身份复核、策略读取、创建事件与 OPEN 分发原子提交；DRAFT 不写入任何收件箱。
     /// 实现思路：先取得写锁再复核身份和策略，防止停用或策略切换穿插在校验与写入之间。
     pub fn agent_create_bounty(&self, agent_id: &str, input: AgentCreateBounty) -> Result<Bounty> {
@@ -181,7 +181,7 @@ impl Repository {
             let agent = agents::active_agent(tx, agent_id)?;
             let project = find_project(tx, &input.project_id)?;
             if project.archived {
-                return Err(ApiError::conflict("PROJECT_ARCHIVED", "归档项目不能创建或发布悬赏"));
+                return Err(ApiError::conflict("PROJECT_ARCHIVED", "归档项目不能创建或发布任务"));
             }
             let id = Uuid::new_v4().to_string();
             let timestamp = now();
@@ -215,7 +215,7 @@ impl Repository {
         list_bounties_on(&tx, filter)
     }
 
-    /// 函数职责：在同一读快照返回悬赏、关系摘要、历史和评论。
+    /// 函数职责：在同一读快照返回任务、关系摘要、历史和评论。
     pub fn get_bounty_detail(&self, id: &str) -> Result<BountyDetail> {
         let mut conn = self.connect()?;
         let tx = conn.transaction()?;
@@ -315,7 +315,7 @@ fn invalid_transition() -> ApiError {
     ApiError::conflict("INVALID_TRANSITION", "当前状态不允许此操作")
 }
 fn already_claimed() -> ApiError {
-    ApiError::conflict("BOUNTY_ALREADY_CLAIMED", "悬赏已被接取，不能撤回或重复接取")
+    ApiError::conflict("BOUNTY_ALREADY_CLAIMED", "任务已被接取，不能撤回或重复接取")
 }
 
 fn validate_project(name: &str, icon: Option<&str>) -> Result<()> {
@@ -367,7 +367,7 @@ fn validate_bounty(
     agent: Option<&str>,
 ) -> Result<()> {
     if title.trim().is_empty() {
-        return Err(ApiError::invalid("悬赏标题不能为空"));
+        return Err(ApiError::invalid("任务标题不能为空"));
     }
     let valid = match mode {
         AssigneeMode::Any => min.is_none() && agent.is_none(),
@@ -384,7 +384,7 @@ fn active_project(conn: &Connection, id: &str) -> Result<()> {
     if find_project(conn, id)?.archived {
         return Err(ApiError::conflict(
             "PROJECT_ARCHIVED",
-            "归档项目不能创建或发布悬赏",
+            "归档项目不能创建或发布任务",
         ));
     }
     Ok(())
@@ -407,7 +407,7 @@ fn find_bounty(conn: &Connection, id: &str) -> Result<Bounty> {
             bounty_row,
         )
         .optional()?
-        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "BOUNTY_NOT_FOUND", "悬赏不存在"))?;
+        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "BOUNTY_NOT_FOUND", "任务不存在"))?;
     dependencies::hydrate(conn, &mut bounty)?;
     Ok(bounty)
 }

@@ -155,7 +155,7 @@ describe('HttpBountyClient', () => {
     expect(calls[4].headers.Authorization).toBe('Bearer admin-secret');
   });
 
-  it('正确发送项目与悬赏创建、更新和状态转换请求', async () => {
+  it('正确发送项目与任务创建、更新和状态转换请求', async () => {
     const calls: Array<{ url: string; method?: string; headers: Record<string, string>; body?: string }> = [];
     const fetchMock: typeof fetch = async (input, init) => {
       calls.push({
@@ -204,8 +204,8 @@ describe('HttpBountyClient', () => {
   it('将服务错误信封解析为 ServiceApiError（401、409 抢单冲突与项目删除保护）', async () => {
     const scenarios = [
       { status: 401, code: 'UNAUTHORIZED', message: '需要有效的管理员 Bearer token', call: (c: HttpBountyClient) => c.adminStatus() },
-      { status: 409, code: 'BOUNTY_ALREADY_CLAIMED', message: '悬赏已被接取，不能撤回或重复接取', call: (c: HttpBountyClient) => c.withdrawBounty('b1') },
-      { status: 409, code: 'PROJECT_HAS_BOUNTIES', message: '项目已有悬赏，不能删除', call: (c: HttpBountyClient) => c.deleteProject('p1') },
+      { status: 409, code: 'BOUNTY_ALREADY_CLAIMED', message: '任务已被接取，不能撤回或重复接取', call: (c: HttpBountyClient) => c.withdrawBounty('b1') },
+      { status: 409, code: 'PROJECT_HAS_BOUNTIES', message: '项目已有任务，不能删除', call: (c: HttpBountyClient) => c.deleteProject('p1') },
     ];
 
     for (const scenario of scenarios) {
@@ -224,11 +224,11 @@ describe('HttpBountyClient', () => {
 });
 
 describe('createMemoryBountyClient', () => {
-  it('支持项目增删改、归档拦截与关联悬赏删除保护', async () => {
+  it('支持项目增删改、归档拦截与关联任务删除保护', async () => {
     const client = createMemoryBountyClient();
 
     const project = await client.createProject({
-      name: '核心悬赏项目',
+      name: '核心项目',
       icon: 'lucide:train-front',
       description: '服务内核',
       workspace_path: 'D:/Workspace/taskrail',
@@ -397,7 +397,7 @@ describe('createMemoryBountyClient', () => {
     ]);
   });
 
-  it('校验种子悬赏数据与 CANCELLED/WAITING_INFO 状态转换限制', async () => {
+  it('校验种子任务数据与 CANCELLED/WAITING_INFO 状态转换限制', async () => {
     const seedProject: BountyProject = {
       id: 'p1',
       name: 'P1',
@@ -797,7 +797,7 @@ describe('createMemoryBountyClient (Issue 03 Agent 准入、订阅与隔离)', (
       project_ids: [pSub.id],
     });
 
-    // 1. 订阅项目内的公开悬赏（可见）
+    // 1. 订阅项目内的公开任务（可见）
     const openSub = await client.createBounty({
       project_id: pSub.id,
       title: 'Public in subscribed',
@@ -814,7 +814,7 @@ describe('createMemoryBountyClient (Issue 03 Agent 准入、订阅与隔离)', (
       assignee_agent_id: a1.id,
       status: 'DRAFT',
     });
-    // 3. 订阅项目内指派给其他 Agent 的公开悬赏（不可见）
+    // 3. 订阅项目内指派给其他 Agent 的公开任务（不可见）
     const openOtherSpecific = await client.createBounty({
       project_id: pSub.id,
       title: 'Assigned to agent-2',
@@ -823,7 +823,7 @@ describe('createMemoryBountyClient (Issue 03 Agent 准入、订阅与隔离)', (
       assignee_agent_id: a2.id,
       status: 'OPEN',
     });
-    // 4. 未订阅项目内的公开悬赏（不可见）
+    // 4. 未订阅项目内的公开任务（不可见）
     const openUnsub = await client.createBounty({
       project_id: pOther.id,
       title: 'Public in unsubscribed',
@@ -831,7 +831,7 @@ describe('createMemoryBountyClient (Issue 03 Agent 准入、订阅与隔离)', (
       assignee_mode: 'any',
       status: 'OPEN',
     });
-    // 5. 未订阅项目内指派给自己的公开悬赏（可见）
+    // 5. 未订阅项目内指派给自己的公开任务（可见）
     const openUnsubSelf = await client.createBounty({
       project_id: pOther.id,
       title: 'Assigned to self in unsubscribed',
@@ -2153,7 +2153,7 @@ describe('Issue 06: 租约令牌、并发抢单、指派婉拒、超时回收与
     expect(formatEventActor('system')).toBe('System scheduler');
     expect(formatEventLabel('completed')).toBe('Completed delivery');
     expect(formatServiceError(new ServiceApiError('TIER_INSUFFICIENT', 403, 'raw'))).toBe(
-      "This Agent's tier does not meet the minimum requirement for this bounty.",
+      "This Agent's tier does not meet the minimum requirement for this task.",
     );
 
     for (const sample of [

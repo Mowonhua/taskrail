@@ -1,6 +1,6 @@
 <script lang="ts">
   /**
-   * 文件职责：在设置页面集中管理悬赏项目（创建、编辑、图标配置、工作目录选择、默认验收规范、归档恢复与无引用删除）。
+   * 文件职责：在设置页面集中管理任务所属项目（创建、编辑、图标配置、工作目录选择、默认验收规范、归档恢复与无引用删除）。
    * 定义范围：列表展示、显示已归档开关、表单交互与 PROJECT_HAS_BOUNTIES 错误提示。
    */
   import { open as openDialog } from '@tauri-apps/plugin-dialog';
@@ -356,7 +356,7 @@
           class="composer-textarea"
           rows="3"
           aria-label={$t('默认验收规范')}
-          placeholder={$t('新建该项目下的悬赏时自动预填的验收条件（支持 Markdown 与 KaTeX）')}
+          placeholder={$t('新建该项目下的任务时自动预填的验收条件（支持 Markdown 与 KaTeX）')}
           bind:value={formDefaultCriteria}
         ></textarea>
       </div>
@@ -402,8 +402,8 @@
               hidden={!policyHelpOpen}
               style="position: fixed; margin: 0; bottom: auto; right: auto; box-sizing: border-box;"
             >
-              <p>{$t('直接公开：Agent 提交的任务立即成为待接单并推送通知')}</p>
-              <p>{$t('先入草稿待审：Agent 提交的任务先进入待我处理草稿箱等待人工确认')}</p>
+              <p>{$t('直接公开：Agent 提交的任务立即进入待接取并推送通知')}</p>
+              <p>{$t('先入草稿待审：Agent 提交的任务先进入待处理草稿箱等待人工确认')}</p>
             </div>
           </span>
         </div>
@@ -486,7 +486,7 @@
 
   {#if projects.length === 0}
     <p class="project-list-empty" data-slot="project-list-empty">
-      {$t('暂无项目，点击「+ 新建项目」创建第一个悬赏项目。')}
+      {$t('暂无项目，点击「+ 新建项目」创建第一个项目。')}
     </p>
   {:else}
     <ul class="project-management-list" data-slot="project-list">

@@ -1,5 +1,5 @@
 /**
- * 文件职责：提供悬赏服务客户端端口、HTTP 实现、嵌入式连接信息读取与内存模拟实现。
+ * 文件职责：提供任务服务客户端端口、HTTP 实现、嵌入式连接信息读取与内存模拟实现。
  * 约束条件：HTTP 客户端不向 /api/v1/health 发送管理员鉴权头；内存实现严格对齐 Rust 仓储状态机与错误码。
  */
 import { invoke } from '@tauri-apps/api/core';
@@ -1207,7 +1207,7 @@ AgentEvent 字段为 event_id、event_type、bounty_id、project_id、created_at
 回调 POST 正文是 AgentEvent JSON，Content-Type: application/json。请求头为 X-Taskrail-Event、X-Taskrail-Event-Id、X-Taskrail-Timestamp（Unix 秒）和 X-Taskrail-Signature。签名格式：sha256=<hex(HMAC-SHA256(webhook_secret, timestamp + "." + 原始正文))>。按原始字节验签，不要先解析再序列化；使用恒定时间比较签名，检查时间戳新鲜度，并按 event_id 去重。
 Webhook 按单 Agent 的 event_id 顺序投递：前序事件退避重试期间暂缓该 Agent 后续事件，不同 Agent 的队列互不阻塞。仅 2xx 确认回调成功；网络错误和其他状态码最多尝试五次，失败间隔依次为 100/200/400/800ms，单次超时 5 秒。不跟随重定向。前序事件五次尝试耗尽转为 failed 后继续投递后续事件；failed 事件仍保存在 Inbox，必须按上述累计 Ack 契约补拉并处理，不能直接确认后续回调而跳过前序事件。recent_failed_count 统计最近 24 小时创建且仍有 last_error 的事件，包含重试中的失败。
 
-停用凭证返回 403 AGENT_DISABLED，吊销凭证返回 401 AGENT_REVOKED，未知凭证返回 401 UNAUTHORIZED。Agent 凭证不能访问管理员项目、悬赏或名录接口。
+停用凭证返回 403 AGENT_DISABLED，吊销凭证返回 401 AGENT_REVOKED，未知凭证返回 401 UNAUTHORIZED。Agent 凭证不能访问管理员项目、任务或名录接口。
 错误格式为 {"error":{"code":"ERROR_CODE","message":"错误说明"}}。注册还可能返回 401 INVITE_TOKEN_REQUIRED、401 INVITE_TOKEN_INVALID、409 AGENT_NAME_TAKEN 或 400 VALIDATION_ERROR。JSON 输入拒绝未知字段。
 `;
 }
@@ -1232,7 +1232,7 @@ function validateBountyFields(
   agentId: string | null,
 ): void {
   if (typeof title !== 'string' || !title.trim()) {
-    throw new ServiceApiError('VALIDATION_ERROR', 400, '悬赏标题不能为空');
+    throw new ServiceApiError('VALIDATION_ERROR', 400, '任务标题不能为空');
   }
   if (!VALID_DIFFICULTIES.has(difficulty)) {
     throw new ServiceApiError('VALIDATION_ERROR', 400, 'difficulty 必须为 C、B、A 或 S');
@@ -1809,7 +1809,7 @@ export function createMemoryBountyClient(seed?: {
       if (agentId !== null) {
         const agent = agentsById.get(agentId);
         if (!agent || !isBountyVisibleToAgent(agent.summary, dep)) {
-          throw new ServiceApiError('BOUNTY_NOT_FOUND', 404, '悬赏不存在');
+          throw new ServiceApiError('BOUNTY_NOT_FOUND', 404, '任务不存在');
         }
       }
       if (dep.status === 'CANCELLED') {
@@ -1890,7 +1890,7 @@ export function createMemoryBountyClient(seed?: {
   function requireActiveProject(id: string): BountyProject {
     const project = requireProject(id);
     if (project.archived) {
-      throw new ServiceApiError('PROJECT_ARCHIVED', 409, '归档项目不能创建、编辑或发布悬赏');
+      throw new ServiceApiError('PROJECT_ARCHIVED', 409, '归档项目不能创建、编辑或发布任务');
     }
     return project;
   }
@@ -1898,7 +1898,7 @@ export function createMemoryBountyClient(seed?: {
   function requireBounty(id: string): BountyTask {
     const bounty = bounties.get(id);
     if (!bounty) {
-      throw new ServiceApiError('BOUNTY_NOT_FOUND', 404, '悬赏不存在');
+      throw new ServiceApiError('BOUNTY_NOT_FOUND', 404, '任务不存在');
     }
     return bounty;
   }
@@ -1906,7 +1906,7 @@ export function createMemoryBountyClient(seed?: {
   function requirePublishedBounty(id: string): BountyTask {
     const bounty = requireBounty(id);
     if (bounty.status === 'DRAFT' || bounty.published_at === null) {
-      throw new ServiceApiError('BOUNTY_NOT_FOUND', 404, '悬赏不存在');
+      throw new ServiceApiError('BOUNTY_NOT_FOUND', 404, '任务不存在');
     }
     return bounty;
   }
@@ -2789,7 +2789,7 @@ export function createMemoryBountyClient(seed?: {
       requireProject(id);
       for (const bounty of bounties.values()) {
         if (bounty.project_id === id) {
-          throw new ServiceApiError('PROJECT_HAS_BOUNTIES', 409, '项目已有悬赏，不能删除');
+          throw new ServiceApiError('PROJECT_HAS_BOUNTIES', 409, '项目已有任务，不能删除');
         }
       }
       projects.delete(id);
@@ -3080,7 +3080,7 @@ export function createMemoryBountyClient(seed?: {
     async withdrawBounty(id: string): Promise<BountyTask> {
       const existing = requireBounty(id);
       if (existing.status === 'IN_PROGRESS' || existing.lease_agent_id !== null) {
-        throw new ServiceApiError('BOUNTY_ALREADY_CLAIMED', 409, '悬赏已被接取，不能撤回或重复接取');
+        throw new ServiceApiError('BOUNTY_ALREADY_CLAIMED', 409, '任务已被接取，不能撤回或重复接取');
       }
       if (existing.status !== 'OPEN') {
         throw new ServiceApiError('INVALID_TRANSITION', 409, '当前状态不允许此操作');
@@ -3702,7 +3702,7 @@ export function createMemoryBountyClient(seed?: {
 
       const existing = requireBounty(id);
       if (existing.draft_collaborator_agent_id !== entry.summary.id) {
-        throw new ServiceApiError('BOUNTY_NOT_FOUND', 404, '悬赏不存在');
+        throw new ServiceApiError('BOUNTY_NOT_FOUND', 404, '任务不存在');
       }
       if (existing.status !== 'DRAFT') {
         throw new ServiceApiError('INVALID_TRANSITION', 409, '当前状态不允许此操作');
@@ -3717,7 +3717,7 @@ export function createMemoryBountyClient(seed?: {
           ? record.acceptance_criteria
           : existing.acceptance_criteria;
       if (!nextTitle.trim()) {
-        throw new ServiceApiError('VALIDATION_ERROR', 400, '悬赏标题不能为空');
+        throw new ServiceApiError('VALIDATION_ERROR', 400, '任务标题不能为空');
       }
 
       return withTransaction(() => {
@@ -3752,7 +3752,7 @@ export function createMemoryBountyClient(seed?: {
       }
       const existing = requireBounty(id);
       if (existing.draft_collaborator_agent_id !== entry.summary.id) {
-        throw new ServiceApiError('BOUNTY_NOT_FOUND', 404, '悬赏不存在');
+        throw new ServiceApiError('BOUNTY_NOT_FOUND', 404, '任务不存在');
       }
       if (existing.status !== 'DRAFT') {
         throw new ServiceApiError('INVALID_TRANSITION', 409, '当前状态不允许此操作');
@@ -3973,7 +3973,7 @@ export function createMemoryBountyClient(seed?: {
       const entry = authenticateAgent(apiKey);
       const bounty = requireBounty(id);
       if (!isBountyVisibleToAgent(entry.summary, bounty)) {
-        throw new ServiceApiError('BOUNTY_NOT_FOUND', 404, '悬赏不存在');
+        throw new ServiceApiError('BOUNTY_NOT_FOUND', 404, '任务不存在');
       }
       const events = [...(eventsByBounty.get(id) ?? [])].sort((a, b) => a.id - b.id);
       const blocks = relatedSummaries(id, false).filter(summary => {
@@ -3997,7 +3997,7 @@ export function createMemoryBountyClient(seed?: {
       const entry = authenticateAgent(apiKey);
       const bounty = requireBounty(id);
       if (!isBountyVisibleToAgent(entry.summary, bounty)) {
-        throw new ServiceApiError('BOUNTY_NOT_FOUND', 404, '悬赏不存在');
+        throw new ServiceApiError('BOUNTY_NOT_FOUND', 404, '任务不存在');
       }
       return listHydratedComments(id);
     },
@@ -4014,7 +4014,7 @@ export function createMemoryBountyClient(seed?: {
       }
       const bounty = requireBounty(id);
       if (!isBountyVisibleToAgent(entry.summary, bounty)) {
-        throw new ServiceApiError('BOUNTY_NOT_FOUND', 404, '悬赏不存在');
+        throw new ServiceApiError('BOUNTY_NOT_FOUND', 404, '任务不存在');
       }
       return addComment(bounty, entry.summary.id, entry.summary.name, record.body);
     },
@@ -4023,7 +4023,7 @@ export function createMemoryBountyClient(seed?: {
       const entry = authenticateAgent(apiKey);
       const existing = requirePublishedBounty(id);
       if (existing.status === 'IN_PROGRESS' || existing.lease_agent_id !== null) {
-        throw new ServiceApiError('BOUNTY_ALREADY_CLAIMED', 409, '悬赏已被接取，不能撤回或重复接取');
+        throw new ServiceApiError('BOUNTY_ALREADY_CLAIMED', 409, '任务已被接取，不能撤回或重复接取');
       }
       if (existing.status !== 'OPEN') {
         throw new ServiceApiError('INVALID_TRANSITION', 409, '当前状态不允许此操作');

@@ -1,6 +1,6 @@
-# 悬赏服务 API
+# 任务服务 API
 
-桌面和 `taskrail-server` 使用同一 Rust 服务内核及 SQLite 数据库。服务提供管理员项目与悬赏管理、Agent 注册、凭证管控、项目订阅和任务读取接口。
+桌面和 `taskrail-server` 使用同一 Rust 服务内核及 SQLite 数据库。服务提供管理员项目与任务管理、Agent 注册、凭证管控、项目订阅和任务读取接口。
 
 ## 仲裁配置与验收
 
@@ -125,7 +125,7 @@ cargo run --manifest-path src-tauri/Cargo.toml --bin taskrail-server -- --bind 1
 | `POST /api/v1/agent/bounties/{id}/abandon` | `{"lease_id":i64,"reason":string|null}`，reason 可选 | 200 `Bounty` |
 | `POST /api/v1/agent/bounties/{id}/complete` | `{"lease_id":i64,"completion_note":string|null,"completion_cost":number|null}`，后两项可选 | 200 `Bounty` |
 
-`mode` 为 `embedded` 或 `standalone`。列表直接返回数组，无分页信封。项目按 `created_at,id` 升序；悬赏按 `created_at` 降序、`id` 升序；事件按递增 `id` 排序。`q` 为 id、标题、详情、验收条件的字面子串，ASCII 大小写不敏感；`%`、`_` 不作为通配符。草稿默认从列表排除，即使传 `status=DRAFT` 也须同时传 `include_drafts=true`。管理员持有凭证可直接读取草稿详情。
+`mode` 为 `embedded` 或 `standalone`。列表直接返回数组，无分页信封。项目按 `created_at,id` 升序；任务按 `created_at` 降序、`id` 升序；事件按递增 `id` 排序。`q` 为 id、标题、详情、验收条件的字面子串，ASCII 大小写不敏感；`%`、`_` 不作为通配符。草稿默认从列表排除，即使传 `status=DRAFT` 也须同时传 `include_drafts=true`。管理员持有凭证可直接读取草稿详情。
 
 ## 项目 JSON
 
@@ -133,11 +133,11 @@ cargo run --manifest-path src-tauri/Cargo.toml --bin taskrail-server -- --bind 1
 
 PATCH 可修改上述字段及 `archived`（布尔值）。省略字段保留当前值；`icon:null` 清空图标，其余字段传 null 保留当前值。空白名称被拒绝。图标接受单字素 `emoji:🚆` 或合法名称 `lucide:train-front`；Lucide 名称只含小写 ASCII 字母、数字及分隔非空片段的连字符，最多 64 字符；表情最多 64 个 UTF-16 单元，不能含控制字符，须含可见字符。
 
-`Project` 返回以上全部字段，另含 `id`、`archived`、`created_at`、`updated_at`。归档项目可读取和恢复，不能创建、编辑或发布悬赏。硬删除仅允许完全没有悬赏引用的项目，已取消悬赏也算引用。
+`Project` 返回以上全部字段，另含 `id`、`archived`、`created_at`、`updated_at`。归档项目可读取和恢复，不能创建、编辑或发布任务。硬删除仅允许完全没有任务引用的项目，已取消任务也算引用。
 
 数据库将 `arbitrator_chain` 存入 `arbitrator_chain_json`；API 返回解析后的数组。
 
-## Agent 提交悬赏
+## Agent 提交任务
 
 `POST /api/v1/agent/bounties` 使用 `Authorization: Bearer <AGENT_API_KEY>`，管理员凭证不能调用。成功返回 `201 Bounty`。
 
@@ -156,7 +156,7 @@ PATCH 可修改上述字段及 `archived`（布尔值）。省略字段保留当
 
 无密钥、错误密钥或管理员密钥返回 `401 UNAUTHORIZED`；停用返回 `403 AGENT_DISABLED`；吊销返回 `401 AGENT_REVOKED`。目标项目不存在返回 `404 PROJECT_NOT_FOUND`，归档返回 `409 PROJECT_ARCHIVED`。空白标题、字段类型错误或执行者限制组合不一致返回 `400 VALIDATION_ERROR`。
 
-## 悬赏 JSON
+## 任务 JSON
 
 创建示例：
 
@@ -192,7 +192,7 @@ PATCH 只允许修改 `project_id`、`title`、`description`、`acceptance_crite
 
 - `id`：UUID。
 - `created_by_agent_id`：Agent 发布者 ID，人工创建为 null；编辑、发布、撤回、接取或取消均保留原值。
-- `created_by_agent_name`：通过发布者外键关联读取的当前 Agent 名称，人工创建为 null。悬赏响应和事件载荷均不包含 Agent 的 `api_key`、`api_key_hash`、`webhook_secret` 或 `mmr`。
+- `created_by_agent_name`：通过发布者外键关联读取的当前 Agent 名称，人工创建为 null。任务响应和事件载荷均不包含 Agent 的 `api_key`、`api_key_hash`、`webhook_secret` 或 `mmr`。
 - `lease_id`：整数，初始 0，每次成功接取递增。
 - `lease_agent_id`、`lease_expires_at`：可空字符串。
 - `lease_agent_name`、`lease_agent_tier`：关联租约持有者的当前名称与段位，未知身份为 null。
@@ -308,16 +308,16 @@ Agent 任务列表和详情仅显示已发布（`status != DRAFT` 且 `published
 | 403 | `TIER_INSUFFICIENT` | 抢单者未达到最低段位 |
 | 403 | `LEASE_OWNER_MISMATCH` | 当前令牌的持有者不是认证 Agent |
 | 404 | `PROJECT_NOT_FOUND` | 项目不存在 |
-| 404 | `BOUNTY_NOT_FOUND` | 悬赏不存在 |
+| 404 | `BOUNTY_NOT_FOUND` | 任务不存在 |
 | 404 | `AGENT_NOT_FOUND` | 管理操作指定的 Agent 不存在 |
 | 404 | `INVITE_TOKEN_NOT_FOUND` | 作废操作指定的邀请不存在 |
 | 404 | `NOT_FOUND` | 路由不存在 |
 | 405 | `METHOD_NOT_ALLOWED` | 路由不支持该 HTTP 方法 |
-| 409 | `PROJECT_HAS_BOUNTIES` | 删除仍有悬赏引用的项目 |
-| 409 | `PROJECT_ARCHIVED` | 向归档项目创建、编辑、发布悬赏或订阅项目 |
+| 409 | `PROJECT_HAS_BOUNTIES` | 删除仍有任务引用的项目 |
+| 409 | `PROJECT_ARCHIVED` | 向归档项目创建、编辑、发布任务或订阅项目 |
 | 409 | `INVALID_TRANSITION` | 非草稿编辑或不允许的状态转换 |
 | 409 | `AGENT_NAME_TAKEN` | 注册名称已被使用 |
-| 409 | `BOUNTY_ALREADY_CLAIMED` | 悬赏已接取时撤回或重复接取 |
+| 409 | `BOUNTY_ALREADY_CLAIMED` | 任务已接取时撤回或重复接取 |
 | 409 | `STALE_LEASE` | 令牌不匹配、无持有者或租约已到期 |
 | 403 | `ARBITRATOR_CONFLICT` | 唯一活跃仲裁者接取开启仲裁的任务 |
 | 403 | `ARBITRATOR_MISMATCH` | Agent 不是当前裁判或与执行者身份冲突 |
@@ -328,7 +328,7 @@ Agent 任务列表和详情仅显示已发布（`status != DRAFT` 且 `published
 
 `bounties` 包含可空的 `assignment_expires_at`、`completion_cost` 以及默认 0 的 `lease_warned_id`。`agents` 包含默认 0 的 `timeout_count` 和 `abandon_count`，两项计数属于 AgentSummary。`lease_incidents` 保存自增 id、任务外键 bounty_id、Agent 外键 agent_id、lease_id、kind（timeout/abandon）和 created_at；两个外键均级联删除，索引为 `lease_incidents_agent(agent_id,id)`。
 
-`bounties` 包含可空外键 `created_by_agent_id TEXT REFERENCES agents(id)`，并建立索引 `bounties_publisher_agent(created_by_agent_id)`。人类创建的悬赏该字段为 null。发布者存在悬赏引用时不能硬删除。
+`bounties` 包含可空外键 `created_by_agent_id TEXT REFERENCES agents(id)`，并建立索引 `bounties_publisher_agent(created_by_agent_id)`。人类创建的任务该字段为 null。发布者存在任务引用时不能硬删除。
 
 `agents` 包含可空 `webhook_url`、`webhook_secret`、`last_pushed_at` 和 `acked_event_id INTEGER NOT NULL DEFAULT 0`。`webhook_secret` 仅供签名和一次性凭证响应使用，不属于 AgentSummary。
 

@@ -1,6 +1,6 @@
 <script lang="ts">
   /**
-   * 文件职责：承载新建悬赏与编辑草稿（DRAFT）的模态抽屉表单。
+   * 文件职责：承载新建任务与编辑草稿（DRAFT）的模态抽屉表单。
    * 定义范围：项目选择与内联新建项目、标题、Markdown 详情与验收条件（编写/预览切换）、难度、执行者限制与仲裁开关。
    */
   import { onMount, untrack } from 'svelte';
@@ -294,7 +294,7 @@
     }
     const trimmedTitle = title.trim();
     if (!trimmedTitle) {
-      formError = $t('请输入悬赏标题。');
+      formError = $t('请输入任务标题。');
       return null;
     }
     if (assigneeMode === 'specific' && !assigneeAgentId.trim()) {
@@ -368,11 +368,11 @@
     class="modal-dialog bounty-composer-dialog"
     role="dialog"
     aria-modal="true"
-    aria-label={editingBounty ? $t('编辑草稿') : $t('发布悬赏')}
+    aria-label={editingBounty ? $t('编辑草稿') : $t('发布任务')}
     data-dialog="bounty-composer"
   >
     <div class="modal-header">
-      <h2 class="modal-title">{editingBounty ? $t('编辑草稿') : $t('发布悬赏')}</h2>
+      <h2 class="modal-title">{editingBounty ? $t('编辑草稿') : $t('发布任务')}</h2>
       <button
         type="button"
         class="icon-button"
@@ -519,12 +519,12 @@
       </div>
 
       <div class="composer-field">
-        <label class="composer-label" for="bounty-title-input">{$t('悬赏标题')}</label>
+        <label class="composer-label" for="bounty-title-input">{$t('任务标题')}</label>
         <input
           id="bounty-title-input"
           type="text"
           class="settings-text-input"
-          aria-label={$t('悬赏标题')}
+          aria-label={$t('任务标题')}
           placeholder={$t('清晰描述需要完成的目标')}
           bind:value={title}
         />
@@ -830,7 +830,7 @@
         disabled={submitting}
         onclick={() => void handleSubmit('OPEN')}
       >
-        {editingBounty ? $t('发布悬赏') : $t('立即发布')}
+        {editingBounty ? $t('发布任务') : $t('立即发布')}
       </button>
     </div>
   </div>

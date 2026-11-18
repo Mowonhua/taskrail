@@ -5,7 +5,7 @@
 import type { LocalePreference } from './i18n';
 import type { ThemeDefinition, ThemeMode } from './themes';
 
-/** 结构职责：定义悬赏板工作台左侧紧凑导航的四个顶层入口。 */
+/** 结构职责：定义任务板工作台左侧紧凑导航的四个顶层入口。 */
 export type WorkspaceSection = 'bounties' | 'inbox' | 'agents' | 'settings';
 
 /** 结构职责：表示工作台关联的项目元数据与可选图标配置。 */
@@ -35,15 +35,15 @@ export interface Preferences {
   /** 段首缩进字符数（0–4，0 表示关闭）。 */
   paragraphIndent: number;
   sidebarOpen: boolean;
-  /** 启动或切换时激活的顶层工作台分区，缺省为悬赏板（bounties）。 */
+  /** 启动或切换时激活的顶层工作台分区，缺省为任务板（bounties）。 */
   workspaceSection?: WorkspaceSection;
   /** 无关联项目时使用的默认项目图标（格式同 Project.icon）。 */
   defaultProjectIcon?: string;
-  /** 悬赏服务连接模式：embedded 使用桌面内嵌服务，remote 连接独立远程服务。 */
+  /** 任务服务连接模式：embedded 使用桌面内嵌服务，remote 连接独立远程服务。 */
   serviceMode?: 'embedded' | 'remote';
-  /** 远程悬赏服务根地址（http:// 或 https://，去除末尾斜杠）。 */
+  /** 远程任务服务根地址（http:// 或 https://，去除末尾斜杠）。 */
   remoteServerUrl?: string;
-  /** 远程悬赏服务管理员 Bearer Token。 */
+  /** 远程任务服务管理员 Bearer Token。 */
   remoteAdminToken?: string;
   autoCheckUpdates?: boolean;
   autoDownloadUpdates?: boolean;

@@ -1,5 +1,5 @@
 /**
- * 文件职责：验证悬赏板工作台外壳（App.svelte）的导航切换、主题与窗口材质、语言切换、项目图标选择与配置持久化。
+ * 文件职责：验证任务板工作台外壳（App.svelte）的导航切换、主题与窗口材质、语言切换、项目图标选择与配置持久化。
  */
 import { mount, tick, unmount } from 'svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -64,7 +64,7 @@ async function selectComboboxOption(container: HTMLElement, triggerId: string, o
   await flush();
 }
 
-describe('悬赏板工作台外壳集成测试', () => {
+describe('任务板工作台外壳集成测试', () => {
   let target: HTMLDivElement;
   let instance: ReturnType<typeof mount> | null = null;
   const storageMap = new Map<string, string>();
@@ -116,7 +116,7 @@ describe('悬赏板工作台外壳集成测试', () => {
     setLocalePreference('zh-CN');
   });
 
-  it('左侧导航仅包含 4 个顶层入口（悬赏板、待我处理、Agents、设置），支持视图切换与侧栏收起展开', async () => {
+  it('左侧导航仅包含 4 个顶层入口（任务板、待处理、Agents、设置），支持视图切换与侧栏收起展开', async () => {
     const { port, saved } = createMemoryPort({
       projects: [{ id: 'p1', name: '核心引擎项目', path: 'D:/engine.md', icon: 'emoji:🎯' }],
       activeProjectId: 'p1',
@@ -129,8 +129,8 @@ describe('悬赏板工作台外壳集成测试', () => {
 
     const navItems = [...target.querySelectorAll<HTMLButtonElement>('.workspace-nav .workspace-nav-item')];
     expect(navItems.map(button => button.textContent?.trim())).toEqual([
-      '悬赏板',
-      '待我处理',
+      '任务板',
+      '待处理',
       'Agents',
       '设置',
     ]);
@@ -138,12 +138,12 @@ describe('悬赏板工作台外壳集成测试', () => {
     const sidebar = target.querySelector('.sidebar');
     expect(sidebar?.textContent).not.toContain('核心引擎项目');
 
-    // 默认在悬赏板视图，空状态只给出说明与发布入口，不渲染演示用验收示例
+    // 默认在任务板视图，空状态只给出说明与发布入口，不渲染演示用验收示例
     expect(target.querySelector('[data-view="bounties"]')).not.toBeNull();
     expect(target.querySelector('[data-action="empty-post-bounty"]')).not.toBeNull();
     expect(target.querySelector('.markdown-preview-sample')).toBeNull();
 
-    // 切换到 待我处理
+    // 切换到 待处理
     navItems[1].click();
     await flush();
     expect(target.querySelector('[data-view="inbox"]')).not.toBeNull();
@@ -226,7 +226,7 @@ describe('悬赏板工作台外壳集成测试', () => {
     const customTheme = {
       version: 1,
       id: 'bounty-custom',
-      name: '悬赏青',
+      name: '测试青',
       light: palette('#F5F7FA'),
       dark: palette('#12161F'),
     };
@@ -294,7 +294,7 @@ describe('悬赏板工作台外壳集成测试', () => {
     const labels = [...target.querySelectorAll('.workspace-nav .workspace-nav-item')].map(el =>
       el.textContent?.trim(),
     );
-    expect(labels).toEqual(['Bounty Board', 'Inbox', 'Agents', 'Settings']);
+    expect(labels).toEqual(['Task Board', 'Inbox', 'Agents', 'Settings']);
   });
 
   it('透明主题启动时不先发 opaque 请求，等待原生材质与内容就绪后才触发 onready 并执行遮罩淡出', async () => {
@@ -466,7 +466,7 @@ describe('悬赏板工作台外壳集成测试', () => {
     instance = mount(App, { target, props: { files: port, bountyApi } });
     await flush();
 
-    // 打开「+ 发布悬赏」弹窗
+    // 打开「+ 发布任务」弹窗
     const openComposerBtn = target.querySelector<HTMLButtonElement>('[data-action="open-composer"]');
     expect(openComposerBtn).not.toBeNull();
     openComposerBtn!.click();
@@ -550,7 +550,7 @@ describe('悬赏板工作台外壳集成测试', () => {
     expect(cards[0].textContent).toContain('仲裁开启');
   });
 
-  it('支持任务详情抽屉、草稿编辑发布、未接取 OPEN 撤回草稿、并发抢单 409 冲突拦截与待我处理聚合', async () => {
+  it('支持任务详情抽屉、草稿编辑发布、未接取 OPEN 撤回草稿、并发抢单 409 冲突拦截与待处理聚合', async () => {
     const { port } = createMemoryPort();
     const bountyApi = createMemoryBountyClient();
     const proj = await bountyApi.createProject({
@@ -571,7 +571,7 @@ describe('悬赏板工作台外壳集成测试', () => {
     instance = mount(App, { target, props: { files: port, bountyApi } });
     await flush();
 
-    // 按状态筛选：[草稿] 可见，切换 待接单 时隐藏草稿
+    // 按状态筛选：[草稿] 可见，切换 待接取 时隐藏草稿
     target.querySelector<HTMLButtonElement>('[data-status-filter="OPEN"]')!.click();
     await flush();
     expect(target.querySelectorAll('.bounty-card')).toHaveLength(0);
@@ -580,12 +580,12 @@ describe('悬赏板工作台外壳集成测试', () => {
     await flush();
     expect(target.querySelectorAll('.bounty-card')).toHaveLength(1);
 
-    // 切换到「待我处理」视图，草稿自动汇聚在待办中
+    // 切换到「待处理」视图，草稿自动汇聚在待办中
     target.querySelector<HTMLButtonElement>('[data-nav-section="inbox"]')!.click();
     await flush();
     expect(target.querySelectorAll('[data-slot="inbox-card-grid"] .bounty-card')).toHaveLength(1);
 
-    // 切回悬赏板并点击卡片打开详情抽屉
+    // 切回任务板并点击卡片打开详情抽屉
     target.querySelector<HTMLButtonElement>('[data-nav-section="bounties"]')!.click();
     await flush();
     target.querySelector<HTMLButtonElement>('.bounty-card-button')!.click();
@@ -595,7 +595,7 @@ describe('悬赏板工作台外壳集成测试', () => {
     expect(drawer).not.toBeNull();
     expect(drawer!.querySelector('[data-slot="detail-description"] .katex')).not.toBeNull();
 
-    // 点击「编辑草稿」，修改标题并直接点击「发布悬赏」
+    // 点击「编辑草稿」，修改标题并直接点击「发布任务」
     drawer!.querySelector<HTMLButtonElement>('[data-action="edit-draft"]')!.click();
     await flush();
     const composer = target.querySelector<HTMLElement>('[data-dialog="bounty-composer"]')!;
@@ -637,12 +637,12 @@ describe('悬赏板工作台外壳集成测试', () => {
     expect(drawer.textContent).toContain(worker.agent.name);
   });
 
-  it('支持设置页项目管理（新建、编辑、归档恢复、关联悬赏删除保护）与默认验收规范生效', async () => {
+  it('支持设置页项目管理（新建、编辑、归档恢复、关联任务删除保护）与默认验收规范生效', async () => {
     const { port } = createMemoryPort({
       preferences: { ...emptyAppConfig().preferences, workspaceSection: 'settings' },
     });
     const bountyApi = createMemoryBountyClient();
-    const pWithBounty = await bountyApi.createProject({ name: '含任务项目' });
+    const pWithBounty = await bountyApi.createProject({ name: '含任务的项目' });
     await bountyApi.createBounty({
       project_id: pWithBounty.id,
       title: '关联任务',
@@ -657,13 +657,13 @@ describe('悬赏板工作台外壳集成测试', () => {
     const projectSection = target.querySelector<HTMLElement>('[data-section="project-management"]')!;
     expect(projectSection).not.toBeNull();
 
-    // 尝试删除已有悬赏的项目，提示 PROJECT_HAS_BOUNTIES 错误
+    // 尝试删除已有任务的项目，提示 PROJECT_HAS_BOUNTIES 错误
     const firstRow = projectSection.querySelector<HTMLElement>(`[data-project-row="${pWithBounty.id}"]`)!;
     firstRow.querySelector<HTMLButtonElement>('[data-action="delete-project"]')!.click();
     await flush();
     const panelError = projectSection.querySelector<HTMLElement>('[data-status="project-panel-error"]');
     expect(panelError).not.toBeNull();
-    expect(panelError!.textContent).toContain('已有悬赏记录');
+    expect(panelError!.textContent).toContain('已有任务记录');
 
     // 编辑已有项目（名称、说明、工作目录路径、默认验收规范），验证持久化到 bountyApi 与 DOM
     firstRow.querySelector<HTMLButtonElement>('[data-action="edit-project"]')!.click();
@@ -737,7 +737,7 @@ describe('悬赏板工作台外壳集成测试', () => {
     expect(projectSection.querySelector(`[data-project-row="${tempProject.id}"]`)).toBeNull();
   });
 
-  it('支持切换团队远端模式、测试连接、持久化远端配置并从远端服务重载项目与悬赏', async () => {
+  it('支持切换团队远端模式、测试连接、持久化远端配置并从远端服务重载项目与任务', async () => {
     const { port, saved } = createMemoryPort({
       preferences: { ...emptyAppConfig().preferences, workspaceSection: 'settings' },
     });
@@ -760,7 +760,7 @@ describe('悬赏板工作台外壳集成测试', () => {
     const remoteBounty = {
       id: 'remote-bounty-1',
       project_id: 'remote-proj-1',
-      title: '远端悬赏任务',
+      title: '远端任务',
       description: '远端任务描述',
       acceptance_criteria: '远端验收标准',
       difficulty: 'A' as const,
@@ -863,7 +863,7 @@ describe('悬赏板工作台外壳集成测试', () => {
     expect(fetchCalls.find(c => c.url.endsWith('/health'))?.auth).toBeUndefined();
     expect(fetchCalls.find(c => c.url.endsWith('/admin/status'))?.auth).toBe('Bearer remote-secret-token');
 
-    // 点击保存并重连，持久化配置并从远端服务重新拉取项目与悬赏
+    // 点击保存并重连，持久化配置并从远端服务重新拉取项目与任务
     connSection.querySelector<HTMLButtonElement>('[data-action="save-reconnect"]')!.click();
     await vi.waitFor(() => {
       expect(connSection.querySelector('[data-status="connection-feedback"]')?.textContent).toContain(
@@ -879,10 +879,10 @@ describe('悬赏板工作台外壳集成测试', () => {
     });
     expect(target.querySelector('[data-section="project-management"]')?.textContent).toContain('远端同步项目');
 
-    // 切回悬赏板，确认展示远端服务返回的悬赏任务
+    // 切回任务板，确认展示远端服务返回的任务
     target.querySelector<HTMLButtonElement>('[data-nav-section="bounties"]')!.click();
     await flush();
-    expect(target.querySelector('.bounty-card')?.textContent).toContain('远端悬赏任务');
+    expect(target.querySelector('.bounty-card')?.textContent).toContain('远端任务');
 
     // 切回设置页并切换回个人内嵌模式，确认恢复本地项目列表
     target.querySelector<HTMLButtonElement>('[data-nav-section="settings"]')!.click();
@@ -894,7 +894,7 @@ describe('悬赏板工作台外壳集成测试', () => {
     });
   });
 
-  it('支持悬赏板按项目筛选、关键字字面检索、丢弃草稿与取消待接单任务', async () => {
+  it('支持任务板按项目筛选、关键字字面检索、丢弃草稿与取消待接取任务', async () => {
     const { port } = createMemoryPort();
     const bountyApi = createMemoryBountyClient();
     const projA = await bountyApi.createProject({ name: 'Alpha 引擎' });
@@ -921,6 +921,13 @@ describe('悬赏板工作台外壳集成测试', () => {
     await flush();
 
     expect(target.querySelectorAll('.bounty-card')).toHaveLength(2);
+
+    // OPEN 卡片不显示状态标签，状态仅保留在筛选分类中；其他状态仍显示标签
+    const draftCard = target.querySelector<HTMLElement>(`[data-bounty-id="${draftA.id}"]`)!;
+    const openCard = target.querySelector<HTMLElement>(`[data-bounty-id="${openB.id}"]`)!;
+    expect(openCard.querySelector('.status-pill')).toBeNull();
+    expect(draftCard.querySelector('.status-pill')?.textContent?.trim()).toBe('[草稿]');
+    expect(target.querySelector('[data-status-filter="OPEN"]')?.textContent?.trim()).toBe('待接取');
 
     // 按项目筛选：仅保留 Beta 项目
     const projectFilter = target.querySelector<HTMLSelectElement>('#bounty-project-filter')!;
@@ -1462,13 +1469,13 @@ describe('悬赏板工作台外壳集成测试', () => {
     expect(target.querySelectorAll('.bounty-card')).toHaveLength(1);
   });
 
-  it('悬赏卡片在描述非空时渲染 Markdown 与 KaTeX 摘要，空描述时不渲染预览容器', async () => {
+  it('任务卡片在描述非空时渲染 Markdown 与 KaTeX 摘要，空描述时不渲染预览容器', async () => {
     const { port } = createMemoryPort();
     const bountyApi = createMemoryBountyClient();
     const proj = await bountyApi.createProject({ name: '卡片预览项目' });
     const withDesc = await bountyApi.createBounty({
       project_id: proj.id,
-      title: '带公式描述的悬赏',
+      title: '带公式描述的任务',
       description: '验证 **加粗摘要**、行内代码 `wal_mode` 与公式 $E = mc^2$',
       difficulty: 'A',
       assignee_mode: 'any',
@@ -1476,7 +1483,7 @@ describe('悬赏板工作台外壳集成测试', () => {
     });
     const emptyDesc = await bountyApi.createBounty({
       project_id: proj.id,
-      title: '无描述悬赏',
+      title: '无描述任务',
       description: '   ',
       difficulty: 'C',
       assignee_mode: 'any',
@@ -2686,7 +2693,7 @@ describe('悬赏板工作台外壳集成测试', () => {
       target.querySelector(`[data-agent-id="${streamReg.agent.id}"] [data-agent-channel]`)?.textContent?.trim(),
     ).toBe('离线');
 
-    // 重新建立长连接，切到悬赏板再切回 Agent 名录时自动拉取最新在线通道状态
+    // 重新建立长连接，切到任务板再切回 Agent 名录时自动拉取最新在线通道状态
     await bountyApi.agentOpenStream(streamReg.api_key, () => {});
     target.querySelector<HTMLButtonElement>('[data-nav-section="bounties"]')!.click();
     await flush();
@@ -2735,7 +2742,7 @@ describe('悬赏板工作台外壳集成测试', () => {
     expect(channelAfterError.dataset.agentChannel).toBe('unknown');
     expect(channelAfterError.textContent?.trim()).toBe('状态未知');
 
-    // 点击「刷新」恢复；随后再次触发 503，验证切去悬赏板再切回名录会自动重试并在服务恢复后清空错误横幅与「状态未知」
+    // 点击「刷新」恢复；随后再次触发 503，验证切去任务板再切回名录会自动重试并在服务恢复后清空错误横幅与「状态未知」
     target.querySelector<HTMLButtonElement>('[data-action="refresh-agents"]')!.click();
     await flush();
     expect(target.querySelector('[data-status="agent-directory-load-error"]')).toBeNull();
@@ -2924,7 +2931,7 @@ describe('悬赏板工作台外壳集成测试', () => {
     expect(target.querySelector('[data-slot="agent-empty-state"]')).not.toBeNull();
   });
 
-  it('工作台发布与撤回悬赏联动精准事件分发、Unranked==C 段位匹配、Inbox 游标补拉与 Ack 推进', async () => {
+  it('工作台发布与撤回任务联动精准事件分发、Unranked==C 段位匹配、Inbox 游标补拉与 Ack 推进', async () => {
     const { port } = createMemoryPort({
       preferences: { ...emptyAppConfig().preferences, workspaceSection: 'bounties' },
     });
@@ -3165,7 +3172,7 @@ describe('悬赏板工作台外壳集成测试', () => {
     expect(updatedTag.textContent?.trim()).toBe('直接公开');
   });
 
-  it('覆盖两种项目发单策略下 Agent 自动发单、待我处理聚合刷新、发布者身份与人工审阅转正或丢弃全流程', async () => {
+  it('覆盖两种项目发单策略下 Agent 自动发单、待处理聚合刷新、发布者身份与人工审阅转正或丢弃全流程', async () => {
     const { port } = createMemoryPort({
       preferences: { ...emptyAppConfig().preferences, workspaceSection: 'bounties' },
     });
@@ -3198,22 +3205,22 @@ describe('悬赏板工作台外壳集成测试', () => {
     instance = mount(App, { target, props: { files: port, bountyApi } });
     await flush();
 
-    // 先由管理员创建一条人工悬赏，作为对比基线
+    // 先由管理员创建一条人工任务，作为对比基线
     target.querySelector<HTMLButtonElement>('[data-action="open-composer"]')!.click();
     await flush();
     const composer0 = target.querySelector<HTMLElement>('[data-dialog="bounty-composer"]')!;
     const title0 = composer0.querySelector<HTMLInputElement>('#bounty-title-input')!;
-    title0.value = '人工基线悬赏';
+    title0.value = '人工基线任务';
     title0.dispatchEvent(new Event('input', { bubbles: true }));
     composer0.querySelector<HTMLButtonElement>('[data-action="publish-now"]')!.click();
     await flush();
 
-    const humanBounty = (await bountyApi.listBounties()).find(b => b.title === '人工基线悬赏')!;
+    const humanBounty = (await bountyApi.listBounties()).find(b => b.title === '人工基线任务')!;
     expect(humanBounty).toBeDefined();
     const humanCard = target.querySelector<HTMLElement>(`[data-bounty-id="${humanBounty.id}"]`)!;
     expect(humanCard.querySelector('[data-publisher-kind="agent"]')).toBeNull();
 
-    // 1. 「直接公开」策略：Agent 提交立即成为 OPEN、记录发布者身份、推送事件并在悬赏板展示
+    // 1. 「直接公开」策略：Agent 提交立即成为 OPEN、记录发布者身份、推送事件并在任务板展示
     const openBounty = await bountyApi.agentCreateBounty(publisherReg.api_key, {
       project_id: openProject.id,
       title: '巡检发现的公开缺陷',
@@ -3231,14 +3238,14 @@ describe('悬赏板工作台外壳集成测试', () => {
     // worker 收到人类基线 + Agent 直接公开共 2 条事件；outsider 为 0
     const workerEventsAfterOpen = await bountyApi.agentListEvents(workerReg.api_key, { cursor: 0 });
     expect(workerEventsAfterOpen.events.map(ev => ev.data.title)).toEqual([
-      '人工基线悬赏',
+      '人工基线任务',
       '巡检发现的公开缺陷',
     ]);
     expect(
       (await bountyApi.agentListEvents(outsiderReg.api_key, { cursor: 0 })).events,
     ).toHaveLength(0);
 
-    // 切换页面再回到悬赏板触发自动刷新，验证卡片与详情抽屉均展示发布者 Agent 身份与时间线
+    // 切换页面再回到任务板触发自动刷新，验证卡片与详情抽屉均展示发布者 Agent 身份与时间线
     target.querySelector<HTMLButtonElement>('[data-nav-section="agents"]')!.click();
     await flush();
     target.querySelector<HTMLButtonElement>('[data-nav-section="bounties"]')!.click();
@@ -3311,13 +3318,13 @@ describe('悬赏板工作台外壳集成测试', () => {
       (await bountyApi.agentListEvents(workerReg.api_key, { cursor: 0 })).events,
     ).toHaveLength(2);
 
-    // 切入「待我处理」自动刷新聚合展示全部 3 条 Agent 草稿
+    // 切入「待处理」自动刷新聚合展示全部 3 条 Agent 草稿
     target.querySelector<HTMLButtonElement>('[data-nav-section="inbox"]')!.click();
     await flush();
     const inboxView = target.querySelector<HTMLElement>('[data-view="inbox"]')!;
     expect(inboxView).not.toBeNull();
 
-    // 在待我处理视图内新提交一条草稿后点击手动「刷新」按钮也能立即拉取
+    // 在待处理视图内新提交一条草稿后点击手动「刷新」按钮也能立即拉取
     const draftLate = await bountyApi.agentCreateBounty(publisherReg.api_key, {
       project_id: draftProject.id,
       title: '待审草稿四：刷新拉取',
@@ -3350,14 +3357,14 @@ describe('悬赏板工作台外壳集成测试', () => {
 
     const editComposer = target.querySelector<HTMLElement>('[data-dialog="bounty-composer"]')!;
     const editTitleInput = editComposer.querySelector<HTMLInputElement>('#bounty-title-input')!;
-    editTitleInput.value = '人工核验转正悬赏';
+    editTitleInput.value = '人工核验转正任务';
     editTitleInput.dispatchEvent(new Event('input', { bubbles: true }));
     editComposer.querySelector<HTMLButtonElement>('[data-action="publish-now"]')!.click();
     await flush();
 
     const publishedDetail1 = await bountyApi.getBountyDetail(draftEditPublish.id);
     expect(publishedDetail1.bounty.status).toBe('OPEN');
-    expect(publishedDetail1.bounty.title).toBe('人工核验转正悬赏');
+    expect(publishedDetail1.bounty.title).toBe('人工核验转正任务');
     expect(publishedDetail1.bounty.created_by_agent_id).toBe(publisherReg.agent.id);
     expect(publishedDetail1.bounty.created_by_agent_name).toBe('巡检机器人');
     expect(publishedDetail1.events.map(ev => ev.actor)).toEqual([
@@ -3410,9 +3417,9 @@ describe('悬赏板工作台外壳集成测试', () => {
 
     const workerEventsFinal = await bountyApi.agentListEvents(workerReg.api_key, { cursor: 0 });
     expect(workerEventsFinal.events.map(ev => ev.data.title)).toEqual([
-      '人工基线悬赏',
+      '人工基线任务',
       '巡检发现的公开缺陷',
-      '人工核验转正悬赏',
+      '人工核验转正任务',
       '待审草稿二：一键确认发布',
     ]);
     expect(workerEventsFinal.events.some(ev => ev.bounty_id === draftDiscard.id)).toBe(false);
@@ -3474,7 +3481,7 @@ describe('悬赏板工作台外壳集成测试', () => {
     instance = mount(App, { target, props: { files: port, bountyApi } });
     await flush();
 
-    // 1. 悬赏板卡片实时展示执行者名称+段位与租约剩余时间倒计时（无 · 分隔符）
+    // 1. 任务板卡片实时展示执行者名称+段位与租约剩余时间倒计时（无 · 分隔符）
     const activeCard = target.querySelector<HTMLElement>(`[data-bounty-id="${leaseTask.id}"]`)!;
     expect(activeCard).not.toBeNull();
     expect(activeCard.textContent).not.toContain('·');
@@ -3587,7 +3594,7 @@ describe('悬赏板工作台外壳集成测试', () => {
     ).toContain('超时 1 次 弃单 1 次');
     expect(betaCard.textContent).not.toContain('·');
 
-    // 切回悬赏板验证已完成卡片与详情抽屉的交付说明、资源成本、保留的执行者段位及系统调度时间线
+    // 切回任务板验证已完成卡片与详情抽屉的交付说明、资源成本、保留的执行者段位及系统调度时间线
     target.querySelector<HTMLButtonElement>('[data-nav-section="bounties"]')!.click();
     await flush();
 
@@ -3818,7 +3825,7 @@ describe('悬赏板工作台外壳集成测试', () => {
     ).toContain('超时 0 次 弃单 1 次');
   });
 
-  it('支持任务评论区、Agent 提问挂起冻结租约与有效耗时、待我处理实时聚合、人工回复唤醒与挂起取消', async () => {
+  it('支持任务评论区、Agent 提问挂起冻结租约与有效耗时、待处理实时聚合、人工回复唤醒与挂起取消', async () => {
     vi.useFakeTimers({
       toFake: ['Date', 'setInterval', 'clearInterval'],
     });
@@ -3865,7 +3872,7 @@ describe('悬赏板工作台外壳集成测试', () => {
     instance = mount(App, { target, props: { files: port, bountyApi } });
     await flush();
 
-    // 左栏「待我处理」角标实时显示 1，卡片显示冻结状态与评论数 1（无倒计时、无 · 分隔符）
+    // 左栏「待处理」角标实时显示 1，卡片显示冻结状态与评论数 1（无倒计时、无 · 分隔符）
     const inboxBtn = target.querySelector<HTMLButtonElement>('[data-nav-section="inbox"]')!;
     expect(inboxBtn.querySelector('[data-slot="inbox-count"]')?.textContent?.trim()).toBe('1');
 
@@ -3887,7 +3894,7 @@ describe('悬赏板工作台外壳集成测试', () => {
     expect(card.dataset.bountyStatus).toBe('WAITING_INFO');
     expect(card.querySelector('[data-slot="card-lease-countdown"]')).toBeNull();
 
-    // 3. 切入「待我处理」视图，确认自动聚合 WAITING_INFO 任务
+    // 3. 切入「待处理」视图，确认自动聚合 WAITING_INFO 任务
     inboxBtn.click();
     await flush();
     const inboxCards = [...target.querySelectorAll<HTMLElement>('.bounty-card')];
@@ -3972,7 +3979,7 @@ describe('悬赏板工作台外壳集成测试', () => {
       drawer.querySelector('[data-slot="detail-active-duration"]')?.textContent?.trim(),
     ).toBe('有效耗时 01:45');
 
-    // 「待我处理」角标清零隐藏
+    // 「待处理」角标清零隐藏
     expect(inboxBtn.querySelector('[data-slot="inbox-count"]')).toBeNull();
 
     const executorEvents = await bountyApi.agentListEvents(alpha.api_key);
@@ -4115,7 +4122,7 @@ describe('悬赏板工作台外壳集成测试', () => {
     expect(updatedProj.arbitrator_chain).toEqual([judgeBeta.agent.id]);
   });
 
-  it('Issue 08 悬赏卡片与详情抽屉完整呈现 PENDING_ARBITRATION 倒计时、人工兜底、3 次打回与第 4 次熔断重开及质量校准验收', async () => {
+  it('Issue 08 任务卡片与详情抽屉完整呈现 PENDING_ARBITRATION 倒计时、人工兜底、3 次打回与第 4 次熔断重开及质量校准验收', async () => {
     vi.useFakeTimers({
       toFake: ['Date', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'],
     });
@@ -4248,7 +4255,7 @@ describe('悬赏板工作台外壳集成测试', () => {
     await flush();
 
     expect(drawer.dataset.bountyStatus).toBe('OPEN');
-    expect(target.querySelector('.toast-bar')?.textContent).toContain('第 4 次打回已重开悬赏');
+    expect(target.querySelector('.toast-bar')?.textContent).toContain('第 4 次打回已重开任务');
 
     drawer.querySelector<HTMLButtonElement>('[aria-label="关闭对话框"]')!.click();
     await flush();
@@ -4474,7 +4481,7 @@ describe('悬赏板工作台外壳集成测试', () => {
     expect(updatedProj.arbitrator_chain).toEqual([rawProjectSymbol]);
   });
 
-  it('Issue 09 悬赏板卡片与详情抽屉及 Agent 名录卡片仅展示段位徽章且严禁暴露 MMR 并支持点击打开评级详情弹窗与英文零中点', async () => {
+  it('Issue 09 任务板卡片与详情抽屉及 Agent 名录卡片仅展示段位徽章且严禁暴露 MMR 并支持点击打开评级详情弹窗与英文零中点', async () => {
     const { port } = createMemoryPort({
       preferences: { ...emptyAppConfig().preferences, workspaceSection: 'bounties' },
     });
@@ -4539,7 +4546,7 @@ describe('悬赏板工作台外壳集成测试', () => {
     instance = mount(App, { target, props: { files: port, bountyApi } });
     await flush();
 
-    // 1. 悬赏板卡片与详情抽屉仅见段位，绝不出现隐藏 MMR 数值或 delta
+    // 1. 任务板卡片与详情抽屉仅见段位，绝不出现隐藏 MMR 数值或 delta
     const boardView = target.querySelector<HTMLElement>('[data-view="bounties"]')!;
     expect(boardView.textContent).not.toContain(exactMmrText);
     expect(boardView.textContent?.toLowerCase()).not.toContain('mmr');
@@ -4886,7 +4893,7 @@ describe('Issue 10 UI 集成测试：草稿共创拆单、前置依赖选择器�
     expect(composerError!.textContent).toContain('循环依赖');
   });
 
-  it('在草稿详情邀请活跃 Agent 共创、审阅修订与评论消标、拆单跳转及在待我处理中批量发布草稿', async () => {
+  it('在草稿详情邀请活跃 Agent 共创、审阅修订与评论消标、拆单跳转及在待处理视图中批量发布草稿', async () => {
     const { port } = createMemoryPort();
     const bountyApi = createMemoryBountyClient({ lan_open_registration: true });
     const project = await bountyApi.createProject({ name: 'Co-creation UI Project' });
@@ -5012,7 +5019,7 @@ describe('Issue 10 UI 集成测试：草稿共创拆单、前置依赖选择器�
       'Epic Feature Draft Revised',
     );
 
-    // 关闭抽屉并在待我处理视图中使用批量选择与批量发布按钮发布全部草稿
+    // 关闭抽屉并在待处理视图中使用批量选择与批量发布按钮发布全部草稿
     target.querySelector<HTMLButtonElement>('[aria-label="关闭对话框"]')!.click();
     await flush();
 
@@ -5036,7 +5043,7 @@ describe('Issue 10 UI 集成测试：草稿共创拆单、前置依赖选择器�
     publishSelectedBtn.click();
     await flush();
 
-    // 全部草稿发布后待我处理草稿清空，且悬赏板中可见子单依赖已生效
+    // 全部草稿发布后待处理草稿清空，且任务板中可见子单依赖已生效
     expect(target.querySelector('[data-slot="inbox-batch-publish"]')).toBeNull();
     target.querySelector<HTMLButtonElement>('[data-nav-section="bounties"]')!.click();
     await flush();
@@ -5145,7 +5152,7 @@ describe('Issue 10 UI 集成测试：草稿共创拆单、前置依赖选择器�
     instance = mount(App, { target, props: { files: port, bountyApi } });
     await flush();
 
-    // 1. 新建悬赏弹窗：前置依赖区域无常驻解释段落，点击 ? 按钮展开说明，首次 Escape 仅收起气泡，再次 Escape 关闭弹窗
+    // 1. 新建任务弹窗：前置依赖区域无常驻解释段落，点击 ? 按钮展开说明，首次 Escape 仅收起气泡，再次 Escape 关闭弹窗
     target.querySelector<HTMLButtonElement>('[data-action="open-composer"]')!.click();
     await flush();
 
@@ -5175,7 +5182,7 @@ describe('Issue 10 UI 集成测试：草稿共创拆单、前置依赖选择器�
     await flush();
     expect(target.querySelector('[data-dialog="bounty-composer"]')).toBeNull();
 
-    // 2. 切到待我处理打开父草稿详情抽屉：验证自动聚焦、Tab/Shift+Tab 闭环、外部 focusin 拉回、协作者 ? 气泡 Escape 优先与关联跳转焦点保持
+    // 2. 切到待处理打开父草稿详情抽屉：验证自动聚焦、Tab/Shift+Tab 闭环、外部 focusin 拉回、协作者 ? 气泡 Escape 优先与关联跳转焦点保持
     target.querySelector<HTMLButtonElement>('[data-nav-section="inbox"]')!.click();
     await flush();
 

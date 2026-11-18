@@ -1,7 +1,7 @@
 //! 文件职责：依赖图校验、关联摘要、Agent 视角脱敏和完成解锁；复用调用方事务。
 use super::*;
 
-/// 函数职责：读取稳定依赖顺序及当前状态；调用方须使用同一快照读取悬赏。
+/// 函数职责：读取稳定依赖顺序及当前状态；调用方须使用同一快照读取任务。
 pub(super) fn hydrate(conn: &Connection, bounty: &mut Bounty) -> Result<()> {
     let mut stmt = conn.prepare("SELECT b.id,b.title,b.status FROM bounty_dependencies d JOIN bounties b ON b.id=d.depends_on_bounty_id WHERE d.bounty_id=?1 ORDER BY d.rowid")?;
     bounty.blocked_by_summaries = stmt
@@ -88,7 +88,7 @@ pub(super) fn replace(
             return Err(ApiError::new(
                 StatusCode::NOT_FOUND,
                 "BOUNTY_NOT_FOUND",
-                "悬赏不存在",
+                "任务不存在",
             ));
         }
         if bounty.status == BountyStatus::Cancelled {

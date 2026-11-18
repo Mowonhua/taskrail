@@ -18,7 +18,7 @@ pub(super) fn notify_active(
     Ok(())
 }
 
-/// 函数职责：与悬赏状态变化共用写事务；撤回只投递给本轮已记录的 active 接收者。
+/// 函数职责：与任务状态变化共用写事务；撤回只投递给本轮已记录的 active 接收者。
 /// 约束条件：发布只接受 OPEN 快照；撤回只保存标识，不能序列化 DRAFT 内容。
 pub(super) fn dispatch(tx: &Transaction<'_>, bounty: &Bounty, withdrawn: bool) -> Result<()> {
     let targets = if withdrawn {
@@ -80,7 +80,7 @@ pub(super) fn dispatch(tx: &Transaction<'_>, bounty: &Bounty, withdrawn: bool) -
     Ok(())
 }
 
-/// 所有含悬赏快照的事件都按接收者处理；覆盖发布事件的直接快照和评论等事件的嵌套快照。
+/// 所有含任务快照的事件都按接收者处理；覆盖发布事件的直接快照和评论等事件的嵌套快照。
 fn redact_payload(conn: &Connection, data: &mut serde_json::Value, agent_id: &str) -> Result<()> {
     let value = if data.get("bounty").is_some() {
         &mut data["bounty"]

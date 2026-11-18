@@ -1,5 +1,5 @@
 /**
- * 文件职责：提供悬赏板视图、详情抽屉与表单共用的格式化辅助函数与 Markdown 渲染 Action。
+ * 文件职责：提供任务板视图、详情抽屉与表单共用的格式化辅助函数与 Markdown 渲染 Action。
  * 定义范围：状态文案映射、接单限制文案、时间格式化、服务错误消息转换及安全 Markdown/KaTeX DOM 挂载。
  */
 import type { Action } from 'svelte/action';
@@ -36,7 +36,7 @@ export function formatBountyStatus(status: BountyStatus, bracketDraft = false): 
     case 'DRAFT':
       return bracketDraft ? translate('[草稿]') : translate('草稿');
     case 'OPEN':
-      return translate('待接单');
+      return translate('待接取');
     case 'IN_PROGRESS':
       return translate('执行中');
     case 'WAITING_INFO':
@@ -299,11 +299,11 @@ export function formatCommentAuthorRole(authorType: BountyCommentAuthorType): st
 export function formatEventLabel(eventType: string): string {
   switch (eventType) {
     case 'created':
-      return translate('创建悬赏');
+      return translate('创建任务');
     case 'updated':
       return translate('更新草稿');
     case 'published':
-      return translate('发布悬赏');
+      return translate('发布任务');
     case 'withdrawn':
       return translate('撤回为草稿');
     case 'cancelled':
@@ -456,17 +456,17 @@ export function formatServiceError(error: unknown): string {
   if (error instanceof ServiceApiError) {
     switch (error.code) {
       case 'BOUNTY_ALREADY_CLAIMED':
-        return translate('悬赏已被 Agent 接取，无法撤回为草稿。');
+        return translate('任务已被 Agent 接取，无法撤回为草稿。');
       case 'INVALID_TRANSITION':
         return translate('当前任务状态已变更，无法执行该操作。');
       case 'PROJECT_HAS_BOUNTIES':
-        return translate('该项目下已有悬赏记录，无法直接删除，建议将其归档。');
+        return translate('该项目下已有任务记录，无法直接删除，建议将其归档。');
       case 'PROJECT_ARCHIVED':
-        return translate('归档项目不能创建、编辑或发布悬赏。');
+        return translate('归档项目不能创建、编辑或发布任务。');
       case 'PROJECT_NOT_FOUND':
         return translate('所属项目不存在。');
       case 'BOUNTY_NOT_FOUND':
-        return translate('未找到该悬赏任务。');
+        return translate('未找到该任务。');
       case 'AGENT_NOT_FOUND':
         return translate('未找到指定的 Agent。');
       case 'INVITE_TOKEN_NOT_FOUND':
@@ -484,7 +484,7 @@ export function formatServiceError(error: unknown): string {
       case 'ASSIGNEE_MISMATCH':
         return translate('仅被指派的 Agent 可执行此操作。');
       case 'TIER_INSUFFICIENT':
-        return translate('当前 Agent 段位未达到该悬赏的最低接取要求。');
+        return translate('当前 Agent 段位未达到该任务的最低接取要求。');
       case 'LEASE_OWNER_MISMATCH':
         return translate('当前租约不属于该 Agent，无法写入。');
       case 'STALE_LEASE':

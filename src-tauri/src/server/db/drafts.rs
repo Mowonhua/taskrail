@@ -9,7 +9,7 @@ fn invited_draft(tx: &Transaction<'_>, id: &str, agent_id: &str) -> Result<Bount
         return Err(ApiError::new(
             StatusCode::NOT_FOUND,
             "BOUNTY_NOT_FOUND",
-            "悬赏不存在",
+            "任务不存在",
         ));
     }
     if bounty.status != BountyStatus::Draft {
@@ -101,7 +101,7 @@ impl Repository {
             if let Some(v) = input.title { bounty.title = v; }
             if let Some(v) = input.description { bounty.description = v; }
             if let Some(v) = input.acceptance_criteria { bounty.acceptance_criteria = v; }
-            if bounty.title.trim().is_empty() { return Err(ApiError::invalid("悬赏标题不能为空")); }
+            if bounty.title.trim().is_empty() { return Err(ApiError::invalid("任务标题不能为空")); }
             let timestamp = now();
             if let Some(ids) = input.blocked_by { dependencies::replace(tx,id,ids,Some(agent_id),&timestamp)?; }
             tx.execute("UPDATE bounties SET title=?2,description=?3,acceptance_criteria=?4,draft_needs_human_review=1,updated_at=?5 WHERE id=?1", params![id,bounty.title,bounty.description,bounty.acceptance_criteria,timestamp])?;

@@ -1,5 +1,5 @@
 /**
- * 文件职责：定义悬赏服务 HTTP API 与嵌入式连接的数据契约与错误类型。
+ * 文件职责：定义任务服务 HTTP API 与嵌入式连接的数据契约与错误类型。
  * 约束条件：字段命名与 src-tauri/src/server/models.rs 及 README.md 保持 snake_case 一致。
  */
 

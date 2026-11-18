@@ -212,7 +212,7 @@ fn published_bounty(conn: &Connection, id: &str) -> Result<Bounty> {
         return Err(ApiError::new(
             StatusCode::NOT_FOUND,
             "BOUNTY_NOT_FOUND",
-            "悬赏不存在",
+            "任务不存在",
         ));
     }
     Ok(bounty)

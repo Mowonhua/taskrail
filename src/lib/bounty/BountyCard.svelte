@@ -1,6 +1,6 @@
 <script lang="ts">
   /**
-   * 文件职责：渲染悬赏板与待处理视图中的单个悬赏任务卡片。
+   * 文件职责：渲染任务板与待处理视图中的单个任务卡片。
    * 定义范围：低密度展示难度徽章、所属项目、状态标签、标题、执行者限制、仲裁标识与更新时间。
    */
   import type { BountyProject, BountyTask } from '../api/types';
@@ -149,9 +149,11 @@
   >
     <div class="bounty-card-header">
       <div class="bounty-card-badges">
-        <span class="status-pill" data-status={bounty.status}>
-          {statusLabel}
-        </span>
+        {#if bounty.status !== 'OPEN'}
+          <span class="status-pill" data-status={bounty.status}>
+            {statusLabel}
+          </span>
+        {/if}
         <span class="difficulty-badge" data-difficulty={bounty.difficulty} title={$t('预估难度')}>
           {bounty.difficulty}
         </span>

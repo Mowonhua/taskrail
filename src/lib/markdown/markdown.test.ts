@@ -50,9 +50,9 @@ describe('Markdown 与 KaTeX 语法扩展', () => {
 describe('Markdown 与 KaTeX 渲染器', () => {
   it('渲染 GFM 标题、任务列表、代码块、引用和对齐表格', () => {
     const container = render(
-      '# 悬赏验收条件\n\n- [x] 通过 `cargo test`\n- [ ] 补充边界测试\n\n> 保持原子写入\n\n```rust\nfn main() {}\n```\n\n| 阶段 | 状态 |\n| :--- | ---: |\n| 冒烟 | 通过 |\n',
+      '# 任务验收条件\n\n- [x] 通过 `cargo test`\n- [ ] 补充边界测试\n\n> 保持原子写入\n\n```rust\nfn main() {}\n```\n\n| 阶段 | 状态 |\n| :--- | ---: |\n| 冒烟 | 通过 |\n',
     );
-    expect(container.querySelector('h1')?.textContent).toBe('悬赏验收条件');
+    expect(container.querySelector('h1')?.textContent).toBe('任务验收条件');
     const checkboxes = container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]');
     expect(checkboxes).toHaveLength(2);
     expect(checkboxes[0].checked).toBe(true);

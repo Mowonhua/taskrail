@@ -61,7 +61,7 @@ describe('应用配置校验', () => {
     }
   });
 
-  it('校验顶层工作台导航分区（悬赏板、待我处理、Agents、设置）并拒绝未知分区', () => {
+  it('校验顶层工作台导航分区（任务板、待处理、Agents、设置）并拒绝未知分区', () => {
     for (const workspaceSection of ['bounties', 'inbox', 'agents', 'settings'] as const) {
       expect(
         validateAppConfig({ projects: [], preferences: { workspaceSection } })?.preferences.workspaceSection,
@@ -189,7 +189,7 @@ describe('应用配置校验', () => {
     }
   });
 
-  it('校验悬赏服务连接模式、远程服务地址与管理员令牌', () => {
+  it('校验任务服务连接模式、远程服务地址与管理员令牌', () => {
     expect(validateAppConfig({ projects: [] })?.preferences.serviceMode).toBe('embedded');
 
     for (const serviceMode of ['embedded', 'remote'] as const) {

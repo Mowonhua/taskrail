@@ -1,7 +1,7 @@
 <script lang="ts">
   /**
-   * 文件职责：承载 Taskrail 悬赏板工作台外壳（左侧四入口紧凑导航 + 右侧多视图主工作区 + 详情抽屉与发布弹窗）。
-   * 定义范围：顶层导航切换、同构悬赏服务连接与筛选、项目管理、主题与原生窗口材质协调、配置持久化及应用更新面板。
+   * 文件职责：承载 Taskrail 任务板工作台外壳（左侧四入口紧凑导航 + 右侧多视图主工作区 + 详情抽屉与发布弹窗）。
+   * 定义范围：顶层导航切换、同构任务服务连接与筛选、项目管理、主题与原生窗口材质协调、配置持久化及应用更新面板。
    */
   import appIcon from '../src-tauri/icons/icon.png';
   import { onDestroy, onMount, tick, untrack } from 'svelte';
@@ -157,7 +157,7 @@
   let windowPlacement = $state<WindowPlacement | undefined>(undefined);
   let activeSection = $state<WorkspaceSection>(defaultPreferences.workspaceSection ?? 'bounties');
 
-  // 悬赏板、项目与 Agent 准入/名录状态
+  // 任务板、项目与 Agent 准入/名录状态
   let allBountyProjects = $state<BountyProject[]>([]);
   let showArchivedProjects = $state(false);
   let bountyProjectFilter = $state<string>('ALL');
@@ -318,9 +318,9 @@
     const _lang = $locale;
     switch (activeSection) {
       case 'bounties':
-        return { title: $t('悬赏板') };
+        return { title: $t('任务板') };
       case 'inbox':
-        return { title: $t('待我处理') };
+        return { title: $t('待处理') };
       case 'agents':
         return { title: $t('Agents') };
       case 'settings':
@@ -879,7 +879,7 @@
   }
 
   /**
-   * 后台静默同步当前悬赏列表、Agents 视图与已打开详情抽屉，响应外部 Agent 抢单、续租与交付状态变更。
+   * 后台静默同步当前任务列表、Agents 视图与已打开详情抽屉，响应外部 Agent 抢单、续租与交付状态变更。
    * 仅在页面可见、服务已连接且无重叠后台轮询时执行；某子项已有前台请求在途时跳过该子项，防止与前台操作竞争序列号。
    */
   async function syncRealtimeWorkspace(): Promise<void> {
@@ -1382,7 +1382,7 @@
   async function handleCreateBounty(input: CreateBountyInput): Promise<BountyTask> {
     const created = await activeBountyApi.createBounty(input);
     await refreshBountyWorkspace();
-    showToast(created.status === 'OPEN' ? $t('悬赏已发布') : $t('草稿已保存'));
+    showToast(created.status === 'OPEN' ? $t('任务已发布') : $t('草稿已保存'));
     return created;
   }
 
@@ -1417,7 +1417,7 @@
           activeDetail = refreshedDetail;
         }
       }
-      showToast(publishAfter ? $t('悬赏已发布') : $t('草稿已保存'));
+      showToast(publishAfter ? $t('任务已发布') : $t('草稿已保存'));
       return updated;
     } finally {
       detailInFlightCount -= 1;
@@ -1557,7 +1557,7 @@
         activeDetail = refreshedDetail;
       }
       await refreshBountyWorkspace();
-      showToast($t('悬赏已发布'));
+      showToast($t('任务已发布'));
     } finally {
       detailInFlightCount -= 1;
     }
@@ -1639,7 +1639,7 @@
         activeDetail = refreshedDetail;
       }
       await refreshBountyWorkspace();
-      showToast($t('已释放租约并重新开放悬赏'));
+      showToast($t('已释放租约并重新开放任务'));
     } catch (error) {
       showToast(formatServiceError(error));
       try {
@@ -1762,7 +1762,7 @@
       }
       await refreshBountyWorkspace();
       showToast(
-        updated.status === 'OPEN' ? $t('第 4 次打回已重开悬赏') : $t('已打回并恢复执行'),
+        updated.status === 'OPEN' ? $t('第 4 次打回已重开任务') : $t('已打回并恢复执行'),
       );
     } catch (error) {
       showToast(formatServiceError(error));
@@ -2316,7 +2316,7 @@
           <rect x="2" y="2.5" width="12" height="11" rx="2" />
           <path d="M5.5 6h5M5.5 9h5M5.5 11.5h3" />
         </svg>
-        <span class="workspace-nav-label">{$t('悬赏板')}</span>
+        <span class="workspace-nav-label">{$t('任务板')}</span>
       </button>
 
       <button
@@ -2331,7 +2331,7 @@
           <path d="M2.5 9.5h3.2l1.1 1.8h2.4l1.1-1.8h3.2" />
           <rect x="2.2" y="3" width="11.6" height="10" rx="2" />
         </svg>
-        <span class="workspace-nav-label">{$t('待我处理')}</span>
+        <span class="workspace-nav-label">{$t('待处理')}</span>
         {#if actionableBounties.length > 0}
           <span class="workspace-nav-badge" data-slot="inbox-count">
             {actionableBounties.length}
@@ -2445,7 +2445,7 @@
       </div>
     {:else if !serviceConnected && serviceConnectionError}
       <div class="status-banner" role="alert" data-status="service-connection-failed">
-        <span>{$t('悬赏服务连接失败：{error}', { error: serviceConnectionError })}</span>
+        <span>{$t('任务服务连接失败：{error}', { error: serviceConnectionError })}</span>
         <div class="status-banner-actions">
           <button
             type="button"
@@ -2531,8 +2531,8 @@
                   type="search"
                   class="toolbar-search-input"
                   data-filter="search"
-                  aria-label={$t('搜索悬赏标题、编号或标签…')}
-                  placeholder={$t('搜索悬赏标题、编号或标签…')}
+                  aria-label={$t('搜索任务标题、编号或标签…')}
+                  placeholder={$t('搜索任务标题、编号或标签…')}
                   value={bountySearchQuery}
                   oninput={event => {
                     bountySearchQuery = (event.currentTarget as HTMLInputElement).value;
@@ -2544,13 +2544,13 @@
                 type="button"
                 class="primary"
                 data-action="open-composer"
-                title={$t('发布悬赏')}
+                title={$t('发布任务')}
                 onclick={openCreateComposer}
               >
                 <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
                   <path d="M8 3v10M3 8h10" />
                 </svg>
-                {$t('发布悬赏')}
+                {$t('发布任务')}
               </button>
             </div>
           </header>
@@ -2560,7 +2560,7 @@
               {#each [
                 { id: 'ALL', label: $t('全部状态') },
                 { id: 'DRAFT', label: $t('草稿') },
-                { id: 'OPEN', label: $t('待接单') },
+                { id: 'OPEN', label: $t('待接取') },
                 { id: 'IN_PROGRESS', label: $t('执行中') },
                 { id: 'WAITING_INFO', label: $t('待回复') },
                 { id: 'PENDING_ARBITRATION', label: $t('待仲裁') },
@@ -2589,9 +2589,9 @@
                 <div class="empty-state-icon" aria-hidden="true">
                   <ProjectIcon icon={currentProjectIcon} large />
                 </div>
-                <h2 class="empty-state-title">{$t('暂无悬赏任务')}</h2>
+                <h2 class="empty-state-title">{$t('暂无任务')}</h2>
                 <p class="empty-state-copy">
-                  {$t('发布新悬赏后，将在这里按项目与状态筛选浏览任务详情、验收条件和交付记录。')}
+                  {$t('发布新任务后，将在这里按项目与状态筛选浏览任务详情、验收条件和交付记录。')}
                 </p>
                 <button
                   type="button"
@@ -2599,7 +2599,7 @@
                   data-action="empty-post-bounty"
                   onclick={openCreateComposer}
                 >
-                  {$t('发布悬赏')}
+                  {$t('发布任务')}
                 </button>
               </div>
             {:else}
@@ -2618,7 +2618,7 @@
       {:else if activeSection === 'inbox'}
         <section class="workspace-view" aria-label={sectionMeta.title} data-view="inbox">
           <div class="workspace-toolbar" data-slot="inbox-toolbar">
-            <div class="filter-pills" role="group" aria-label={$t('待我处理')}>
+            <div class="filter-pills" role="group" aria-label={$t('待处理')}>
               {#each [
                 { id: 'ALL', label: $t('全部待办') },
                 { id: 'DRAFT', label: $t('待发布草稿') },

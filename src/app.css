@@ -1,5 +1,5 @@
 /**
- * 文件职责：定义悬赏板工作台外壳、设置组件、弹层与 Markdown/KaTeX 预览的全局样式。
+ * 文件职责：定义任务板工作台外壳、设置组件、弹层与 Markdown/KaTeX 预览的全局样式。
  * 主题边界：仅消费通用语义配色与外观变量（--canvas / --sidebar / --surface / --ink / --muted / --line / --accent 等），
  * 严禁按主题名称、ID 或具体风格编写条件分支。
  */
@@ -1885,7 +1885,7 @@ button.ghost-action:hover:not(:disabled) {
   min-height: 24px;
 }
 
-/* 悬赏板工具栏与任务卡片网格 */
+/* 任务板工具栏与任务卡片网格 */
 .status-banner-actions {
   display: flex;
   align-items: center;

@@ -27,7 +27,7 @@ string_enum!(AgentActivity { Idle => "idle", Busy => "busy" });
 
 string_enum!(RatingOutcome { Completed => "completed", ArbitrationFailed => "arbitration_failed", Timeout => "timeout", Abandon => "abandon" });
 
-/// 结构职责：仅管理员详情使用的结算快照；不得嵌入公开资料、悬赏或事件。
+/// 结构职责：仅管理员详情使用的结算快照；不得嵌入公开资料、任务或事件。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentRatingLedgerEntry {
     pub id: i64,
@@ -273,7 +273,7 @@ pub struct Project {
     pub updated_at: String,
 }
 
-/// 结构职责：人工创建悬赏的内容；仅允许 DRAFT 或 OPEN 初始状态。
+/// 结构职责：人工创建任务的内容；仅允许 DRAFT 或 OPEN 初始状态。
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateBounty {
@@ -298,7 +298,7 @@ pub struct CreateBounty {
     pub created_by: String,
 }
 
-/// 结构职责：Agent 提交的悬赏内容；发布者由认证身份绑定，初始状态由项目策略决定。
+/// 结构职责：Agent 提交的任务内容；发布者由认证身份绑定，初始状态由项目策略决定。
 /// 约束条件：拒绝状态、发布者等额外字段；执行者限制组合与人工创建采用相同校验。
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -337,7 +337,7 @@ pub struct UpdateBounty {
     pub require_arbitration: Option<bool>,
 }
 
-/// 结构职责：悬赏持久化快照；lease_id 只递增，时间为 UTC RFC3339。
+/// 结构职责：任务持久化快照；lease_id 只递增，时间为 UTC RFC3339。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Bounty {
     /// 只有当前受邀身份可读取 DRAFT；名称和段位关联读取当前公开资料。
@@ -432,7 +432,7 @@ pub struct CompleteBounty {
     pub completion_cost: Option<f64>,
 }
 
-/// 结构职责：悬赏检索条件；include_drafts 默认 false，即使 status=DRAFT 也先排除草稿。
+/// 结构职责：任务检索条件；include_drafts 默认 false，即使 status=DRAFT 也先排除草稿。
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct BountyFilter {
@@ -442,7 +442,7 @@ pub struct BountyFilter {
     pub include_drafts: bool,
 }
 
-/// 结构职责：与悬赏写操作原子提交的事件；按 id 递增读取。
+/// 结构职责：与任务写操作原子提交的事件；按 id 递增读取。
 #[derive(Debug, Serialize, Deserialize)]
 pub struct BountyEvent {
     pub id: i64,
