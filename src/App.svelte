@@ -39,6 +39,7 @@
     UpdateBountyInput,
     UpdateProjectInput,
   } from './lib/api/types';
+  import { ServiceApiError } from './lib/api/types';
   import AgentDirectory from './lib/bounty/AgentDirectory.svelte';
   import BountyCard from './lib/bounty/BountyCard.svelte';
   import BountyComposerModal from './lib/bounty/BountyComposerModal.svelte';
@@ -158,12 +159,43 @@
   let activeSection = $state<WorkspaceSection>(defaultPreferences.workspaceSection ?? 'bounties');
 
   // 任务板、项目与 Agent 准入/名录状态
+  type BountyBoardView = 'unfinished' | 'closed';
+  type ClosedBountyStatus = Extract<BountyStatus, 'COMPLETED' | 'CANCELLED'>;
+  type UnfinishedBountyFilter = 'UNFINISHED' | Exclude<BountyStatus, ClosedBountyStatus>;
+
   let allBountyProjects = $state<BountyProject[]>([]);
   let showArchivedProjects = $state(false);
   let bountyProjectFilter = $state<string>('ALL');
-  let bountyStatusFilter = $state<'ALL' | BountyStatus>('ALL');
+  let bountyBoardView = $state<BountyBoardView>('unfinished');
+  let unfinishedBountyFilter = $state<UnfinishedBountyFilter>('UNFINISHED');
+  let closedBountyFilter = $state<ClosedBountyStatus>('COMPLETED');
+  const bountyStatusFilter = $derived(bountyBoardView === 'unfinished' ? unfinishedBountyFilter : closedBountyFilter);
+  const bountyStatusOptions = $derived(bountyBoardView === 'unfinished'
+    ? [
+        { id: 'UNFINISHED', label: $t('全部') },
+        { id: 'DRAFT', label: $t('草稿') },
+        { id: 'OPEN', label: $t('待接取') },
+        { id: 'IN_PROGRESS', label: $t('执行中') },
+        { id: 'WAITING_INFO', label: $t('待回复') },
+        { id: 'PENDING_ARBITRATION', label: $t('待仲裁') },
+      ] as const
+    : [
+        { id: 'COMPLETED', label: $t('已完成') },
+        { id: 'CANCELLED', label: $t('已取消') },
+      ] as const,
+  );
   let bountySearchQuery = $state('');
   let bounties = $state<BountyTask[]>([]);
+  const visibleBounties = $derived(bounties.filter(bounty =>
+    bountyStatusFilter === 'UNFINISHED'
+      ? bounty.status !== 'COMPLETED' && bounty.status !== 'CANCELLED'
+      : bounty.status === bountyStatusFilter,
+  ));
+  let bountyDeleteDialog = $state<HTMLDialogElement>();
+  let bountyDeleteTarget = $state<BountyTask | null>(null);
+  let bountyDeleteError = $state('');
+  let deletingBounty = $state(false);
+  let bountyStatusControls = $state<HTMLFieldSetElement>();
   let actionableBounties = $state<BountyTask[]>([]);
   let allBountiesForDeps = $state<BountyTask[]>([]);
   let selectedInboxDraftIds = $state<string[]>([]);
@@ -398,19 +430,48 @@
   let serviceReconnectSeq = 0;
   let connectionStatusSeq = 0;
 
+  function selectBountyBoardView(view: BountyBoardView): void {
+    if (view === bountyBoardView) return;
+    bountyBoardView = view;
+    void refreshBountiesOnly();
+  }
+
+  function handleBountyBoardTabKeydown(event: KeyboardEvent): void {
+    let view: BountyBoardView;
+    switch (event.key) {
+      case 'Home': view = 'unfinished'; break;
+      case 'End': view = 'closed'; break;
+      case 'ArrowLeft':
+      case 'ArrowRight': view = bountyBoardView === 'unfinished' ? 'closed' : 'unfinished'; break;
+      default: return;
+    }
+    event.preventDefault();
+    selectBountyBoardView(view);
+    document.getElementById(`bounty-view-${view}`)?.focus();
+  }
+
+  function selectBountyBoardStatus(status: UnfinishedBountyFilter | ClosedBountyStatus): void {
+    if (status === 'COMPLETED' || status === 'CANCELLED') {
+      closedBountyFilter = status;
+    } else {
+      unfinishedBountyFilter = status;
+    }
+    void refreshBountiesOnly();
+  }
+
   function buildBountyQuery(): BountyQuery {
     const query: BountyQuery = {};
     if (bountyProjectFilter !== 'ALL') {
       query.project_id = bountyProjectFilter;
     }
-    if (bountyStatusFilter !== 'ALL') {
+    if (bountyStatusFilter !== 'UNFINISHED') {
       query.status = bountyStatusFilter;
     }
     const trimmedQ = bountySearchQuery.trim();
     if (trimmedQ) {
       query.q = trimmedQ;
     }
-    if (bountyStatusFilter === 'ALL' || bountyStatusFilter === 'DRAFT') {
+    if (bountyStatusFilter === 'UNFINISHED' || bountyStatusFilter === 'DRAFT') {
       query.include_drafts = true;
     }
     return query;
@@ -1047,6 +1108,7 @@
 
   async function reconnectBountyService(preferInjected = false, throwOnError = false): Promise<void> {
     const serviceSeq = ++serviceReconnectSeq;
+    if (bountyDeleteDialog?.open) bountyDeleteDialog.close();
     let statusSeq = ++connectionStatusSeq;
     bountyListInFlightCount += 1;
     agentListInFlightCount += 1;
@@ -1621,6 +1683,90 @@
     } finally {
       detailInFlightCount -= 1;
     }
+  }
+
+  function closeBountyDetail(): void {
+    detailRequestSeq += 1;
+    activeDetail = null;
+  }
+
+  async function handleRestoreDraftFromDrawer(bountyId: string): Promise<void> {
+    const detailSeq = ++detailRequestSeq;
+    const serviceSeq = serviceReconnectSeq;
+    const api = activeBountyApi;
+    const isCurrentService = () =>
+      !componentDisposed && serviceSeq === serviceReconnectSeq && api === activeBountyApi;
+    detailInFlightCount += 1;
+    try {
+      const draft = await api.restoreBountyDraft(bountyId);
+      if (!isCurrentService()) return;
+
+      // 已提交的状态立即生效，即使随后刷新列表或流转记录失败。
+      const replaceBounty = (bounty: BountyTask) => bounty.id === bountyId ? draft : bounty;
+      applyBountySnapshots(bounties.map(replaceBounty), allBountiesForDeps.map(replaceBounty));
+      const showDraft = detailSeq === detailRequestSeq && activeDetail?.bounty.id === bountyId;
+      if (showDraft && activeDetail) activeDetail = { ...activeDetail, bounty: draft };
+      showToast($t('已转为草稿'));
+      const [refreshedDetail] = await Promise.all([
+        showDraft ? api.getBountyDetail(bountyId).catch(() => null) : null,
+        refreshBountiesOnly(),
+      ]);
+      if (refreshedDetail && isCurrentService() && detailSeq === detailRequestSeq) {
+        activeDetail = refreshedDetail;
+      }
+    } finally {
+      detailInFlightCount -= 1;
+    }
+  }
+
+  async function openBountyDeleteDialog(bounty: BountyTask): Promise<void> {
+    if (deletingBounty || bountyDeleteDialog?.open) return;
+    const serviceSeq = serviceReconnectSeq;
+    bountyDeleteTarget = bounty;
+    bountyDeleteError = '';
+    await tick();
+    if (serviceSeq === serviceReconnectSeq && activeDetail?.bounty.id === bounty.id && !bountyDeleteDialog?.open) {
+      bountyDeleteDialog?.showModal();
+    }
+  }
+
+  async function confirmBountyDeletion(): Promise<void> {
+    if (!bountyDeleteTarget || deletingBounty) return;
+    const id = bountyDeleteTarget.id;
+    const api = activeBountyApi;
+    const serviceSeq = serviceReconnectSeq;
+    const isCurrentService = () =>
+      !componentDisposed && serviceSeq === serviceReconnectSeq && api === activeBountyApi;
+    deletingBounty = true;
+    bountyDeleteError = '';
+    try {
+      await api.deleteBounty(id);
+    } catch (error) {
+      if (!isCurrentService()) return;
+      bountyDeleteError = formatServiceError(error);
+      if (error instanceof ServiceApiError && error.code === 'BOUNTY_HAS_DEPENDENTS') {
+        const detail = await api.getBountyDetail(id).catch(() => null);
+        const titles = detail?.blocks?.map(bounty => bounty.title);
+        if (isCurrentService() && titles?.length) {
+          bountyDeleteError = $t('该任务仍是以下任务的前置任务：{tasks}', { tasks: titles.join(' / ') });
+        }
+      }
+      return;
+    } finally {
+      deletingBounty = false;
+    }
+    if (!isCurrentService()) return;
+
+    bountyDeleteDialog?.close();
+    if (activeDetail?.bounty.id === id) closeBountyDetail();
+    // 刷新前移除旧快照中的任务，后续读取失败时界面也不会继续显示已删除的卡片。
+    applyBountySnapshots(
+      bounties.filter(bounty => bounty.id !== id),
+      allBountiesForDeps.filter(bounty => bounty.id !== id),
+    );
+    void refreshBountiesOnly();
+    await tick();
+    bountyStatusControls?.querySelector<HTMLInputElement>('input:checked')?.focus();
   }
 
   async function handleReleaseLeaseFromDrawer(bountyId: string): Promise<void> {
@@ -2555,56 +2701,85 @@
             </div>
           </header>
 
-          <div class="workspace-toolbar">
-            <div class="filter-pills" role="group" aria-label={$t('全部状态')}>
-              {#each [
-                { id: 'ALL', label: $t('全部状态') },
-                { id: 'DRAFT', label: $t('草稿') },
-                { id: 'OPEN', label: $t('待接取') },
-                { id: 'IN_PROGRESS', label: $t('执行中') },
-                { id: 'WAITING_INFO', label: $t('待回复') },
-                { id: 'PENDING_ARBITRATION', label: $t('待仲裁') },
-                { id: 'COMPLETED', label: $t('已完成') },
-                { id: 'CANCELLED', label: $t('已取消') },
-              ] as item (item.id)}
-                <button
-                  type="button"
-                  class="filter-pill"
-                  class:active={bountyStatusFilter === item.id}
-                  data-status-filter={item.id}
-                  onclick={() => {
-                    bountyStatusFilter = item.id as typeof bountyStatusFilter;
-                    void refreshBountiesOnly();
-                  }}
-                >
-                  {item.label}
-                </button>
-              {/each}
+          <div class="bounty-board-toolbar">
+            <div class="bounty-board-controls">
+              <div class="bounty-board-tabs" role="tablist" aria-label={$t('任务视图')}>
+                {#each [
+                  { id: 'unfinished', label: $t('未结束') },
+                  { id: 'closed', label: $t('已结束') },
+                ] as const as view (view.id)}
+                  <button
+                    type="button"
+                    role="tab"
+                    id={`bounty-view-${view.id}`}
+                    class="filter-pill bounty-board-tab"
+                    data-bounty-view={view.id}
+                    aria-selected={bountyBoardView === view.id}
+                    aria-controls="bounty-board-panel"
+                    tabindex={bountyBoardView === view.id ? 0 : -1}
+                    onclick={() => selectBountyBoardView(view.id)}
+                    onkeydown={handleBountyBoardTabKeydown}
+                  >
+                    {view.label}
+                  </button>
+                {/each}
+              </div>
+              <fieldset class="segmented-group bounty-status-segments" bind:this={bountyStatusControls}>
+                <legend class="visually-hidden">{$t('任务状态')}</legend>
+                {#each bountyStatusOptions as status (status.id)}
+                  <input
+                    type="radio"
+                    id={`bounty-status-${status.id}`}
+                    class="visually-hidden"
+                    name="bounty-board-status"
+                    value={status.id}
+                    data-status-filter={status.id}
+                    checked={bountyStatusFilter === status.id}
+                    onclick={() => selectBountyBoardStatus(status.id)}
+                  />
+                  <label
+                    class="segmented-button"
+                    class:active={bountyStatusFilter === status.id}
+                    for={`bounty-status-${status.id}`}
+                  >{status.label}</label>
+                {/each}
+              </fieldset>
             </div>
           </div>
 
-          <div class="skeleton-stage" data-slot="bounty-list-region">
-            {#if bounties.length === 0}
+          <div
+            class="skeleton-stage"
+            id="bounty-board-panel"
+            role="tabpanel"
+            aria-labelledby={`bounty-view-${bountyBoardView}`}
+            data-slot="bounty-list-region"
+          >
+            {#if visibleBounties.length === 0}
               <div class="empty-state-card">
                 <div class="empty-state-icon" aria-hidden="true">
                   <ProjectIcon icon={currentProjectIcon} large />
                 </div>
-                <h2 class="empty-state-title">{$t('暂无任务')}</h2>
-                <p class="empty-state-copy">
-                  {$t('发布新任务后，将在这里按项目与状态筛选浏览任务详情、验收条件和交付记录。')}
-                </p>
-                <button
-                  type="button"
-                  class="primary"
-                  data-action="empty-post-bounty"
-                  onclick={openCreateComposer}
-                >
-                  {$t('发布任务')}
-                </button>
+                <h2 class="empty-state-title">
+                  {bountySearchQuery.trim() ? $t('没有符合条件的任务')
+                    : bountyStatusFilter === 'UNFINISHED' ? $t('暂无未结束任务')
+                    : bountyStatusFilter === 'COMPLETED' ? $t('暂无已完成任务')
+                    : bountyStatusFilter === 'CANCELLED' ? $t('暂无已取消任务')
+                    : $t('暂无任务')}
+                </h2>
+                {#if bountyStatusFilter === 'UNFINISHED' && !bountySearchQuery.trim()}
+                  <button
+                    type="button"
+                    class="primary"
+                    data-action="empty-post-bounty"
+                    onclick={openCreateComposer}
+                  >
+                    {$t('发布任务')}
+                  </button>
+                {/if}
               </div>
             {:else}
               <div class="bounty-card-grid" data-slot="bounty-card-grid">
-                {#each bounties as bounty (bounty.id)}
+                {#each visibleBounties as bounty (bounty.id)}
                   <BountyCard
                     {bounty}
                     project={bountyProjectsById.get(bounty.project_id)}
@@ -2804,14 +2979,13 @@
       project={bountyProjectsById.get(activeDetail.bounty.project_id)}
       agents={allAgents}
       allBounties={allBountiesForDeps}
-      onClose={() => {
-        detailRequestSeq += 1;
-        activeDetail = null;
-      }}
+      onClose={closeBountyDetail}
       onEditDraft={openEditDraftComposer}
       onPublish={handlePublishFromDrawer}
       onWithdraw={handleWithdrawFromDrawer}
       onCancel={handleCancelFromDrawer}
+      onRestoreDraft={handleRestoreDraftFromDrawer}
+      onDelete={openBountyDeleteDialog}
       onReleaseLease={handleReleaseLeaseFromDrawer}
       onInviteCollaborator={handleInviteCollaboratorFromDrawer}
       onSelectBounty={id => void openBountyDetail(id)}
@@ -2821,6 +2995,45 @@
       onRejectArbitration={handleRejectArbitrationFromDrawer}
     />
   {/if}
+
+  <dialog
+    class="modal-dialog bounty-delete-dialog"
+    aria-labelledby="bounty-delete-title"
+    data-dialog="delete-bounty"
+    bind:this={bountyDeleteDialog}
+    oncancel={event => { if (deletingBounty) event.preventDefault(); }}
+    onclose={() => {
+      if (bountyDeleteDialog?.open) return;
+      bountyDeleteTarget = null;
+      bountyDeleteError = '';
+    }}
+  >
+    {#if bountyDeleteTarget}
+      <header class="modal-header">
+        <h2 class="modal-title" id="bounty-delete-title">
+          {$t('永久删除「{title}」？', { title: bountyDeleteTarget.title })}
+        </h2>
+      </header>
+      {#if bountyDeleteError}
+        <p class="dialog-error" role="alert">{bountyDeleteError}</p>
+      {/if}
+      <div class="modal-actions">
+        <!-- svelte-ignore a11y_autofocus (删除确认框打开时焦点落在安全操作) -->
+        <button type="button" autofocus disabled={deletingBounty} onclick={() => bountyDeleteDialog?.close()}>
+          {$t('取消')}
+        </button>
+        <button
+          type="button"
+          class="danger-text"
+          data-action="confirm-delete-bounty"
+          disabled={deletingBounty}
+          onclick={confirmBountyDeletion}
+        >
+          {deletingBounty ? $t('正在删除…') : $t('永久删除')}
+        </button>
+      </div>
+    {/if}
+  </dialog>
 
   {#if composerOpen}
     <BountyComposerModal

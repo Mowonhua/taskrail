@@ -163,6 +163,126 @@ async fn http_auth_cors_health_and_validation() {
 }
 
 #[tokio::test]
+async fn http_delete_cancelled_bounty_preserves_dependencies() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let dir = tempfile::tempdir().unwrap();
+    let running = server::start(ServerConfig {
+        bind: "127.0.0.1:0".parse().unwrap(),
+        db_path: dir.path().join("taskrail.db"),
+        admin_token: "secret".into(),
+        mode: ServerMode::Standalone,
+    })
+    .await
+    .unwrap();
+    let base = &running.info.base_url;
+    let client = Client::new();
+    let auth = Some("secret");
+    let (status, project) = request(
+        &client,
+        base,
+        Method::POST,
+        "/projects",
+        auth,
+        Some(json!({"name":"发布"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let create = |title: &'static str, blocked_by: Vec<Value>| {
+        request(
+            &client,
+            base,
+            Method::POST,
+            "/bounties",
+            auth,
+            Some(json!({
+                "project_id":project["id"], "title":title, "difficulty":"C",
+                "assignee_mode":"any", "status":"OPEN", "blocked_by":blocked_by
+            })),
+        )
+    };
+    let (status, prerequisite) = create("前置任务", vec![]).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, dependent) = create("后续任务", vec![prerequisite["id"].clone()]).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let prerequisite_path = format!("/bounties/{}", prerequisite["id"].as_str().unwrap());
+    let dependent_path = format!("/bounties/{}", dependent["id"].as_str().unwrap());
+    let (status, _) = request(
+        &client,
+        base,
+        Method::DELETE,
+        &prerequisite_path,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, error) = request(
+        &client,
+        base,
+        Method::DELETE,
+        &prerequisite_path,
+        auth,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(error["error"]["code"], "INVALID_TRANSITION");
+
+    let (status, _) = request(
+        &client,
+        base,
+        Method::POST,
+        &format!("{prerequisite_path}/cancel"),
+        auth,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, error) = request(
+        &client,
+        base,
+        Method::DELETE,
+        &prerequisite_path,
+        auth,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(error["error"]["code"], "BOUNTY_HAS_DEPENDENTS");
+    let (_, detail) = request(&client, base, Method::GET, &dependent_path, auth, None).await;
+    assert_eq!(detail["bounty"]["is_blocked"], true);
+    assert_eq!(detail["bounty"]["blocked_by"], json!([prerequisite["id"]]));
+
+    let (status, _) = request(
+        &client,
+        base,
+        Method::POST,
+        &format!("{dependent_path}/cancel"),
+        auth,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    for path in [&dependent_path, &prerequisite_path] {
+        let (status, body) = request(&client, base, Method::DELETE, path, auth, None).await;
+        assert_eq!((status, body), (StatusCode::NO_CONTENT, Value::Null));
+        let (status, _) = request(&client, base, Method::GET, path, auth, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+    let (_, list) = request(
+        &client,
+        base,
+        Method::GET,
+        "/bounties?status=CANCELLED",
+        auth,
+        None,
+    )
+    .await;
+    assert_eq!(list, json!([]));
+    running.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn http_project_crud_and_bounty_lifecycle() {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let dir = tempfile::tempdir().unwrap();

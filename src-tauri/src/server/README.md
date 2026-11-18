@@ -92,9 +92,11 @@ cargo run --manifest-path src-tauri/Cargo.toml --bin taskrail-server -- --bind 1
 | `GET /api/v1/bounties/{id}/comments` | 管理员鉴权 | 200 `BountyComment[]` |
 | `POST /api/v1/bounties/{id}/comments` | 管理员鉴权，`CreateBountyComment` | 201 `{bounty:Bounty,comment:BountyComment}` |
 | `PATCH /api/v1/bounties/{id}` | 草稿部分更新 | 200 `Bounty` |
+| `DELETE /api/v1/bounties/{id}` | 管理员鉴权，无请求正文 | 204，仅删除无下游依赖的 `CANCELLED` 任务 |
 | `POST /api/v1/bounties/{id}/publish` | 无请求正文 | 200 `Bounty` |
 | `POST /api/v1/bounties/{id}/withdraw` | 无请求正文 | 200 `Bounty` |
 | `POST /api/v1/bounties/{id}/cancel` | 无请求正文 | 200 `Bounty` |
+| `POST /api/v1/bounties/{id}/restore-draft` | 仅接受 `CANCELLED`，无请求正文。保留标识、评论、依赖和事件，清除上一轮发布、接取和协作状态 | 200 `Bounty`，其他状态返回 409 `INVALID_TRANSITION` |
 | `POST /api/v1/bounties/{id}/release-lease` | 管理员鉴权，无请求正文 | 200 `Bounty` |
 | `GET /api/v1/admin/onboarding` | 无 | 200 `Onboarding` |
 | `PATCH /api/v1/admin/onboarding` | `{lan_open_registration:bool}` | 200 `Onboarding` |
@@ -315,7 +317,8 @@ Agent 任务列表和详情仅显示已发布（`status != DRAFT` 且 `published
 | 405 | `METHOD_NOT_ALLOWED` | 路由不支持该 HTTP 方法 |
 | 409 | `PROJECT_HAS_BOUNTIES` | 删除仍有任务引用的项目 |
 | 409 | `PROJECT_ARCHIVED` | 向归档项目创建、编辑、发布任务或订阅项目 |
-| 409 | `INVALID_TRANSITION` | 非草稿编辑或不允许的状态转换 |
+| 409 | `INVALID_TRANSITION` | 当前状态不允许该操作，包括删除非 `CANCELLED` 任务 |
+| 409 | `BOUNTY_HAS_DEPENDENTS` | 待删除任务仍是其他任务的前置条件，服务保留任务和依赖 |
 | 409 | `AGENT_NAME_TAKEN` | 注册名称已被使用 |
 | 409 | `BOUNTY_ALREADY_CLAIMED` | 任务已接取时撤回或重复接取 |
 | 409 | `STALE_LEASE` | 令牌不匹配、无持有者或租约已到期 |

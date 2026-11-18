@@ -49,6 +49,8 @@
     onPublish: (bountyId: string) => Promise<void>;
     onWithdraw: (bountyId: string) => Promise<void>;
     onCancel: (bountyId: string) => Promise<void>;
+    onRestoreDraft: (bountyId: string) => Promise<void>;
+    onDelete: (bounty: BountyTask) => Promise<void>;
     onReleaseLease: (bountyId: string) => Promise<void>;
     onInviteCollaborator?: (bountyId: string, agentId: string | null) => Promise<void>;
     onSelectBounty?: (bountyId: string) => Promise<void> | void;
@@ -68,6 +70,8 @@
     onPublish,
     onWithdraw,
     onCancel,
+    onRestoreDraft,
+    onDelete,
     onReleaseLease,
     onInviteCollaborator,
     onSelectBounty,
@@ -122,6 +126,8 @@
 
   function isTopmostDialog(): boolean {
     if (isDestroyed || !drawerEl || typeof document === 'undefined') return false;
+    // 永久删除确认框在浏览器顶层，打开时由它接管焦点和 Escape。
+    if (document.querySelector('dialog[data-dialog="delete-bounty"][open]')) return false;
     const modals = Array.from(
       document.querySelectorAll<HTMLElement>('[role="dialog"][aria-modal="true"]'),
     );
@@ -718,7 +724,7 @@
         {/if}
       </div>
 
-      {#if bounty.status === 'DRAFT' || bounty.status === 'OPEN' || bounty.status === 'WAITING_INFO' || canReleaseLease}
+      {#if bounty.status === 'DRAFT' || bounty.status === 'OPEN' || bounty.status === 'WAITING_INFO' || bounty.status === 'CANCELLED' || canReleaseLease}
         <div class="detail-drawer-actions" data-slot="detail-actions">
           {#if bounty.status === 'DRAFT'}
             <button
@@ -764,6 +770,24 @@
               onclick={() => void runAction(() => onCancel(bounty.id))}
             >
               {$t('取消任务')}
+            </button>
+          {:else if bounty.status === 'CANCELLED'}
+            <button
+              type="button"
+              data-action="restore-draft"
+              disabled={busy}
+              onclick={() => void runAction(() => onRestoreDraft(bounty.id))}
+            >
+              {$t('转为草稿')}
+            </button>
+            <button
+              type="button"
+              class="danger-text"
+              data-action="delete-bounty"
+              disabled={busy}
+              onclick={() => void onDelete(bounty)}
+            >
+              {$t('删除')}
             </button>
           {:else}
             {#if canReleaseLease}

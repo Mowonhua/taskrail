@@ -255,6 +255,53 @@ impl Repository {
     pub fn cancel_bounty(&self, id: &str, actor: &str) -> Result<Bounty> {
         self.transition(id, actor, Transition::Cancel)
     }
+
+    pub fn restore_bounty_draft(&self, id: &str, actor: &str) -> Result<Bounty> {
+        self.write(|tx| {
+            // 保留递增的 lease_id，确保重新发布和接取后也不能使用旧令牌。
+            // 清除 published_at，使恢复后的草稿即使再次丢弃也不会被当成已发布任务。
+            let changed = tx.execute(
+                "UPDATE bounties SET status='DRAFT', published_at=NULL, withdrawn_at=NULL,
+                    cancelled_at=NULL, completed_at=NULL, assignment_expires_at=NULL,
+                    lease_agent_id=NULL, lease_expires_at=NULL, lease_warned_id=0,
+                    active_duration_ms=0, active_started_at=NULL, rejection_count=0,
+                    arbitrator_agent_id=NULL, arbitration_expires_at=NULL, arbitration_tried_ids_json='[]',
+                    completion_note=NULL, completion_cost=NULL, quality_grade=NULL,
+                    calibrated_difficulty=NULL, draft_collaborator_agent_id=NULL,
+                    draft_needs_human_review=0, updated_at=?2
+                 WHERE id=?1 AND status='CANCELLED'",
+                params![id, now()],
+            )?;
+            if changed != 1 {
+                find_bounty(tx, id)?;
+                return Err(invalid_transition());
+            }
+            // 下一次撤回只应通知本轮发布的派单对象。
+            tx.execute("DELETE FROM bounty_dispatches WHERE bounty_id=?1", [id])?;
+            let updated = find_bounty(tx, id)?;
+            event(tx, &updated, "restored_to_draft", actor, Some(BountyStatus::Cancelled), json!({}))?;
+            Ok(updated)
+        })
+    }
+
+    /// 函数职责：永久删除已取消任务及其详情记录。
+    /// 实现思路：在同一写事务中检查下游依赖并删除，避免级联删除依赖边解除后续任务的阻塞。
+    pub fn delete_bounty(&self, id: &str) -> Result<()> {
+        self.write(|tx| {
+            if find_bounty(tx, id)?.status != BountyStatus::Cancelled {
+                return Err(invalid_transition());
+            }
+            if !dependencies::related(tx, id, false)?.is_empty() {
+                return Err(ApiError::conflict(
+                    "BOUNTY_HAS_DEPENDENTS",
+                    "该任务仍是其他任务的前置任务",
+                ));
+            }
+            tx.execute("DELETE FROM bounties WHERE id=?1", [id])?;
+            Ok(())
+        })
+    }
+
     fn transition(&self, id: &str, actor: &str, action: Transition) -> Result<Bounty> {
         self.write(|tx| {
             let b = find_bounty(tx,id)?;

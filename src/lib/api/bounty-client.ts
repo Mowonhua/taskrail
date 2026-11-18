@@ -152,6 +152,10 @@ export interface BountyApiPort {
   publishBountiesBatch?(input: PublishBountiesBatchInput): Promise<BountyTask[]>;
   withdrawBounty(id: string): Promise<BountyTask>;
   cancelBounty(id: string): Promise<BountyTask>;
+  /** 将已取消的任务转为草稿，保留任务标识和历史记录。 */
+  restoreBountyDraft(id: string): Promise<BountyTask>;
+  /** 永久删除已取消任务。仍有后续任务依赖时，以 BOUNTY_HAS_DEPENDENTS 拒绝。 */
+  deleteBounty(id: string): Promise<void>;
   releaseLease(id: string): Promise<BountyTask>;
   getArbitrationConfig?(): Promise<ArbitrationConfig>;
   updateArbitrationConfig?(input: ArbitrationConfig): Promise<ArbitrationConfig>;
@@ -480,6 +484,14 @@ export class HttpBountyClient implements BountyApiPort {
 
   async cancelBounty(id: string): Promise<BountyTask> {
     return await this.request<BountyTask>('POST', `/api/v1/bounties/${encodeURIComponent(id)}/cancel`);
+  }
+
+  async restoreBountyDraft(id: string): Promise<BountyTask> {
+    return await this.request<BountyTask>('POST', `/api/v1/bounties/${encodeURIComponent(id)}/restore-draft`);
+  }
+
+  async deleteBounty(id: string): Promise<void> {
+    await this.request<void>('DELETE', `/api/v1/bounties/${encodeURIComponent(id)}`);
   }
 
   async releaseLease(id: string): Promise<BountyTask> {
@@ -3129,6 +3141,71 @@ export function createMemoryBountyClient(seed?: {
       }
       recordEvent(hydrated, 'cancelled', 'human', existing.status);
       return hydrated;
+    },
+
+    async restoreBountyDraft(id: string): Promise<BountyTask> {
+      return withTransaction(() => {
+        const existing = requireBounty(id);
+        if (existing.status !== 'CANCELLED') {
+          throw new ServiceApiError('INVALID_TRANSITION', 409, '当前状态不允许此操作');
+        }
+        // 清除上一轮公开和接取的状态，保留 lease_id 供下一次接取递增。
+        const updated: BountyTask = {
+          ...existing,
+          status: 'DRAFT',
+          published_at: null,
+          withdrawn_at: null,
+          cancelled_at: null,
+          completed_at: null,
+          assignment_expires_at: null,
+          lease_agent_id: null,
+          lease_expires_at: null,
+          active_duration_ms: 0,
+          active_started_at: null,
+          rejection_count: 0,
+          arbitrator_agent_id: null,
+          arbitration_expires_at: null,
+          completion_note: null,
+          completion_cost: null,
+          quality_grade: null,
+          calibrated_difficulty: null,
+          draft_collaborator_agent_id: null,
+          draft_needs_human_review: false,
+          updated_at: nowIso(),
+        };
+        bounties.set(id, updated);
+        leaseWarnedIdByBounty.delete(id);
+        arbitrationTriedIdsByBounty.delete(id);
+        bountyDispatches.delete(id);
+        const hydrated = hydrateBounty(updated);
+        recordEvent(hydrated, 'restored_to_draft', 'human', existing.status);
+        return hydrated;
+      });
+    },
+
+    async deleteBounty(id: string): Promise<void> {
+      const existing = requireBounty(id);
+      if (existing.status !== 'CANCELLED') {
+        throw new ServiceApiError('INVALID_TRANSITION', 409, '当前状态不允许此操作');
+      }
+      if (relatedSummaries(id, false).length > 0) {
+        throw new ServiceApiError('BOUNTY_HAS_DEPENDENTS', 409, '该任务仍是其他任务的前置任务');
+      }
+
+      // 与 SQLite 外键行为一致。派生任务独立保留，任务名下的明细随任务删除。
+      for (const child of bounties.values()) {
+        if (child.parent_bounty_id === id) child.parent_bounty_id = null;
+      }
+      for (const agent of agentsById.values()) {
+        agent.ledger = agent.ledger.filter(entry => entry.bounty_id !== id);
+      }
+      bounties.delete(id);
+      dependenciesByBounty.delete(id);
+      eventsByBounty.delete(id);
+      commentsByBounty.delete(id);
+      bountyDispatches.delete(id);
+      leaseWarnedIdByBounty.delete(id);
+      arbitrationTriedIdsByBounty.delete(id);
     },
 
     async releaseLease(id: string): Promise<BountyTask> {

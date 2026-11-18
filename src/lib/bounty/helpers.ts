@@ -306,6 +306,8 @@ export function formatEventLabel(eventType: string): string {
       return translate('发布任务');
     case 'withdrawn':
       return translate('撤回为草稿');
+    case 'restored_to_draft':
+      return translate('转为草稿');
     case 'cancelled':
       return translate('取消任务');
     case 'claimed':
@@ -467,6 +469,8 @@ export function formatServiceError(error: unknown): string {
         return translate('所属项目不存在。');
       case 'BOUNTY_NOT_FOUND':
         return translate('未找到该任务。');
+      case 'BOUNTY_HAS_DEPENDENTS':
+        return translate('该任务仍是其他任务的前置任务。');
       case 'AGENT_NOT_FOUND':
         return translate('未找到指定的 Agent。');
       case 'INVITE_TOKEN_NOT_FOUND':

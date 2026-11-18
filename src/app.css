@@ -1127,6 +1127,75 @@ button.ghost-action:hover:not(:disabled) {
   font-weight: var(--tab-active-weight, 600);
 }
 
+.bounty-board-toolbar {
+  container-type: inline-size;
+}
+
+.bounty-board-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 16px;
+  border-block-end: 1px solid var(--divider-color, var(--line));
+}
+
+.bounty-board-tabs {
+  display: flex;
+  align-self: stretch;
+  flex: none;
+  gap: 8px;
+}
+
+.bounty-board-tab {
+  position: relative;
+  min-block-size: 40px;
+  font-weight: 600;
+}
+
+.bounty-board-tab[aria-selected="true"] {
+  color: var(--ink);
+}
+
+.bounty-board-tab[aria-selected="true"]::after {
+  content: "";
+  position: absolute;
+  inset: auto 10px -2px;
+  border-block-end: 2px solid var(--accent);
+}
+
+.segmented-group.bounty-status-segments {
+  align-self: center;
+  flex-wrap: nowrap;
+  min-inline-size: 0;
+  max-inline-size: 100%;
+  margin: 0;
+  overflow-x: auto;
+}
+
+.bounty-status-segments .segmented-button {
+  display: inline-flex;
+  align-items: center;
+  cursor: pointer;
+}
+
+.bounty-status-segments input:focus-visible + .segmented-button {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+@container (inline-size < 39rem) {
+  .bounty-board-controls {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    border-block-end: 0;
+  }
+
+  .bounty-board-tabs {
+    flex-basis: 100%;
+    border-block-end: 1px solid var(--divider-color, var(--line));
+  }
+}
+
 .toolbar-search {
   position: relative;
   min-width: 210px;
@@ -1853,6 +1922,15 @@ button.ghost-action:hover:not(:disabled) {
   align-items: center;
   justify-content: flex-end;
   gap: 8px;
+}
+
+.bounty-delete-dialog {
+  width: min(420px, calc(100vw - 32px));
+  margin: auto;
+}
+
+.bounty-delete-dialog :is(.modal-title, .dialog-error) {
+  overflow-wrap: anywhere;
 }
 
 .toast-bar {

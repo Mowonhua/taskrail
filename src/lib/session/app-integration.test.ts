@@ -19,6 +19,11 @@ async function flush(): Promise<void> {
   }
 }
 
+async function selectBountyBoardView(container: HTMLElement, view: 'unfinished' | 'closed'): Promise<void> {
+  container.querySelector<HTMLButtonElement>(`[data-bounty-view="${view}"]`)!.click();
+  await flush();
+}
+
 function createMemoryPort(initial?: Partial<AppConfig>, isBrowser = false): {
   port: FilePort;
   saved: AppConfig[];
@@ -572,11 +577,11 @@ describe('任务板工作台外壳集成测试', () => {
     await flush();
 
     // 按状态筛选：[草稿] 可见，切换 待接取 时隐藏草稿
-    target.querySelector<HTMLButtonElement>('[data-status-filter="OPEN"]')!.click();
+    target.querySelector<HTMLInputElement>('[data-status-filter="OPEN"]')!.click();
     await flush();
     expect(target.querySelectorAll('.bounty-card')).toHaveLength(0);
 
-    target.querySelector<HTMLButtonElement>('[data-status-filter="DRAFT"]')!.click();
+    target.querySelector<HTMLInputElement>('[data-status-filter="DRAFT"]')!.click();
     await flush();
     expect(target.querySelectorAll('.bounty-card')).toHaveLength(1);
 
@@ -605,8 +610,8 @@ describe('任务板工作台外壳集成测试', () => {
     composer.querySelector<HTMLButtonElement>('[data-action="publish-now"]')!.click();
     await flush();
 
-    // 切回全部状态筛选，验证已转为 OPEN
-    target.querySelector<HTMLButtonElement>('[data-status-filter="ALL"]')!.click();
+    // 切回未结束筛选，验证已转为 OPEN
+    target.querySelector<HTMLInputElement>('[data-status-filter="UNFINISHED"]')!.click();
     await flush();
     drawer = target.querySelector<HTMLElement>('[data-dialog="bounty-detail"]')!;
     expect(drawer.dataset.bountyStatus).toBe('OPEN');
@@ -927,7 +932,7 @@ describe('任务板工作台外壳集成测试', () => {
     const openCard = target.querySelector<HTMLElement>(`[data-bounty-id="${openB.id}"]`)!;
     expect(openCard.querySelector('.status-pill')).toBeNull();
     expect(draftCard.querySelector('.status-pill')?.textContent?.trim()).toBe('[草稿]');
-    expect(target.querySelector('[data-status-filter="OPEN"]')?.textContent?.trim()).toBe('待接取');
+    expect(target.querySelector<HTMLInputElement>('[data-status-filter="OPEN"]')?.labels?.[0].textContent?.trim()).toBe('待接取');
 
     // 按项目筛选：仅保留 Beta 项目
     const projectFilter = target.querySelector<HTMLSelectElement>('#bounty-project-filter')!;
@@ -984,9 +989,169 @@ describe('任务板工作台外壳集成测试', () => {
     await flush();
 
     // 切换到「已取消」状态筛选，验证两条任务均可检索到
-    target.querySelector<HTMLButtonElement>('[data-status-filter="CANCELLED"]')!.click();
+    await selectBountyBoardView(target, 'closed');
+    target.querySelector<HTMLInputElement>('[data-status-filter="CANCELLED"]')!.click();
     await flush();
     expect(target.querySelectorAll('.bounty-card')).toHaveLength(2);
+  });
+
+  it('未结束与已结束使用卡片并独立保留状态筛选', async () => {
+    const { port } = createMemoryPort();
+    const setupApi = createMemoryBountyClient();
+    const project = await setupApi.createProject({ name: '主项目' });
+    const other = await setupApi.createProject({ name: '另一个项目' });
+    const input = { project_id: project.id, difficulty: 'C', assignee_mode: 'any', status: 'OPEN' } as const;
+    const open = await setupApi.createBounty({ ...input, title: '发布计划' });
+    const completed = await setupApi.createBounty({ ...input, title: '发布验收' });
+    const cancelled = await setupApi.createBounty({ ...input, title: '发布回顾' });
+    const unrelated = await setupApi.createBounty({ ...input, title: '无关任务' });
+    const otherProjectTask = await setupApi.createBounty({ ...input, project_id: other.id, title: '发布设计' });
+    const bountyApi = createMemoryBountyClient({
+      projects: [project, other],
+      bounties: [open, { ...completed, status: 'COMPLETED' },
+        ...[cancelled, unrelated, otherProjectTask].map(task => ({ ...task, status: 'CANCELLED' as const }))],
+    });
+    instance = mount(App, { target, props: { files: port, bountyApi } });
+    await flush();
+
+    const visibleIds = () => [...target.querySelectorAll<HTMLElement>('[data-slot="bounty-card-grid"] .bounty-card')]
+      .map(card => card.dataset.bountyId);
+    const statusFilter = (id: string) => target.querySelector<HTMLInputElement>(`[data-status-filter="${id}"]`)!;
+    const unfinishedTab = target.querySelector<HTMLButtonElement>('[data-bounty-view="unfinished"]')!;
+    const closedTab = target.querySelector<HTMLButtonElement>('[data-bounty-view="closed"]')!;
+    expect(unfinishedTab.getAttribute('aria-selected')).toBe('true');
+    expect(statusFilter('UNFINISHED').checked).toBe(true);
+    expect(statusFilter('UNFINISHED').labels?.[0].textContent?.trim()).toBe('全部');
+    expect(statusFilter('COMPLETED')).toBeNull();
+    expect(visibleIds()).toEqual([open.id]);
+
+    const projectFilter = target.querySelector<HTMLSelectElement>('#bounty-project-filter')!;
+    projectFilter.value = project.id;
+    projectFilter.dispatchEvent(new Event('change', { bubbles: true }));
+    const search = target.querySelector<HTMLInputElement>('[data-filter="search"]')!;
+    search.value = '发布';
+    search.dispatchEvent(new Event('input', { bubbles: true }));
+
+    statusFilter('OPEN').click();
+    await flush();
+    unfinishedTab.focus();
+    unfinishedTab.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+    await flush();
+    expect(document.activeElement).toBe(closedTab);
+    expect(closedTab.getAttribute('aria-selected')).toBe('true');
+    expect(statusFilter('COMPLETED').checked).toBe(true);
+    expect(statusFilter('OPEN')).toBeNull();
+    expect(visibleIds()).toEqual([completed.id]);
+
+    statusFilter('CANCELLED').click();
+    await flush();
+    expect(visibleIds()).toEqual([cancelled.id]);
+    expect(projectFilter.value).toBe(project.id);
+    expect(search.value).toBe('发布');
+
+    await selectBountyBoardView(target, 'unfinished');
+    expect(statusFilter('OPEN').checked).toBe(true);
+    expect(visibleIds()).toEqual([open.id]);
+    await selectBountyBoardView(target, 'closed');
+    expect(statusFilter('CANCELLED').checked).toBe(true);
+    expect(visibleIds()).toEqual([cancelled.id]);
+  });
+
+  it('已取消任务在抽屉确认删除并显示依赖冲突', async () => {
+    const { port } = createMemoryPort();
+    const bountyApi = createMemoryBountyClient();
+    const project = await bountyApi.createProject({ name: '发布' });
+    const input = { project_id: project.id, difficulty: 'C', assignee_mode: 'any', status: 'OPEN' } as const;
+    const removable = await bountyApi.createBounty({ ...input, title: '可删除任务' });
+    const prerequisite = await bountyApi.createBounty({ ...input, title: '前置任务' });
+    const downstream = await bountyApi.createBounty({ ...input, title: '后续验收任务', blocked_by: [prerequisite.id] });
+    await bountyApi.cancelBounty(removable.id);
+    await bountyApi.cancelBounty(prerequisite.id);
+    instance = mount(App, { target, props: { files: port, bountyApi } });
+    await flush();
+
+    expect(target.querySelector('[data-action="delete-bounty"]')).toBeNull();
+    await selectBountyBoardView(target, 'closed');
+    const category = target.querySelector<HTMLInputElement>('[data-status-filter="CANCELLED"]')!;
+    category.click();
+    await flush();
+    const dialog = target.querySelector<HTMLDialogElement>('[data-dialog="delete-bounty"]')!;
+    // jsdom 不实现原生对话框的打开和关闭。
+    dialog.showModal = () => { dialog.open = true; };
+    dialog.close = () => {
+      dialog.open = false;
+      dialog.dispatchEvent(new Event('close'));
+    };
+    expect(target.querySelector('.bounty-card [data-action="delete-bounty"]')).toBeNull();
+    const openDelete = async (id: string) => {
+      target.querySelector<HTMLButtonElement>(`[data-bounty-id="${id}"] .bounty-card-button`)!.click();
+      await flush();
+      const drawer = target.querySelector<HTMLElement>('[data-dialog="bounty-detail"]')!;
+      drawer.querySelector<HTMLButtonElement>('[data-slot="detail-actions"] [data-action="delete-bounty"]')!.click();
+      await flush();
+      expect(dialog.open).toBe(true);
+      expect(target.querySelector('[data-dialog="bounty-detail"]')).toBe(drawer);
+      return drawer;
+    };
+    const confirm = () => dialog.querySelector<HTMLButtonElement>('[data-action="confirm-delete-bounty"]')!.click();
+    const drawer = await openDelete(removable.id);
+    expect(dialog.textContent).toContain(removable.title);
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    dialog.close();
+    await flush();
+    expect(target.querySelector('[data-dialog="bounty-detail"]')).toBe(drawer);
+    expect((await bountyApi.getBountyDetail(removable.id)).bounty.id).toBe(removable.id);
+
+    drawer.querySelector<HTMLButtonElement>('[data-action="delete-bounty"]')!.click();
+    await flush();
+    confirm();
+    await flush();
+    expect(dialog.open).toBe(false);
+    expect(target.querySelector('[data-dialog="bounty-detail"]')).toBeNull();
+    expect(category.checked).toBe(true);
+    expect(target.querySelector(`[data-bounty-id="${removable.id}"]`)).toBeNull();
+    await expect(bountyApi.getBountyDetail(removable.id)).rejects.toMatchObject({ code: 'BOUNTY_NOT_FOUND' });
+
+    await openDelete(prerequisite.id);
+    confirm();
+    await flush();
+    expect(dialog.open).toBe(true);
+    expect(dialog.querySelector('[role="alert"]')?.textContent).toContain(downstream.title);
+    expect((await bountyApi.getBountyDetail(downstream.id)).bounty.is_blocked).toBe(true);
+  });
+
+  it('已取消任务可从抽屉转为草稿并重新发布', async () => {
+    const { port } = createMemoryPort();
+    const bountyApi = createMemoryBountyClient();
+    const project = await bountyApi.createProject({ name: '发布' });
+    const task = await bountyApi.createBounty({
+      project_id: project.id, title: '可恢复任务', difficulty: 'C', assignee_mode: 'any', status: 'OPEN',
+    });
+    await bountyApi.cancelBounty(task.id);
+    instance = mount(App, { target, props: { files: port, bountyApi } });
+    await flush();
+    await selectBountyBoardView(target, 'closed');
+    target.querySelector<HTMLInputElement>('[data-status-filter="CANCELLED"]')!.click();
+    await flush();
+    target.querySelector<HTMLButtonElement>(`[data-bounty-id="${task.id}"] .bounty-card-button`)!.click();
+    await flush();
+
+    const drawer = target.querySelector<HTMLElement>('[data-dialog="bounty-detail"]')!;
+    drawer.querySelector<HTMLButtonElement>('[data-slot="detail-actions"] [data-action="restore-draft"]')!.click();
+    await flush();
+    expect(drawer.dataset.bountyStatus).toBe('DRAFT');
+    expect(drawer.querySelector('[data-action="edit-draft"]')).not.toBeNull();
+    expect(drawer.querySelector('[data-action="delete-bounty"]')).toBeNull();
+    expect(target.querySelector(`[data-bounty-id="${task.id}"]`)).toBeNull();
+    expect(drawer.querySelector('[data-event-type="restored_to_draft"]')?.textContent).toContain('转为草稿');
+    drawer.querySelector<HTMLButtonElement>('button[aria-label="关闭对话框"]')!.click();
+    target.querySelector<HTMLButtonElement>('[data-nav-section="inbox"]')!.click();
+    await flush();
+    target.querySelector<HTMLButtonElement>(`[data-bounty-id="${task.id}"] .bounty-card-button`)!.click();
+    await flush();
+    target.querySelector<HTMLButtonElement>('[data-dialog="bounty-detail"] [data-action="publish-bounty"]')!.click();
+    await flush();
+    expect((await bountyApi.getBountyDetail(task.id)).bounty.status).toBe('OPEN');
   });
 
   it('初始服务连接失败时不阻塞窗口就绪（onready），并展示可重试的非阻塞连接错误横幅', async () => {
@@ -3594,9 +3759,10 @@ describe('任务板工作台外壳集成测试', () => {
     ).toContain('超时 1 次 弃单 1 次');
     expect(betaCard.textContent).not.toContain('·');
 
-    // 切回任务板验证已完成卡片与详情抽屉的交付说明、资源成本、保留的执行者段位及系统调度时间线
+    // 在已完成分类查看交付说明、资源成本、执行者段位及系统调度时间线
     target.querySelector<HTMLButtonElement>('[data-nav-section="bounties"]')!.click();
     await flush();
+    await selectBountyBoardView(target, 'closed');
 
     const completedCard = target.querySelector<HTMLElement>(
       `[data-bounty-id="${specificTask.id}"]`,
@@ -3755,18 +3921,7 @@ describe('任务板工作台外壳集成测试', () => {
     await vi.advanceTimersByTimeAsync(2000);
     await flush();
 
-    expect(card.dataset.bountyStatus).toBe('COMPLETED');
-    expect(card.querySelector('[data-slot="card-executor"]')?.textContent?.trim()).toBe(
-      '执行者: 实时工兵 Alpha（A 级）',
-    );
-    expect(card.querySelector('[data-slot="card-lease-countdown"]')).toBeNull();
-    expect(card.querySelector('[data-slot="card-completion-note"]')?.textContent?.trim()).toBe(
-      '外部自动同步完成备注',
-    );
-    expect(card.querySelector('[data-slot="card-completion-cost"]')?.textContent?.trim()).toBe(
-      '成本 2.5',
-    );
-
+    expect(target.querySelector(`[data-bounty-id="${syncTask.id}"]`)).toBeNull();
     expect(drawer.dataset.bountyStatus).toBe('COMPLETED');
     expect(drawer.querySelector('[data-action="release-lease"]')).toBeNull();
     expect(drawer.querySelector('[data-slot="detail-executor"]')?.textContent?.trim()).toBe(
@@ -4293,7 +4448,11 @@ describe('任务板工作台外壳集成测试', () => {
       drawer2.querySelector('[data-slot="detail-calibrated-difficulty"]')?.textContent?.trim(),
     ).toBe('校准难度 S');
     expect(target.querySelector('.toast-bar')?.textContent).toContain('已通过仲裁验收');
+    expect(drawer2.textContent).not.toContain('·');
 
+    drawer2.querySelector<HTMLButtonElement>('[aria-label="关闭对话框"]')!.click();
+    await flush();
+    await selectBountyBoardView(target, 'closed');
     const completedCard2 = target.querySelector<HTMLElement>(`[data-bounty-id="${task2.id}"]`)!;
     expect(completedCard2.querySelector('[data-slot="card-quality-grade"]')?.textContent?.trim()).toBe(
       '有瑕疵',
@@ -4302,7 +4461,6 @@ describe('任务板工作台外壳集成测试', () => {
       completedCard2.querySelector('[data-slot="card-calibrated-difficulty"]')?.textContent?.trim(),
     ).toBe('校准难度 S');
     expect(completedCard2.textContent).not.toContain('·');
-    expect(drawer2.textContent).not.toContain('·');
   });
 
   it('Issue 08 Agent 名录启用 busy 筛选后切换设置页时已注册空闲裁判仍正确识别且下拉框可用且名录未就绪或失败时不误标未注册符号 ID', async () => {
@@ -4547,6 +4705,7 @@ describe('任务板工作台外壳集成测试', () => {
     await flush();
 
     // 1. 任务板卡片与详情抽屉仅见段位，绝不出现隐藏 MMR 数值或 delta
+    await selectBountyBoardView(target, 'closed');
     const boardView = target.querySelector<HTMLElement>('[data-view="bounties"]')!;
     expect(boardView.textContent).not.toContain(exactMmrText);
     expect(boardView.textContent?.toLowerCase()).not.toContain('mmr');
@@ -4839,7 +4998,7 @@ describe('Issue 10 UI 集成测试：草稿共创拆单、前置依赖选择器�
       completion_note: 'A completed',
     });
 
-    target.querySelector<HTMLButtonElement>('[data-status-filter="ALL"]')!.click();
+    target.querySelector<HTMLInputElement>('[data-status-filter="UNFINISHED"]')!.click();
     await flush();
 
     const refreshedCardB = Array.from(target.querySelectorAll<HTMLElement>('.bounty-card')).find(

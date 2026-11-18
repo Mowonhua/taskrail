@@ -164,6 +164,7 @@ describe('HttpBountyClient', () => {
         headers: (init?.headers ?? {}) as Record<string, string>,
         body: typeof init?.body === 'string' ? init.body : undefined,
       });
+      if (init?.method === 'DELETE') return new Response(null, { status: 204 });
       return jsonResponse({ ok: true }, init?.method === 'POST' && String(input).endsWith('/bounties') ? 201 : 200);
     };
 
@@ -183,6 +184,8 @@ describe('HttpBountyClient', () => {
     await client.publishBounty('b1');
     await client.withdrawBounty('b1');
     await client.cancelBounty('b1');
+    await client.restoreBountyDraft('b/1');
+    await client.deleteBounty('b1');
 
     expect(calls.map(c => `${c.method} ${c.url}`)).toEqual([
       'POST https://host.example/prefix/api/v1/projects',
@@ -194,11 +197,17 @@ describe('HttpBountyClient', () => {
       'POST https://host.example/prefix/api/v1/bounties/b1/publish',
       'POST https://host.example/prefix/api/v1/bounties/b1/withdraw',
       'POST https://host.example/prefix/api/v1/bounties/b1/cancel',
+      'POST https://host.example/prefix/api/v1/bounties/b%2F1/restore-draft',
+      'DELETE https://host.example/prefix/api/v1/bounties/b1',
     ]);
     expect(JSON.parse(calls[2].body!)).toEqual({ icon: null, archived: true });
     expect(calls[6].body).toBeUndefined();
     expect(calls[7].body).toBeUndefined();
     expect(calls[8].body).toBeUndefined();
+    expect(calls[9].body).toBeUndefined();
+    expect(calls[9].headers.Authorization).toBe('Bearer tok');
+    expect(calls[10].body).toBeUndefined();
+    expect(calls[10].headers.Authorization).toBe('Bearer tok');
   });
 
   it('将服务错误信封解析为 ServiceApiError（401、409 抢单冲突与项目删除保护）', async () => {

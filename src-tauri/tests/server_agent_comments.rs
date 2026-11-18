@@ -82,6 +82,54 @@ fn error<T: std::fmt::Debug>(result: server::error::Result<T>, status: StatusCod
     assert_eq!(e.status, status);
     assert_eq!(e.code, code);
 }
+
+#[tokio::test]
+async fn http_restore_cancelled_task_resets_execution_and_preserves_history() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let k = Kernel::new();
+    let worker = k.agent("restore-worker");
+    let bounty = k.bounty();
+    let id = &bounty.id;
+    let claimed = k.repo.agent_claim_bounty(id, &worker.agent.id).unwrap();
+    k.repo
+        .agent_request_info(id, &worker.agent.id, question(claimed.lease_id, "需要目录"))
+        .unwrap();
+    k.repo.cancel_bounty(id, "human").unwrap();
+
+    let running = k.start().await;
+    let client = Client::new();
+    let admin = format!("{}/api/v1/bounties/{id}/restore-draft", running.info.base_url);
+    let agent = format!("{}/api/v1/agent/bounties/{id}", running.info.base_url);
+    let denied = client.post(&admin).bearer_auth(&worker.api_key).send().await.unwrap();
+    assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+    let restored = client.post(&admin).bearer_auth("comments-admin").send().await.unwrap();
+    assert_eq!(restored.status(), StatusCode::OK);
+    let restored: Bounty = restored.json().await.unwrap();
+    assert_eq!(restored.id, bounty.id);
+    assert_eq!(restored.status, BountyStatus::Draft);
+    assert_eq!(restored.lease_id, claimed.lease_id);
+    assert!(restored.lease_agent_id.is_none());
+    assert!(restored.published_at.is_none());
+    assert!(restored.cancelled_at.is_none());
+    let detail = k.repo.get_bounty_detail(id).unwrap();
+    assert_eq!(detail.comments[0].body, "需要目录");
+    assert_eq!(detail.events.last().unwrap().event_type, "restored_to_draft");
+    let hidden = client.get(&agent).bearer_auth(&worker.api_key).send().await.unwrap();
+    assert_eq!(hidden.status(), StatusCode::NOT_FOUND);
+    let repeated = client.post(&admin).bearer_auth("comments-admin").send().await.unwrap();
+    assert_eq!(repeated.status(), StatusCode::CONFLICT);
+
+    k.repo.publish_bounty(id, "human").unwrap();
+    let reclaimed = k.repo.agent_claim_bounty(id, &worker.agent.id).unwrap();
+    assert!(reclaimed.lease_id > claimed.lease_id);
+    error(
+        k.repo.agent_heartbeat_bounty(id, &worker.agent.id, LeaseHeartbeat { lease_id: claimed.lease_id }),
+        StatusCode::CONFLICT,
+        "STALE_LEASE",
+    );
+    running.shutdown().await.unwrap();
+}
+
 #[test]
 fn waiting_freezes_lease_and_counts_only_active_segments() {
     let k = Kernel::new();

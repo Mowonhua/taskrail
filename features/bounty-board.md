@@ -44,9 +44,11 @@
 | S-02 | 正常 | 「设置 → 项目管理」支持新建、编辑（名称、图标、说明、工作目录路径、默认验收规范）、归档与「显示已归档」后恢复；归档项目默认列表隐藏 | src/lib/session/app-integration.test.ts::任务板工作台外壳集成测试 > 支持设置页项目管理（新建、编辑、归档恢复、关联任务删除保护）与默认验收规范生效, src-tauri/tests/server_repository.rs::initialization_persists_and_project_crud_enforces_archive_and_references, src-tauri/tests/server_http.rs::http_project_crud_and_bounty_lifecycle |
 | S-03 | 约束 | 空白项目名及非法 `emoji:`/`lucide:` 图标被拒绝；归档项目拒绝创建、编辑或发布任务（`409 PROJECT_ARCHIVED`）；归档项目的草稿保留原 `project_id` 并阻止静默迁移；存在任何关联任务（含草稿与已取消）的项目拒绝删除（`409 PROJECT_HAS_BOUNTIES`），无引用项目可硬删除 | src-tauri/tests/server_repository.rs::validation_rejects_blank_names_invalid_icons_and_inconsistent_assignees, src-tauri/tests/server_http.rs::http_project_crud_and_bounty_lifecycle, src/lib/api/bounty-client.test.ts::createMemoryBountyClient > 支持项目增删改、归档拦截与关联任务删除保护, src/lib/session/app-integration.test.ts::任务板工作台外壳集成测试 > 支持设置页项目管理（新建、编辑、归档恢复、关联任务删除保护）与默认验收规范生效, src/lib/session/app-integration.test.ts::任务板工作台外壳集成测试 > 归档项目的草稿打开编辑时保留原 project_id 并阻止静默迁移\，主动切换活跃项目后可正常保存发布 |
 
-## F-BNT-002 任务草稿、发布与未接取撤回生命周期
+## F-BNT-002 任务板筛选与任务生命周期
 
-任务支持 `DRAFT` 暂存与 `OPEN` 立即发布，展示项目/状态（`[草稿]`）/字面关键字（`q`）筛选列表；任务详情抽屉以 Markdown+KaTeX 渲染正文与验收条件并展示状态流转时间线，支持草稿编辑发布、丢弃草稿（`CANCELLED`）、取消待接取/待回复任务（`CANCELLED`），以及在未被 Agent 接取时将 `OPEN` 原子撤回为 `DRAFT`。并发抢单与撤回通过 `BEGIN IMMEDIATE` 事务保证互斥，已接取任务撤回返回 `409 BOUNTY_ALREADY_CLAIMED` 并刷新抽屉状态；「待处理」视图自动聚合 `DRAFT`、`WAITING_INFO` 与 `PENDING_ARBITRATION` 任务。
+任务板用「未结束」和「已结束」切换视图，默认打开「未结束」。两个视图都用任务卡片，并在右侧用分段按钮筛选状态。管理员可在已取消任务的详情抽屉删除任务，或将任务转为草稿。服务拒绝删除仍是其他任务前置条件的任务。
+
+任务可暂存为 `DRAFT` 或立即发布为 `OPEN`。详情抽屉以 Markdown+KaTeX 渲染正文和验收条件，并展示状态流转时间线。管理员可编辑或丢弃草稿，取消待接取或待回复任务，也可将尚未接取的任务撤回为草稿。服务保证抢单与撤回互斥。已接取的任务撤回时返回 `409 BOUNTY_ALREADY_CLAIMED` 并刷新详情。「待处理」聚合草稿、待回复和待仲裁任务。
 
 创建提交：fdaa8f2
 
@@ -80,6 +82,9 @@
 | 关键实现 | src-tauri/src/server/db.rs::Repository::publish_bounty |
 | 关键实现 | src-tauri/src/server/db.rs::Repository::withdraw_bounty |
 | 关键实现 | src-tauri/src/server/db.rs::Repository::cancel_bounty |
+| 关键实现 | src-tauri/src/server/db.rs::Repository::restore_bounty_draft |
+| 关键实现 | src-tauri/src/server/db.rs::Repository::delete_bounty |
+| 关键实现 | src-tauri/src/server/routes.rs::delete_bounty |
 | 关键实现 | src-tauri/src/server/db/leases.rs::Repository::agent_claim_bounty |
 | 关键实现 | src-tauri/src/server/db.rs::Repository::transition |
 | 关键实现 | src-tauri/src/server/routes.rs::list_bounties |
@@ -89,6 +94,7 @@
 | 关键实现 | src-tauri/src/server/routes.rs::publish_bounty |
 | 关键实现 | src-tauri/src/server/routes.rs::withdraw_bounty |
 | 关键实现 | src-tauri/src/server/routes.rs::cancel_bounty |
+| 关键实现 | src-tauri/src/server/routes.rs::restore_bounty_draft |
 
 ### 行为场景
 
@@ -100,6 +106,10 @@
 | S-04 | 并发 | 独立连接并发执行抢单与撤回时仅一个成功；多 Agent 竞争接取仅一个胜出且 `lease_id` 递增；任务已被接取后撤回返回 `409 BOUNTY_ALREADY_CLAIMED`，前端抽屉展示错误并刷新为 `IN_PROGRESS` | src-tauri/tests/server_repository.rs::claim_and_withdraw_are_exclusive_across_independent_connections, src-tauri/tests/server_repository.rs::competing_claims_have_one_winner_and_fencing_token_increases, src/lib/session/app-integration.test.ts::任务板工作台外壳集成测试 > 支持任务详情抽屉、草稿编辑发布、未接取 OPEN 撤回草稿、并发抢单 409 冲突拦截与待处理聚合 |
 | S-05 | 约束 | 空白标题、非法初始状态、不一致执行者限制被拒绝；非 `DRAFT` 状态编辑返回 `INVALID_TRANSITION`；草稿更新组合校验失败整体回滚；事件写入失败回滚状态与时间戳；不存在的任务返回 `BOUNTY_NOT_FOUND` | src-tauri/tests/server_repository.rs::validation_rejects_blank_names_invalid_icons_and_inconsistent_assignees, src-tauri/tests/server_repository.rs::drafts_edit_publish_filter_and_non_drafts_reject_edits, src-tauri/tests/server_repository.rs::cancellation_and_missing_bounty_errors_cover_all_states, src-tauri/tests/server_repository.rs::failed_event_insert_rolls_back_state_and_timestamp |
 | S-06 | 正常 | 任务卡片仅在非 `OPEN` 状态显示状态标签；`OPEN` 卡片不显示状态标签，该状态仅保留在状态筛选分类「待接取」 | src/lib/session/app-integration.test.ts::任务板工作台外壳集成测试 > 支持任务板按项目筛选、关键字字面检索、丢弃草稿与取消待接取任务 |
+| S-07 | 正常 | 「未结束」默认选中「全部」，汇总草稿、待接取、执行中、待回复和待仲裁任务。「已结束」默认选中「已完成」，可切换到「已取消」。两个视图都使用分段筛选和任务卡片。切换视图保留项目、搜索词和各视图的状态筛选 | src/lib/session/app-integration.test.ts::任务板工作台外壳集成测试 > 未结束与已结束使用卡片并独立保留状态筛选 |
+| S-08 | 正常 | 管理员可在已取消任务的详情抽屉打开带任务名的永久删除确认框。取消确认会返回详情。删除成功后关闭详情并留在当前分类 | src/lib/session/app-integration.test.ts::任务板工作台外壳集成测试 > 已取消任务在抽屉确认删除并显示依赖冲突, src-tauri/tests/server_http.rs::http_delete_cancelled_bounty_preserves_dependencies |
+| S-09 | 约束 | 仅管理员可永久删除已取消任务；仍被其他任务作为前置条件时拒绝删除并保留依赖，确认框显示受影响的任务 | src/lib/session/app-integration.test.ts::任务板工作台外壳集成测试 > 已取消任务在抽屉确认删除并显示依赖冲突, src-tauri/tests/server_http.rs::http_delete_cancelled_bounty_preserves_dependencies |
+| S-10 | 正常 | 管理员可在抽屉将 `CANCELLED` 转为 `DRAFT`，保留任务标识、内容、依赖、评论与事件历史。草稿清除上轮接取、发布和协作状态，保留递增的租约编号。抽屉显示草稿操作，「已取消」移除该任务，「待处理」可找到草稿 | src/lib/session/app-integration.test.ts::任务板工作台外壳集成测试 > 已取消任务可从抽屉转为草稿并重新发布, src-tauri/tests/server_agent_comments.rs::http_restore_cancelled_task_resets_execution_and_preserves_history |
 
 ## F-BNT-003 Agent 自动发单与项目级草稿审核策略
 
