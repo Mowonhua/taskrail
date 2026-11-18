@@ -61,7 +61,7 @@ describe('应用配置校验', () => {
     }
   });
 
-  it('校验顶层工作台导航分区（悬赏板、待我处理、Agent 名录、设置）并拒绝未知分区', () => {
+  it('校验顶层工作台导航分区（悬赏板、待我处理、Agents、设置）并拒绝未知分区', () => {
     for (const workspaceSection of ['bounties', 'inbox', 'agents', 'settings'] as const) {
       expect(
         validateAppConfig({ projects: [], preferences: { workspaceSection } })?.preferences.workspaceSection,

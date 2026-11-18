@@ -116,7 +116,7 @@ describe('悬赏板工作台外壳集成测试', () => {
     setLocalePreference('zh-CN');
   });
 
-  it('左侧导航仅包含 4 个顶层入口（悬赏板、待我处理、Agent 名录、设置），支持视图切换与侧栏收起展开', async () => {
+  it('左侧导航仅包含 4 个顶层入口（悬赏板、待我处理、Agents、设置），支持视图切换与侧栏收起展开', async () => {
     const { port, saved } = createMemoryPort({
       projects: [{ id: 'p1', name: '核心引擎项目', path: 'D:/engine.md', icon: 'emoji:🎯' }],
       activeProjectId: 'p1',
@@ -131,16 +131,17 @@ describe('悬赏板工作台外壳集成测试', () => {
     expect(navItems.map(button => button.textContent?.trim())).toEqual([
       '悬赏板',
       '待我处理',
-      'Agent 名录',
+      'Agents',
       '设置',
     ]);
     // 侧栏中部不展示项目列表
     const sidebar = target.querySelector('.sidebar');
     expect(sidebar?.textContent).not.toContain('核心引擎项目');
 
-    // 默认在悬赏板视图，包含内置 Markdown + KaTeX 验收条件示例渲染
+    // 默认在悬赏板视图，空状态只给出说明与发布入口，不渲染演示用验收示例
     expect(target.querySelector('[data-view="bounties"]')).not.toBeNull();
-    expect(target.querySelector('.markdown-preview-sample .katex')).not.toBeNull();
+    expect(target.querySelector('[data-action="empty-post-bounty"]')).not.toBeNull();
+    expect(target.querySelector('.markdown-preview-sample')).toBeNull();
 
     // 切换到 待我处理
     navItems[1].click();
@@ -293,7 +294,7 @@ describe('悬赏板工作台外壳集成测试', () => {
     const labels = [...target.querySelectorAll('.workspace-nav .workspace-nav-item')].map(el =>
       el.textContent?.trim(),
     );
-    expect(labels).toEqual(['Bounty Board', 'Inbox', 'Agent Directory', 'Settings']);
+    expect(labels).toEqual(['Bounty Board', 'Inbox', 'Agents', 'Settings']);
   });
 
   it('透明主题启动时不先发 opaque 请求，等待原生材质与内容就绪后才触发 onready 并执行遮罩淡出', async () => {
@@ -4280,7 +4281,7 @@ describe('悬赏板工作台外壳集成测试', () => {
     expect(pendingEntry.textContent).not.toContain('未注册符号 ID');
     expect(
       pendingEntry.querySelector<HTMLElement>('[data-arbitrator-identity="loading"]')?.textContent?.trim(),
-    ).toBe('正在加载 Agent 名录…');
+    ).toBe('正在加载 Agent 列表…');
 
     resolvePendingAgents(await originalListAgents());
     await flush();
@@ -4305,7 +4306,7 @@ describe('悬赏板工作台外壳集成测试', () => {
     expect(errorEntry.textContent).not.toContain('未注册符号 ID');
     expect(
       errorEntry.querySelector<HTMLElement>('[data-arbitrator-identity="error"]')?.textContent?.trim(),
-    ).toBe('Agent 名录加载失败');
+    ).toBe('Agent 列表加载失败');
   });
 
   it('Issue 08 仲裁链手动输入带前后空格的符号 ID 时保留原值并透传给 API', async () => {

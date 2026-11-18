@@ -489,7 +489,6 @@
         {$t('提供接入说明文档与 Agent 令牌管理入口')}
       </span>
     </div>
-    <span class="settings-tag">{$t('协作接入')}</span>
   </div>
 
   <div class="onboarding-lan-row" data-slot="lan-registration-row">

@@ -448,15 +448,15 @@
             <div class="inline-project-row">
               <button
                 type="button"
-                class="project-badge-button"
+                class="inline-project-icon-button"
                 data-action="open-inline-icon-picker"
                 aria-label={$t('选择项目图标')}
+                title={$t('选择项目图标')}
                 onclick={() => {
                   inlineIconPickerOpen = true;
                 }}
               >
                 <ProjectIcon icon={inlineProjectIcon ?? undefined} />
-                <span>{$t('选择图标')}</span>
               </button>
               <input
                 id="inline-project-name"
@@ -496,7 +496,7 @@
             <div class="inline-project-actions">
               <button
                 type="button"
-                class="secondary-action"
+                class="secondary-action ghost-action"
                 onclick={() => {
                   inlineProjectOpen = false;
                   inlineProjectError = '';
@@ -533,10 +533,10 @@
       <div class="composer-field">
         <div class="composer-field-header">
           <label class="composer-label" for="bounty-description-input">{$t('任务详情')}</label>
-          <div class="filter-pills" role="group" aria-label={$t('任务详情视图')}>
+          <div class="segmented-group segmented-compact" role="group" aria-label={$t('任务详情视图')}>
             <button
               type="button"
-              class="filter-pill"
+              class="segmented-button"
               class:active={descriptionTab === 'write'}
               data-tab="description-write"
               onclick={() => {
@@ -547,7 +547,7 @@
             </button>
             <button
               type="button"
-              class="filter-pill"
+              class="segmented-button"
               class:active={descriptionTab === 'preview'}
               data-tab="description-preview"
               onclick={() => {
@@ -579,10 +579,10 @@
       <div class="composer-field">
         <div class="composer-field-header">
           <label class="composer-label" for="bounty-criteria-input">{$t('验收条件')}</label>
-          <div class="filter-pills" role="group" aria-label={$t('验收条件视图')}>
+          <div class="segmented-group segmented-compact" role="group" aria-label={$t('验收条件视图')}>
             <button
               type="button"
-              class="filter-pill"
+              class="segmented-button"
               class:active={criteriaTab === 'write'}
               data-tab="criteria-write"
               onclick={() => {
@@ -593,7 +593,7 @@
             </button>
             <button
               type="button"
-              class="filter-pill"
+              class="segmented-button"
               class:active={criteriaTab === 'preview'}
               data-tab="criteria-preview"
               onclick={() => {

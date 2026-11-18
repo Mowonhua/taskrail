@@ -115,12 +115,12 @@
             {:else if agentsLoadError}
               <code class="agent-key-prefix">{entryId}</code>
               <span class="settings-tag" data-arbitrator-identity="error">
-                {$t('Agent 名录加载失败')}
+                {$t('Agent 列表加载失败')}
               </span>
             {:else if !agentsLoaded}
               <code class="agent-key-prefix">{entryId}</code>
               <span class="settings-tag" data-arbitrator-identity="loading">
-                {$t('正在加载 Agent 名录…')}
+                {$t('正在加载 Agent 列表…')}
               </span>
             {:else}
               <code class="agent-key-prefix">{entryId}</code>

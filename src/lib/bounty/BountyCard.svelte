@@ -124,24 +124,22 @@
 <article
   class="bounty-card"
   class:is-selected={selected}
+  class:is-selectable={selectable && Boolean(onToggleSelect)}
   data-bounty-id={bounty.id}
   data-bounty-status={bounty.status}
   data-bounty-difficulty={bounty.difficulty}
 >
   {#if selectable && onToggleSelect}
-    <div class="bounty-card-select-bar">
-      <label class="bounty-card-select-label">
-        <input
-          type="checkbox"
-          data-action="toggle-select-draft"
-          data-bounty-id={bounty.id}
-          checked={selected}
-          aria-label={$t('选择草稿 {title}', { title: bounty.title })}
-          onchange={() => onToggleSelect(bounty.id)}
-        />
-        <span>{$t('选择草稿')}</span>
-      </label>
-    </div>
+    <label class="bounty-card-select" title={$t('选择草稿')}>
+      <input
+        type="checkbox"
+        data-action="toggle-select-draft"
+        data-bounty-id={bounty.id}
+        checked={selected}
+        aria-label={$t('选择草稿 {title}', { title: bounty.title })}
+        onchange={() => onToggleSelect(bounty.id)}
+      />
+    </label>
   {/if}
   <button
     type="button"
@@ -151,11 +149,11 @@
   >
     <div class="bounty-card-header">
       <div class="bounty-card-badges">
-        <span class="difficulty-badge" data-difficulty={bounty.difficulty}>
-          [{bounty.difficulty}]
-        </span>
         <span class="status-pill" data-status={bounty.status}>
           {statusLabel}
+        </span>
+        <span class="difficulty-badge" data-difficulty={bounty.difficulty} title={$t('预估难度')}>
+          {bounty.difficulty}
         </span>
         {#if bounty.status === 'DRAFT' && bounty.draft_needs_human_review}
           <span class="draft-review-pill" data-slot="card-draft-review">
@@ -199,8 +197,13 @@
           </span>
         {/if}
       </div>
-      {#if timeLabel}
-        <time class="bounty-card-time" datetime={bounty.updated_at}>{timeLabel}</time>
+      {#if (bounty.comment_count ?? 0) > 0}
+        <span class="bounty-comment-pill" data-slot="card-comment-count">
+          <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true">
+            <path d="M3 3.5h10v7H7.5L4.5 13v-2.5H3z" />
+          </svg>
+          {$t('评论 {count}', { count: bounty.comment_count })}
+        </span>
       {/if}
     </div>
 
@@ -232,13 +235,8 @@
       </div>
     {/if}
 
-    <div class="bounty-card-meta">
-      <span class="bounty-card-project">
-        <ProjectIcon icon={project?.icon ?? undefined} />
-        <span class="bounty-card-project-name">{project?.name ?? $t('未命名项目')}</span>
-      </span>
-
-      <div class="bounty-card-meta-end">
+    {#if publisher.isAgent || collaborator || executor || arbitrator || bounty.status === 'PENDING_ARBITRATION' || bounty.status === 'WAITING_INFO' || leaseCountdown || arbitrationCountdown || bounty.assignee_mode !== 'any'}
+      <div class="bounty-card-people">
         {#if publisher.isAgent}
           <span class="bounty-publisher-pill" data-publisher-kind="agent">
             {publisher.label}
@@ -308,13 +306,20 @@
               : $t('仲裁剩余 {countdown}', { countdown: arbitrationCountdown.label })}
           </span>
         {/if}
-        {#if (bounty.comment_count ?? 0) > 0}
-          <span class="bounty-comment-pill" data-slot="card-comment-count">
-            {$t('评论 {count}', { count: bounty.comment_count })}
-          </span>
+        {#if bounty.assignee_mode !== 'any'}
+          <span class="bounty-card-constraint">{assigneeLabel}</span>
         {/if}
-        <span class="bounty-card-constraint">{assigneeLabel}</span>
       </div>
+    {/if}
+
+    <div class="bounty-card-meta">
+      <span class="bounty-card-project">
+        <ProjectIcon icon={project?.icon ?? undefined} />
+        <span class="bounty-card-project-name">{project?.name ?? $t('未命名项目')}</span>
+      </span>
+      {#if timeLabel}
+        <time class="bounty-card-time" datetime={bounty.updated_at}>{timeLabel}</time>
+      {/if}
     </div>
   </button>
 </article>

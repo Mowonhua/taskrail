@@ -279,16 +279,25 @@
       <div class="project-form-row">
         <button
           type="button"
-          class="project-badge-button"
+          class="inline-project-icon-button"
           data-action="open-project-form-icon-picker"
           aria-label={$t('选择项目图标')}
+          title={$t('选择项目图标')}
           onclick={() => {
             iconPickerOpen = true;
           }}
         >
           <ProjectIcon icon={formIcon ?? undefined} />
-          <span>{$t('选择图标')}</span>
         </button>
+
+        <input
+          id="project-form-name"
+          type="text"
+          class="settings-text-input"
+          aria-label={$t('项目名称')}
+          placeholder={$t('项目名称')}
+          bind:value={formName}
+        />
 
         {#if formIcon}
           <button
@@ -302,15 +311,6 @@
             {$t('清除图标')}
           </button>
         {/if}
-
-        <input
-          id="project-form-name"
-          type="text"
-          class="settings-text-input"
-          aria-label={$t('项目名称')}
-          placeholder={$t('项目名称')}
-          bind:value={formName}
-        />
       </div>
 
       <div class="project-form-field">

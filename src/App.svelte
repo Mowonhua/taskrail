@@ -43,7 +43,7 @@
   import BountyCard from './lib/bounty/BountyCard.svelte';
   import BountyComposerModal from './lib/bounty/BountyComposerModal.svelte';
   import BountyDetailDrawer from './lib/bounty/BountyDetailDrawer.svelte';
-  import { formatServiceError, renderMarkdownAction } from './lib/bounty/helpers';
+  import { formatServiceError } from './lib/bounty/helpers';
   import { BrowserFilePort } from './lib/browser-files';
   import { defaultPreferences, defaultThemeId, emptyAppConfig } from './lib/config-defaults';
   import type {
@@ -322,17 +322,11 @@
       case 'inbox':
         return { title: $t('待我处理') };
       case 'agents':
-        return { title: $t('Agent 名录') };
+        return { title: $t('Agents') };
       case 'settings':
         return { title: $t('设置') };
     }
   });
-
-  const sampleCriteriaMarkdown = $derived(
-    $locale === 'en'
-      ? '- [x] Passes `cargo test` & `npm test`\n- [ ] Complexity bound $O(n \\log n)$ verified'
-      : '- [x] 通过 `cargo test` 与 `npm test`\n- [ ] 验证复杂度上界 $O(n \\log n)$',
-  );
 
   function showToast(message: string): void {
     toast = message;
@@ -885,7 +879,7 @@
   }
 
   /**
-   * 后台静默同步当前悬赏列表、Agent 名录与已打开详情抽屉，响应外部 Agent 抢单、续租与交付状态变更。
+   * 后台静默同步当前悬赏列表、Agents 视图与已打开详情抽屉，响应外部 Agent 抢单、续租与交付状态变更。
    * 仅在页面可见、服务已连接且无重叠后台轮询时执行；某子项已有前台请求在途时跳过该子项，防止与前台操作竞争序列号。
    */
   async function syncRealtimeWorkspace(): Promise<void> {
@@ -2338,7 +2332,7 @@
           <rect x="3" y="4" width="10" height="8.5" rx="2.2" />
           <path d="M8 2v2M5.8 7.8h.01M10.2 7.8h.01M6 10.2h4" />
         </svg>
-        <span class="workspace-nav-label">{$t('Agent 名录')}</span>
+        <span class="workspace-nav-label">{$t('Agents')}</span>
       </button>
 
       <button
@@ -2459,24 +2453,25 @@
         </div>
       {:else if activeSection === 'bounties'}
         <section class="workspace-view" aria-label={sectionMeta.title} data-view="bounties">
-          <header class="view-hero">
-            <div class="view-hero-actions">
-              {#if projects.length > 1}
-                <div class="filter-pills" role="group" aria-label={$t('切换项目')}>
-                  {#each projects as project (project.id)}
-                    <button
-                      type="button"
-                      class="filter-pill"
-                      class:active={activeProject?.id === project.id}
-                      data-project-id={project.id}
-                      onclick={() => selectProject(project.id)}
-                    >
-                      <ProjectIcon icon={project.icon} />
-                      <span>{project.name}</span>
-                    </button>
-                  {/each}
-                </div>
-              {/if}
+          {#if projects.length > 1}
+            <div class="filter-pills local-project-pills" role="group" aria-label={$t('切换项目')}>
+              {#each projects as project (project.id)}
+                <button
+                  type="button"
+                  class="filter-pill"
+                  class:active={activeProject?.id === project.id}
+                  data-project-id={project.id}
+                  onclick={() => selectProject(project.id)}
+                >
+                  <ProjectIcon icon={project.icon} />
+                  <span>{project.name}</span>
+                </button>
+              {/each}
+            </div>
+          {/if}
+
+          <header class="view-hero" data-slot="bounty-toolbar">
+            <div class="view-scope">
               <button
                 type="button"
                 class="project-badge-button"
@@ -2487,22 +2482,8 @@
                 }}
               >
                 <ProjectIcon icon={currentProjectIcon} />
-                <span>{activeProject?.name ?? selectedBountyProject?.name ?? $t('全部项目')}</span>
+                <span class="visually-hidden">{activeProject?.name ?? selectedBountyProject?.name ?? $t('全部项目')}</span>
               </button>
-              <button
-                type="button"
-                class="primary"
-                data-action="open-composer"
-                title={$t('发布悬赏')}
-                onclick={openCreateComposer}
-              >
-                + {$t('发布悬赏')}
-              </button>
-            </div>
-          </header>
-
-          <div class="workspace-toolbar" data-slot="bounty-toolbar">
-            <div class="toolbar-filters-group">
               <select
                 id="bounty-project-filter"
                 class="toolbar-project-select"
@@ -2519,47 +2500,67 @@
                   <option value={project.id}>{project.name}</option>
                 {/each}
               </select>
-
-              <div class="filter-pills" role="group" aria-label={$t('全部状态')}>
-                {#each [
-                  { id: 'ALL', label: $t('全部状态') },
-                  { id: 'DRAFT', label: $t('[草稿]') },
-                  { id: 'OPEN', label: $t('待接单') },
-                  { id: 'IN_PROGRESS', label: $t('执行中') },
-                  { id: 'WAITING_INFO', label: $t('待回复') },
-                  { id: 'PENDING_ARBITRATION', label: $t('待仲裁') },
-                  { id: 'COMPLETED', label: $t('已完成') },
-                  { id: 'CANCELLED', label: $t('已取消') },
-                ] as item (item.id)}
-                  <button
-                    type="button"
-                    class="filter-pill"
-                    class:active={bountyStatusFilter === item.id}
-                    data-status-filter={item.id}
-                    onclick={() => {
-                      bountyStatusFilter = item.id as typeof bountyStatusFilter;
-                      void refreshBountiesOnly();
-                    }}
-                  >
-                    {item.label}
-                  </button>
-                {/each}
-              </div>
             </div>
 
-            <div class="toolbar-search">
-              <input
-                type="search"
-                class="toolbar-search-input"
-                data-filter="search"
-                aria-label={$t('搜索悬赏标题、编号或标签…')}
-                placeholder={$t('搜索悬赏标题、编号或标签…')}
-                value={bountySearchQuery}
-                oninput={event => {
-                  bountySearchQuery = (event.currentTarget as HTMLInputElement).value;
-                  void refreshBountiesOnly();
-                }}
-              />
+            <div class="view-hero-actions">
+              <div class="toolbar-search">
+                <svg class="toolbar-search-icon" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">
+                  <circle cx="7" cy="7" r="4.5" />
+                  <path d="m10.5 10.5 3 3" />
+                </svg>
+                <input
+                  type="search"
+                  class="toolbar-search-input"
+                  data-filter="search"
+                  aria-label={$t('搜索悬赏标题、编号或标签…')}
+                  placeholder={$t('搜索悬赏标题、编号或标签…')}
+                  value={bountySearchQuery}
+                  oninput={event => {
+                    bountySearchQuery = (event.currentTarget as HTMLInputElement).value;
+                    void refreshBountiesOnly();
+                  }}
+                />
+              </div>
+              <button
+                type="button"
+                class="primary"
+                data-action="open-composer"
+                title={$t('发布悬赏')}
+                onclick={openCreateComposer}
+              >
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
+                  <path d="M8 3v10M3 8h10" />
+                </svg>
+                {$t('发布悬赏')}
+              </button>
+            </div>
+          </header>
+
+          <div class="workspace-toolbar">
+            <div class="filter-pills" role="group" aria-label={$t('全部状态')}>
+              {#each [
+                { id: 'ALL', label: $t('全部状态') },
+                { id: 'DRAFT', label: $t('草稿') },
+                { id: 'OPEN', label: $t('待接单') },
+                { id: 'IN_PROGRESS', label: $t('执行中') },
+                { id: 'WAITING_INFO', label: $t('待回复') },
+                { id: 'PENDING_ARBITRATION', label: $t('待仲裁') },
+                { id: 'COMPLETED', label: $t('已完成') },
+                { id: 'CANCELLED', label: $t('已取消') },
+              ] as item (item.id)}
+                <button
+                  type="button"
+                  class="filter-pill"
+                  class:active={bountyStatusFilter === item.id}
+                  data-status-filter={item.id}
+                  onclick={() => {
+                    bountyStatusFilter = item.id as typeof bountyStatusFilter;
+                    void refreshBountiesOnly();
+                  }}
+                >
+                  {item.label}
+                </button>
+              {/each}
             </div>
           </div>
 
@@ -2573,14 +2574,13 @@
                 <p class="empty-state-copy">
                   {$t('发布新悬赏后，将在这里按项目与状态筛选浏览任务详情、验收条件和交付记录。')}
                 </p>
-                <div class="markdown-preview-sample" use:renderMarkdownAction={sampleCriteriaMarkdown}></div>
                 <button
                   type="button"
                   class="primary"
                   data-action="empty-post-bounty"
                   onclick={openCreateComposer}
                 >
-                  + {$t('发布悬赏')}
+                  {$t('发布悬赏')}
                 </button>
               </div>
             {:else}
@@ -2649,7 +2649,7 @@
                   </div>
                   <button
                     type="button"
-                    class="primary-action"
+                    class="primary"
                     data-action="publish-selected-drafts"
                     disabled={selectedPublishableDraftIds.length === 0}
                     onclick={() => void handlePublishBatch(selectedPublishableDraftIds)}
@@ -2675,19 +2675,6 @@
         </section>
       {:else if activeSection === 'agents'}
         <section class="workspace-view" aria-label={sectionMeta.title} data-view="agents">
-          <header class="view-hero">
-            <div class="view-hero-actions">
-              <button
-                type="button"
-                class="secondary-action"
-                data-action="open-skill-guide"
-                onclick={() => void handleOpenSkillGuide()}
-              >
-                {$t('接入指南 (SKILL.md)')}
-              </button>
-            </div>
-          </header>
-
           <AgentDirectory
             {agents}
             {agentsLoaded}

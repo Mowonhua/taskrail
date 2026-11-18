@@ -1,6 +1,6 @@
 <script lang="ts">
   /**
-   * 文件职责：承载 Agent 名录视图与接入指南（SKILL.md）预览导出弹窗。
+   * 文件职责：承载 Agents 视图与接入指南（SKILL.md）预览导出弹窗。
    * 定义范围：按活跃度与状态筛选、低密度展示已注册 Agent 档案（隐藏 MMR 数值）、停用/启用与二次确认吊销凭证操作。
    */
   import { tick } from 'svelte';
@@ -490,6 +490,8 @@
       {/each}
     </div>
 
+    <span class="toolbar-divider" aria-hidden="true"></span>
+
     <div class="filter-pills" role="group" aria-label={$t('按状态筛选')}>
       {#each [
         { id: 'ALL', label: $t('全部') },
@@ -510,13 +512,23 @@
     </div>
   </div>
 
-  {#if onRefreshAgents || onRetryLoadAgents}
-    <RefreshButton
-      action="refresh-agents"
-      busy={refreshingAgents || retryingAgents}
-      onRefresh={onRefreshAgents ?? handleRetryLoadAgents}
-    />
-  {/if}
+  <div class="toolbar-end-actions">
+    <button
+      type="button"
+      class="secondary-action"
+      data-action="open-skill-guide"
+      onclick={onOpenSkillGuide}
+    >
+      {$t('接入指南 (SKILL.md)')}
+    </button>
+    {#if onRefreshAgents || onRetryLoadAgents}
+      <RefreshButton
+        action="refresh-agents"
+        busy={refreshingAgents || retryingAgents}
+        onRefresh={onRefreshAgents ?? handleRetryLoadAgents}
+      />
+    {/if}
+  </div>
 </div>
 
 {#if agentsLoadError}
@@ -525,7 +537,7 @@
     role="alert"
     data-status="agent-directory-load-error"
   >
-    <span>{$t('Agent 名录加载失败：{error}', { error: agentsLoadError })}</span>
+    <span>{$t('Agent 列表加载失败：{error}', { error: agentsLoadError })}</span>
     {#if onRetryLoadAgents}
       <button
         type="button"
@@ -961,19 +973,19 @@
             return formatAgentTier(agentDetail.agent.tier);
           })()}
           <div class="agent-detail-stats" data-slot="agent-detail-summary">
-            <div class="agent-detail-stat-card">
+            <div class="agent-detail-stat-card is-primary">
               <span class="agent-detail-stat-label">{$t('隐藏 MMR')}</span>
               <strong class="agent-detail-stat-value agent-detail-mmr" data-slot="agent-detail-mmr">
                 {formatMmrValue(agentDetail.mmr)}
               </strong>
             </div>
-            <div class="agent-detail-stat-card">
+            <div class="agent-detail-stat-card is-primary">
               <span class="agent-detail-stat-label">{$t('当前段位')}</span>
               <strong class="agent-detail-stat-value" data-slot="agent-detail-tier">
                 [{agentDetail.agent.tier}] {detailTierLabel}
               </strong>
             </div>
-            <div class="agent-detail-stat-card">
+            <div class="agent-detail-stat-card is-primary">
               <span class="agent-detail-stat-label">{$t('定级状态')}</span>
               <strong class="agent-detail-stat-value" data-slot="agent-detail-placement">
                 {agentDetail.placement_count >= agentDetail.placement_required

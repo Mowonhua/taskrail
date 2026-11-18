@@ -545,11 +545,11 @@
     <header class="detail-drawer-header">
       <div class="detail-drawer-meta-top">
         <div class="bounty-card-badges">
-          <span class="difficulty-badge" data-difficulty={bounty.difficulty}>
-            [{bounty.difficulty}]
-          </span>
           <span class="status-pill" data-status={bounty.status}>
             {statusLabel}
+          </span>
+          <span class="difficulty-badge" data-difficulty={bounty.difficulty}>
+            {bounty.difficulty}
           </span>
           {#if bounty.status === 'DRAFT' && bounty.draft_needs_human_review}
             <span class="draft-review-pill" data-slot="detail-draft-review">
@@ -605,19 +605,29 @@
 
       <h2 class="detail-drawer-title">{bounty.title}</h2>
 
-      <div class="detail-drawer-meta-grid">
+      <div class="detail-drawer-submeta">
         <span class="bounty-card-project">
           <ProjectIcon icon={project?.icon ?? undefined} />
           <span class="bounty-card-project-name">{project?.name ?? $t('未命名项目')}</span>
         </span>
+        <span class="detail-meta-sep" aria-hidden="true"></span>
         <span
-          class="detail-meta-pill"
+          class="detail-meta-inline"
           data-slot="detail-publisher"
           data-publisher-kind={publisher.isAgent ? 'agent' : 'human'}
         >
           {publisher.label}
         </span>
-        <span class="detail-meta-pill">{assigneeLabel}</span>
+        <span class="detail-meta-sep" aria-hidden="true"></span>
+        <span class="detail-meta-time">
+          {$t('更新于 {time}', { time: formatTimestamp(bounty.updated_at || bounty.created_at) })}
+        </span>
+      </div>
+
+      <div class="detail-drawer-meta-grid">
+        {#if bounty.assignee_mode !== 'any'}
+          <span class="detail-meta-pill">{assigneeLabel}</span>
+        {/if}
         {#if executor}
           <span
             class="detail-meta-pill"
@@ -706,9 +716,6 @@
               : $t('有效耗时 {duration}', { duration: activeDurationLabel })}
           </span>
         {/if}
-        <span class="detail-meta-time">
-          {$t('更新于 {time}', { time: formatTimestamp(bounty.updated_at || bounty.created_at) })}
-        </span>
       </div>
 
       {#if bounty.status === 'DRAFT' || bounty.status === 'OPEN' || bounty.status === 'WAITING_INFO' || canReleaseLease}
@@ -809,7 +816,7 @@
           </div>
           {#if pendingQuestion}
             <div
-              class="bounty-detail-markdown"
+              class="bounty-detail-markdown is-flat"
               data-slot="detail-pending-question-body"
               use:renderMarkdownAction={pendingQuestion.body}
             ></div>
@@ -829,7 +836,7 @@
           </div>
           {#if bounty.completion_note?.trim()}
             <div
-              class="bounty-detail-markdown"
+              class="bounty-detail-markdown is-flat"
               data-slot="detail-completion-note"
               use:renderMarkdownAction={bounty.completion_note.trim()}
             ></div>
