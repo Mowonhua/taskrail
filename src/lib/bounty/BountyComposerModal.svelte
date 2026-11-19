@@ -174,12 +174,14 @@
     ) {
       depHelpBubble.showPopover();
     }
-    positionAnchoredPopover(depHelpButton, depHelpBubble, closeDepHelp);
+    positionAnchoredPopover(depHelpButton, depHelpBubble, closeDepHelp, { align: 'start' });
   }
 
   $effect(() => {
     if (!depHelpOpen || !depHelpButton || !depHelpBubble) return;
-    const stopObserve = observeAnchoredPopover(depHelpButton, depHelpBubble, closeDepHelp);
+    const stopObserve = observeAnchoredPopover(depHelpButton, depHelpBubble, closeDepHelp, {
+      align: 'start',
+    });
     const onKeydown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         event.preventDefault();
@@ -794,7 +796,7 @@
 
       <div class="composer-switch-row">
         <label class="composer-label" for="bounty-require-arbitration">{$t('开启仲裁验收')}</label>
-        <span class="settings-switch">
+        <label class="settings-switch">
           <input
             id="bounty-require-arbitration"
             type="checkbox"
@@ -805,7 +807,7 @@
           <span class="settings-switch-track" aria-hidden="true">
             <span class="settings-switch-thumb"></span>
           </span>
-        </span>
+        </label>
       </div>
 
       {#if formError}

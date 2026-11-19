@@ -1750,7 +1750,7 @@ describe('任务板工作台外壳集成测试', () => {
       '[data-action="toggle-lan-registration"]',
     )!;
     expect(lanSwitch.checked).toBe(false);
-    lanSwitch.click();
+    lanSwitch.closest('label')!.click();
     await flush();
     expect(lanSwitch.checked).toBe(true);
     expect((await bountyApi.getOnboardingSettings()).lan_open_registration).toBe(true);
@@ -2032,7 +2032,7 @@ describe('任务板工作台外壳集成测试', () => {
     expect(await bountyApi.listInviteTokens()).toEqual([]);
   });
 
-  it('支持 Agent 名录筛选、订阅范围与段位展示（不暴露 MMR）、停用启用与二次确认吊销凭证及 SKILL.md 接入指南弹窗', async () => {
+  it('支持 Agent 名录筛选、订阅范围与段位展示（不暴露 MMR）、停用启用与二次确认吊销凭证', async () => {
     const { port } = createMemoryPort({
       preferences: { ...emptyAppConfig().preferences, workspaceSection: 'agents' },
     });
@@ -2158,21 +2158,30 @@ describe('任务板工作台外壳集成测试', () => {
     await expect(bountyApi.agentGetMe(registeredIdle.api_key)).rejects.toMatchObject({
       code: 'AGENT_REVOKED',
     });
-
-    // 打开右上角「接入指南 (SKILL.md)」弹窗并可一键跳转到设置
-    target.querySelector<HTMLButtonElement>('[data-action="open-skill-guide"]')!.click();
-    await flush();
-    const guideDialog = target.querySelector<HTMLElement>('[data-dialog="skill-guide"]');
-    expect(guideDialog).not.toBeNull();
-    expect(guideDialog!.querySelector('[data-slot="skill-md-preview"]')?.textContent).toContain(
-      '# Taskrail Agent',
-    );
-    guideDialog!.querySelector<HTMLButtonElement>('[data-action="jump-to-onboarding-settings"]')!.click();
-    await flush();
-    expect(target.querySelector('[data-view="settings"]')).not.toBeNull();
   });
 
-  it('Agent 名录并发切换筛选时忽略迟到响应，关闭 SKILL.md 弹窗后不弹出过期错误提示', async () => {
+  it('Agents 空态「接入」按钮跳转到设置页 Agent 准入与协议位置', async () => {
+    const { port } = createMemoryPort({
+      preferences: { ...emptyAppConfig().preferences, workspaceSection: 'agents' },
+    });
+    const bountyApi = createMemoryBountyClient();
+    instance = mount(App, { target, props: { files: port, bountyApi } });
+    await flush();
+
+    const emptyState = target.querySelector<HTMLElement>('[data-slot="agent-empty-state"]');
+    expect(emptyState).not.toBeNull();
+    const onboarding = emptyState!.querySelector<HTMLButtonElement>(
+      '[data-action="open-agent-onboarding"]',
+    );
+    expect(onboarding).not.toBeNull();
+    expect(onboarding!.textContent?.trim()).toBe('接入');
+    onboarding!.click();
+    await flush();
+    expect(target.querySelector('[data-view="settings"]')).not.toBeNull();
+    expect(target.querySelector('[data-section="agent-onboarding"]')).not.toBeNull();
+  });
+
+  it('Agent 名录并发切换筛选时忽略迟到响应', async () => {
     const { port } = createMemoryPort({
       preferences: { ...emptyAppConfig().preferences, workspaceSection: 'agents' },
     });
@@ -2195,7 +2204,7 @@ describe('任务板工作台外壳集成测试', () => {
     });
     await baseApi.agentClaimBounty(busyApiKey, task.id);
 
-    const pending: { resolveBusy?: () => void; rejectSkill?: (error: Error) => void } = {};
+    const pending: { resolveBusy?: () => void } = {};
     const bountyApi = {
       ...baseApi,
       async listAgents(filter?: Parameters<typeof baseApi.listAgents>[0]) {
@@ -2206,12 +2215,6 @@ describe('任务板工作台外壳集成测试', () => {
           });
         }
         return result;
-      },
-      async getSkillMarkdown() {
-        await new Promise<never>((_resolve, reject) => {
-          pending.rejectSkill = reject;
-        });
-        throw new Error('unreachable');
       },
     };
 
@@ -2233,18 +2236,6 @@ describe('任务板工作台外壳集成测试', () => {
     expect(target.querySelectorAll('[data-agent-id]')).toHaveLength(1);
     expect(target.querySelector<HTMLElement>('[data-agent-id]')?.dataset.agentId).toBe(agentIdle.id);
     expect(target.textContent).not.toContain(agentBusy.name);
-
-    // 打开接入指南弹窗后立即关闭，迟到的 SKILL.md 加载失败不应触发过期 toast
-    target.querySelector<HTMLButtonElement>('[data-action="open-skill-guide"]')!.click();
-    await flush();
-    const closeBtn = target.querySelector<HTMLButtonElement>('[data-dialog="skill-guide"] .icon-button');
-    expect(closeBtn).not.toBeNull();
-    closeBtn!.click();
-    await flush();
-    pending.rejectSkill?.(new Error('late skill failure'));
-    await flush();
-    expect(target.querySelector('[data-dialog="skill-guide"]')).toBeNull();
-    expect(target.querySelector('.toast-banner')).toBeNull();
   });
 
   it('支持免审开关失败回滚、服务连接切换清理旧令牌与 SKILL.md 预览，以及浏览器禁用本地安装', async () => {
@@ -2788,27 +2779,6 @@ describe('任务板工作台外壳集成测试', () => {
         onboardingSection.querySelector('[data-status="onboarding-error"]')?.textContent,
       ).toContain('Clipboard text writing is unavailable');
       expect(onboardingSection.querySelector('[data-status="onboarding-feedback"]')).toBeNull();
-      expect(target.querySelector('.toast-bar')).toBeNull();
-
-      // 场景 2：Agent 名录接入指南弹窗中 navigator.clipboard.writeText 拒绝
-      Object.defineProperty(navigator, 'clipboard', {
-        value: { writeText: vi.fn().mockRejectedValue(new Error('CLIPBOARD_WRITE_DENIED')) },
-        configurable: true,
-      });
-
-      target.querySelector<HTMLButtonElement>('[data-nav-section="agents"]')!.click();
-      await flush();
-      target.querySelector<HTMLButtonElement>('[data-action="open-skill-guide"]')!.click();
-      await flush();
-
-      const guideDialog = target.querySelector<HTMLElement>('[data-dialog="skill-guide"]')!;
-      expect(guideDialog).not.toBeNull();
-      guideDialog.querySelector<HTMLButtonElement>('[data-action="copy-skill-md"]')!.click();
-      await flush();
-
-      expect(guideDialog.querySelector('[role="alert"]')?.textContent).toContain(
-        'CLIPBOARD_WRITE_DENIED',
-      );
       expect(target.querySelector('.toast-bar')).toBeNull();
     } finally {
       if (originalClipboardDescriptor) {

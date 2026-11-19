@@ -245,7 +245,7 @@
     ) {
       lanHelpBubble.showPopover();
     }
-    positionAnchoredPopover(lanHelpButton, lanHelpBubble, closeLanHelp);
+    positionAnchoredPopover(lanHelpButton, lanHelpBubble, closeLanHelp, { align: 'start' });
   }
 
   $effect(() => {
@@ -281,7 +281,9 @@
 
   $effect(() => {
     if (!lanHelpOpen) return;
-    const stopObserve = observeAnchoredPopover(lanHelpButton, lanHelpBubble, closeLanHelp);
+    const stopObserve = observeAnchoredPopover(lanHelpButton, lanHelpBubble, closeLanHelp, {
+      align: 'start',
+    });
     const onKeydown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         event.preventDefault();
@@ -721,7 +723,7 @@
           {$t(onboardingLoadError ? '状态未知' : '正在加载…')}
         </span>
       {/if}
-      <span class="settings-switch">
+      <label class="settings-switch">
         <input
           id="lan-open-registration-switch"
           type="checkbox"
@@ -736,7 +738,7 @@
         <span class="settings-switch-track" aria-hidden="true">
           <span class="settings-switch-thumb"></span>
         </span>
-      </span>
+      </label>
     </div>
   </div>
 

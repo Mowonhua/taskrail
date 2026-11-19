@@ -88,7 +88,7 @@
     ) {
       policyHelpBubble.showPopover();
     }
-    positionAnchoredPopover(policyHelpButton, policyHelpBubble, closePolicyHelp);
+    positionAnchoredPopover(policyHelpButton, policyHelpBubble, closePolicyHelp, { align: 'start' });
   }
 
   $effect(() => {
@@ -97,6 +97,7 @@
       policyHelpButton,
       policyHelpBubble,
       closePolicyHelp,
+      { align: 'start' },
     );
     const onKeydown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {

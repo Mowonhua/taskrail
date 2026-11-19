@@ -221,7 +221,6 @@
   let agentActivityFilter = $state<'all' | AgentActivity>('all');
   let agentStatusFilter = $state<'ALL' | AgentStatus>('ALL');
   let refreshingAgents = $state(false);
-  let skillGuideOpen = $state(false);
   let skillDocument = $state<SkillDocument | null>(null);
   let agentDetailOpen = $state(false);
 
@@ -1331,45 +1330,6 @@
     }
   }
 
-  async function handleExportSkillMarkdown(doc: SkillDocument): Promise<boolean> {
-    const serviceSeq = serviceReconnectSeq;
-    const api = activeBountyApi;
-    const filename = doc.filename || 'SKILL.md';
-    if (files.exportText) {
-      const exported = await files.exportText(doc.content, filename);
-      if (serviceSeq !== serviceReconnectSeq || api !== activeBountyApi) {
-        return false;
-      }
-      return exported;
-    }
-    if (typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function') {
-      const url = URL.createObjectURL(
-        new Blob([doc.content], { type: 'text/markdown;charset=utf-8' }),
-      );
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = filename;
-      link.click();
-      URL.revokeObjectURL(url);
-      return serviceSeq === serviceReconnectSeq && api === activeBountyApi;
-    }
-    return false;
-  }
-
-  async function handleOpenSkillGuide(): Promise<void> {
-    const serviceSeq = serviceReconnectSeq;
-    const api = activeBountyApi;
-    skillDocument = null;
-    skillGuideOpen = true;
-    try {
-      await loadSkillMarkdown();
-    } catch (error) {
-      if (skillGuideOpen && serviceSeq === serviceReconnectSeq && api === activeBountyApi) {
-        showToast(formatServiceError(error));
-      }
-    }
-  }
-
   async function handleDisableAgent(id: string): Promise<AgentSummary> {
     const serviceSeq = serviceReconnectSeq;
     const api = activeBountyApi;
@@ -2071,6 +2031,18 @@
     void persistConfig();
   }
 
+  /**
+   * 函数职责：从 Agents 视图进入设置页并定位到 Agent 准入与协议区域。
+   * 输出说明：先切换视图，再等新视图挂载后滚动工作区，不依赖设置页内部状态。
+   */
+  async function openAgentOnboardingSettings(): Promise<void> {
+    selectSection('settings');
+    await tick();
+    document
+      .querySelector<HTMLElement>('[data-section="agent-onboarding"]')
+      ?.scrollIntoView({ block: 'start' });
+  }
+
   function selectProject(projectId: string): void {
     activeProjectId = projectId;
     void persistConfig();
@@ -2281,7 +2253,6 @@
             iconPickerOpen ||
             updateDialogOpen ||
             composerOpen ||
-            skillGuideOpen ||
             agentDetailOpen ||
             activeDetail !== null,
           setOpen: open => {
@@ -2523,7 +2494,8 @@
   </aside>
 
   <main class="workspace">
-    <header class="topbar" data-tauri-drag-region={capabilities.desktop ? true : undefined}>
+    <!-- deep 让顶栏子容器的空白区域也可拖动；按钮、输入等可点击元素仍由 Tauri 排除。 -->
+    <header class="topbar" data-tauri-drag-region={capabilities.desktop ? 'deep' : undefined}>
       <div class="topbar-start">
         {#if sidebarCollapsed || files.isMobile}
           <button
@@ -2540,7 +2512,7 @@
           </button>
         {/if}
 
-        <div class="topbar-heading" data-tauri-drag-region={capabilities.desktop ? true : undefined}>
+        <div class="topbar-heading">
           <span class="topbar-title">{sectionMeta.title}</span>
         </div>
       </div>
@@ -2881,8 +2853,6 @@
             projectsById={bountyProjectsById}
             activityFilter={agentActivityFilter}
             statusFilter={agentStatusFilter}
-            {skillGuideOpen}
-            {skillDocument}
             {serviceUrl}
             {serviceEpoch}
             {refreshingAgents}
@@ -2903,15 +2873,7 @@
             onAgentDetailOpenChange={open => {
               agentDetailOpen = open;
             }}
-            onOpenSkillGuide={() => void handleOpenSkillGuide()}
-            onCloseSkillGuide={() => {
-              skillDocRequestSeq += 1;
-              skillGuideOpen = false;
-            }}
-            onLoadSkillMarkdown={loadSkillMarkdown}
-            onExportSkillMarkdown={handleExportSkillMarkdown}
-            onNavigateToSettings={() => selectSection('settings')}
-            onNotify={showToast}
+            onNavigateToSettings={() => void openAgentOnboardingSettings()}
           />
         </section>
       {:else if activeSection === 'settings'}

@@ -1,7 +1,7 @@
 <script lang="ts">
   /**
-   * 文件职责：承载 Agents 视图与接入指南（SKILL.md）预览导出弹窗。
-   * 定义范围：按活跃度与状态筛选、低密度展示已注册 Agent 档案（隐藏 MMR 数值）、停用/启用与二次确认吊销凭证操作。
+   * 文件职责：承载 Agents 视图。
+   * 定义范围：按活跃度与状态筛选、低密度展示已注册 Agent 档案（隐藏 MMR 数值）、停用/启用与二次确认吊销凭证操作，并提供唯一的接入设置入口。
    */
   import { tick } from 'svelte';
   import type {
@@ -9,9 +9,7 @@
     AgentStatus,
     AgentSummary,
     BountyProject,
-    SkillDocument,
   } from '../api/types';
-  import { clipboard } from '../clipboard';
   import { locale, t } from '../i18n';
   import RefreshButton from '../RefreshButton.svelte';
   import {
@@ -39,8 +37,6 @@
     projectsById: ReadonlyMap<string, BountyProject>;
     activityFilter: 'all' | 'idle' | 'busy';
     statusFilter: 'ALL' | AgentStatus;
-    skillGuideOpen?: boolean;
-    skillDocument?: SkillDocument | null;
     serviceUrl?: string;
     serviceEpoch?: number;
     refreshingAgents?: boolean;
@@ -53,15 +49,7 @@
     onRevokeAgent: (id: string) => Promise<AgentSummary>;
     onLoadAgentDetail?: (id: string) => Promise<AgentDetail>;
     onAgentDetailOpenChange?: (open: boolean) => void;
-    onOpenSkillGuide: () => void;
-    onCloseSkillGuide: () => void;
-    onLoadSkillMarkdown?: (options?: {
-      baseUrl?: string;
-      inviteToken?: string;
-    }) => Promise<SkillDocument>;
-    onExportSkillMarkdown?: (doc: SkillDocument) => Promise<boolean>;
     onNavigateToSettings: () => void;
-    onNotify?: (message: string) => void;
   }
 
   let {
@@ -71,8 +59,6 @@
     projectsById,
     activityFilter,
     statusFilter,
-    skillGuideOpen = false,
-    skillDocument = null,
     serviceUrl = '',
     serviceEpoch = 0,
     refreshingAgents = false,
@@ -85,12 +71,7 @@
     onRevokeAgent,
     onLoadAgentDetail,
     onAgentDetailOpenChange,
-    onOpenSkillGuide,
-    onCloseSkillGuide,
-    onLoadSkillMarkdown,
-    onExportSkillMarkdown,
     onNavigateToSettings,
-    onNotify,
   }: Props = $props();
 
   const FOCUSABLE_SELECTOR =
@@ -100,8 +81,6 @@
   let busyAgentId = $state<string | null>(null);
   let retryingAgents = $state(false);
   let directoryError = $state('');
-  let loadingSkill = $state(false);
-  let modalError = $state('');
   let detailAgentId = $state<string | null>(null);
   let agentDetail = $state<AgentDetail | null>(null);
   let loadingDetail = $state(false);
@@ -109,7 +88,6 @@
   let detailDialogEl = $state<HTMLDivElement | null>(null);
   let returnFocusEl: HTMLElement | null = null;
   let syncedConnectionKey = $state<string | null>(null);
-  let skillLoadSeq = 0;
   let agentOpSeq = 0;
   let retrySeq = 0;
   let detailLoadSeq = 0;
@@ -130,7 +108,6 @@
     const nextKey = `${serviceEpoch}::${serviceUrl}`;
     if (nextKey !== syncedConnectionKey) {
       syncedConnectionKey = nextKey;
-      skillLoadSeq += 1;
       agentOpSeq += 1;
       retrySeq += 1;
       detailLoadSeq += 1;
@@ -138,8 +115,6 @@
       busyAgentId = null;
       retryingAgents = false;
       directoryError = '';
-      modalError = '';
-      loadingSkill = false;
       detailAgentId = null;
       agentDetail = null;
       loadingDetail = false;
@@ -152,14 +127,6 @@
   $effect(() => {
     if (confirmingRevokeId && !agents.some(item => item.id === confirmingRevokeId && item.status !== 'revoked')) {
       confirmingRevokeId = null;
-    }
-  });
-
-  $effect(() => {
-    if (!skillGuideOpen) {
-      skillLoadSeq += 1;
-      loadingSkill = false;
-      modalError = '';
     }
   });
 
@@ -252,21 +219,6 @@
     return Array.from(new Set(capabilities.map(item => String(item ?? '').trim()).filter(Boolean)));
   }
 
-  async function copyToClipboard(text: string): Promise<void> {
-    await clipboard.writeText(text);
-  }
-
-  function triggerBlobDownload(content: string, filename: string): void {
-    if (typeof URL === 'undefined' || typeof URL.createObjectURL !== 'function') return;
-    const blob = new Blob([content], { type: 'text/markdown;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = filename || 'SKILL.md';
-    link.click();
-    URL.revokeObjectURL(url);
-  }
-
   async function handleRetryLoadAgents(): Promise<void> {
     if (!onRetryLoadAgents || retryingAgents) return;
     const epoch = serviceEpoch;
@@ -350,74 +302,6 @@
     }
   }
 
-  async function ensureSkillDocument(): Promise<SkillDocument | null> {
-    if (skillDocument) return skillDocument;
-    if (!onLoadSkillMarkdown) return null;
-    const epoch = serviceEpoch;
-    const connKey = syncedConnectionKey;
-    const seq = ++skillLoadSeq;
-    modalError = '';
-    loadingSkill = true;
-    try {
-      const doc = await onLoadSkillMarkdown(serviceUrl ? { baseUrl: serviceUrl } : undefined);
-      if (!isSameConnection(epoch, connKey) || seq !== skillLoadSeq || !skillGuideOpen) {
-        return null;
-      }
-      return doc;
-    } catch (error) {
-      if (isSameConnection(epoch, connKey) && seq === skillLoadSeq && skillGuideOpen) {
-        modalError = formatServiceError(error);
-      }
-      return null;
-    } finally {
-      if (isSameConnection(epoch, connKey) && seq === skillLoadSeq) {
-        loadingSkill = false;
-      }
-    }
-  }
-
-  async function handleCopySkill(): Promise<void> {
-    const epoch = serviceEpoch;
-    const connKey = syncedConnectionKey;
-    modalError = '';
-    const doc = await ensureSkillDocument();
-    if (!doc || !isSameConnection(epoch, connKey) || !skillGuideOpen) return;
-    try {
-      await copyToClipboard(doc.content);
-      if (!isSameConnection(epoch, connKey) || !skillGuideOpen) return;
-      onNotify?.($t('SKILL.md 已复制'));
-    } catch (error) {
-      if (isSameConnection(epoch, connKey) && skillGuideOpen) {
-        modalError = formatServiceError(error);
-      }
-    }
-  }
-
-  async function handleExportSkill(): Promise<void> {
-    const epoch = serviceEpoch;
-    const connKey = syncedConnectionKey;
-    modalError = '';
-    const doc = await ensureSkillDocument();
-    if (!doc || !isSameConnection(epoch, connKey) || !skillGuideOpen) return;
-    try {
-      if (onExportSkillMarkdown) {
-        const exported = await onExportSkillMarkdown(doc);
-        if (!isSameConnection(epoch, connKey)) return;
-        if (exported) {
-          onNotify?.($t('SKILL.md 已导出'));
-        }
-      } else {
-        triggerBlobDownload(doc.content, doc.filename || 'SKILL.md');
-        if (!isSameConnection(epoch, connKey)) return;
-        onNotify?.($t('SKILL.md 已导出'));
-      }
-    } catch (error) {
-      if (isSameConnection(epoch, connKey) && skillGuideOpen) {
-        modalError = formatServiceError(error);
-      }
-    }
-  }
-
   function handleWindowFocusIn(event: FocusEvent): void {
     if (detailAgentId === null || !detailDialogEl) return;
     const target = event.target;
@@ -459,11 +343,6 @@
       event.stopPropagation();
       closeAgentDetail();
       return;
-    }
-    if (skillGuideOpen) {
-      event.preventDefault();
-      event.stopPropagation();
-      onCloseSkillGuide();
     }
   }
 </script>
@@ -513,14 +392,6 @@
   </div>
 
   <div class="toolbar-end-actions">
-    <button
-      type="button"
-      class="secondary-action"
-      data-action="open-skill-guide"
-      onclick={onOpenSkillGuide}
-    >
-      {$t('接入指南 (SKILL.md)')}
-    </button>
     {#if onRefreshAgents || onRetryLoadAgents}
       <RefreshButton
         action="refresh-agents"
@@ -566,24 +437,14 @@
         <p class="empty-state-copy">
           {$t('外部 Agent 可阅读接入说明自助完成注册并获取专属凭证，在此展示能力标签与履约统计。')}
         </p>
-        <div class="agent-empty-actions">
-          <button
-            type="button"
-            class="primary"
-            data-action="empty-open-skill-guide"
-            onclick={onOpenSkillGuide}
-          >
-            {$t('接入指南 (SKILL.md)')}
-          </button>
-          <button
-            type="button"
-            class="secondary-action"
-            data-action="empty-open-onboarding-settings"
-            onclick={onNavigateToSettings}
-          >
-            {$t('前往设置')}
-          </button>
-        </div>
+        <button
+          type="button"
+          class="primary"
+          data-action="open-agent-onboarding"
+          onclick={onNavigateToSettings}
+        >
+          {$t('接入')}
+        </button>
       </div>
     {:else if !agentsLoadError}
       <p class="detail-empty-hint" data-status="agent-directory-loading">{$t('正在加载…')}</p>
@@ -818,85 +679,6 @@
     </div>
   {/if}
 </div>
-
-{#if skillGuideOpen}
-  <div
-    class="modal-backdrop"
-    role="presentation"
-    onclick={event => {
-      if (event.target === event.currentTarget) onCloseSkillGuide();
-    }}
-  >
-    <div
-      class="modal-dialog skill-guide-dialog"
-      role="dialog"
-      aria-modal="true"
-      aria-label={$t('接入文档 (SKILL.md)')}
-      data-dialog="skill-guide"
-    >
-      <div class="modal-header">
-        <div class="settings-extension-copy">
-          <h2 class="modal-title">{$t('接入文档 (SKILL.md)')}</h2>
-          {#if skillDocument?.base_url || serviceUrl}
-            <span class="service-url-text">{skillDocument?.base_url || serviceUrl}</span>
-          {/if}
-        </div>
-        <button
-          type="button"
-          class="icon-button"
-          aria-label={$t('关闭对话框')}
-          onclick={onCloseSkillGuide}
-        >
-          ✕
-        </button>
-      </div>
-
-      {#if modalError}
-        <p class="dialog-error settings-error" role="alert">{modalError}</p>
-      {/if}
-
-      <div class="skill-guide-body">
-        {#if loadingSkill && !skillDocument}
-          <p class="detail-empty-hint">{$t('正在加载…')}</p>
-        {:else if skillDocument}
-          <pre class="skill-md-preview" data-slot="skill-md-preview"><code>{skillDocument.content}</code></pre>
-        {/if}
-      </div>
-
-      <div class="modal-actions composer-footer">
-        <button
-          type="button"
-          class="secondary-action"
-          data-action="jump-to-onboarding-settings"
-          onclick={() => {
-            onCloseSkillGuide();
-            onNavigateToSettings();
-          }}
-        >
-          {$t('前往生成邀请令牌')}
-        </button>
-        <button
-          type="button"
-          class="secondary-action"
-          data-action="copy-skill-md"
-          disabled={loadingSkill}
-          onclick={() => void handleCopySkill()}
-        >
-          {$t('复制 SKILL.md')}
-        </button>
-        <button
-          type="button"
-          class="primary secondary-action"
-          data-action="export-skill-md"
-          disabled={loadingSkill}
-          onclick={() => void handleExportSkill()}
-        >
-          {$t('导出 SKILL.md')}
-        </button>
-      </div>
-    </div>
-  </div>
-{/if}
 
 {#if detailAgentId !== null}
   {@const headerTier = agentDetail?.agent.tier ?? selectedAgentSummary?.tier ?? 'Unranked'}

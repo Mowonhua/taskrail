@@ -21,7 +21,14 @@
   import ArbitratorChainEditor from './bounty/ArbitratorChainEditor.svelte';
   import { formatServiceError } from './bounty/helpers';
   import ProjectManagementPanel from './bounty/ProjectManagementPanel.svelte';
-  import { composeFontStack, DEFAULT_FONT_STACK, GENERIC_FAMILIES, parseFontStack } from './font-stack';
+  import {
+    composeFontStack,
+    DEFAULT_FONT_STACK,
+    GENERIC_FAMILIES,
+    parseFontStack,
+    probeFontInstalled,
+    quoteFontFamily,
+  } from './font-stack';
   import FontSelect from './FontSelect.svelte';
   import { t, type LocalePreference } from './i18n';
   import { observeAnchoredPopover, positionAnchoredPopover } from './anchored-popover';
@@ -168,6 +175,7 @@
   let helpBubble: HTMLDivElement;
   let helpOpen = $state(false);
   let customFontDraft = $state('');
+  let fontDetailsOpen = $state(false);
 
   let serviceModeDraft = $state<ServiceMode>('embedded');
   let remoteUrlDraft = $state('');
@@ -207,7 +215,9 @@
     ) {
       arbitrationHelpBubble.showPopover();
     }
-    positionAnchoredPopover(arbitrationHelpButton, arbitrationHelpBubble, closeArbitrationHelp);
+    positionAnchoredPopover(arbitrationHelpButton, arbitrationHelpBubble, closeArbitrationHelp, {
+      align: 'start',
+    });
   }
 
   $effect(() => {
@@ -216,6 +226,7 @@
       arbitrationHelpButton,
       arbitrationHelpBubble,
       closeArbitrationHelp,
+      { align: 'start' },
     );
     const onKeydown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
@@ -357,7 +368,7 @@
     if (typeof helpBubble?.showPopover === 'function' && !helpBubble.matches(':popover-open')) {
       helpBubble.showPopover();
     }
-    positionAnchoredPopover(helpButton, helpBubble, closeHelp);
+    positionAnchoredPopover(helpButton, helpBubble, closeHelp, { align: 'start' });
   }
 
   $effect(() => {
@@ -373,9 +384,20 @@
     onChangeFontFamily(trimmed);
   }
 
+  /** 字体芯片溢出时用纵向滚轮横向滚动；到达两端后让外层页面继续滚动。 */
+  function onChipsWheel(event: WheelEvent): void {
+    const chips = event.currentTarget as HTMLDivElement;
+    const maxScroll = chips.scrollWidth - chips.clientWidth;
+    if (maxScroll <= 0 || Math.abs(event.deltaX) >= Math.abs(event.deltaY)) return;
+    const target = chips.scrollLeft + event.deltaY;
+    if ((target <= 0 && chips.scrollLeft <= 0) || (target >= maxScroll && chips.scrollLeft >= maxScroll)) return;
+    event.preventDefault();
+    chips.scrollLeft = Math.max(0, Math.min(maxScroll, target));
+  }
+
   $effect(() => {
     if (!helpOpen) return;
-    return observeAnchoredPopover(helpButton, helpBubble, closeHelp);
+    return observeAnchoredPopover(helpButton, helpBubble, closeHelp, { align: 'start' });
   });
 
   async function handleSelectServiceMode(nextMode: ServiceMode): Promise<void> {
@@ -562,7 +584,7 @@
           </div>
         </span>
       </div>
-      <span class="settings-switch">
+      <label class="settings-switch">
         <input
           id="keep-transparent-switch"
           type="checkbox"
@@ -575,7 +597,7 @@
         <span class="settings-switch-track" aria-hidden="true">
           <span class="settings-switch-thumb"></span>
         </span>
-      </span>
+      </label>
     </div>
   </section>
 
@@ -612,12 +634,16 @@
       />
     </div>
 
-    <div class="settings-row">
-      <label class="settings-row-label" for="font-custom-input">{$t('手动输入字体')}</label>
-      <div class="settings-custom-font">
+    <details class="settings-font-manual" bind:open={fontDetailsOpen}>
+      <summary>
+        <span>{$t('手动输入字体')}</span>
+        <span class="settings-font-current">{preferences.fontFamily || $t('未选择')}</span>
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="m6 4 4 4-4 4" /></svg>
+      </summary>
+      <div class="settings-font-editor">
         <input
           id="font-custom-input"
-          class="settings-text-input"
+          class="settings-text-input settings-font-input"
           type="text"
           aria-label={$t('手动输入字体')}
           placeholder={DEFAULT_FONT_STACK}
@@ -630,17 +656,34 @@
             }
           }}
         />
-        {#if hasCustomFontSetting}
-          <button
-            type="button"
-            class="settings-text-action"
-            onclick={() => onChangeFontFamily(DEFAULT_FONT_STACK)}
-          >
-            {$t('恢复默认')}
-          </button>
+        {#if fontDetailsOpen}
+          <div class="settings-font-status" role="status">
+            <div class="settings-font-chips" onwheel={onChipsWheel}>
+              {#each fontSlots.named as family (family)}
+                <span class="settings-font-chip" class:settings-font-chip-missing={!probeFontInstalled(family)} style:font-family={quoteFontFamily(family)}>
+                  <span aria-hidden="true">{probeFontInstalled(family) ? '✓' : '✗'}</span>{family}
+                </span>
+              {/each}
+              {#if fontSlots.generic}
+                <span class="settings-font-chip settings-font-chip-generic">{fontSlots.generic}</span>
+              {/if}
+              {#if fontSlots.named.length === 0 && !fontSlots.generic}
+                <span class="settings-font-status-empty">{$t('尚未选择字体，正文使用应用默认字体。')}</span>
+              {/if}
+            </div>
+            {#if hasCustomFontSetting}
+              <button
+                type="button"
+                class="settings-font-reset"
+                onclick={() => onChangeFontFamily(DEFAULT_FONT_STACK)}
+              >
+                {$t('恢复默认')}
+              </button>
+            {/if}
+          </div>
         {/if}
       </div>
-    </div>
+    </details>
 
     <div class="settings-row">
       <label class="settings-row-label" for="font-size-range">{$t('字号')}</label>

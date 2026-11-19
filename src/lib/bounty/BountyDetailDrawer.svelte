@@ -167,6 +167,7 @@
       collaboratorHelpButton,
       collaboratorHelpBubble,
       closeCollaboratorHelp,
+      { align: 'start' },
     );
   }
 
@@ -247,6 +248,7 @@
       collaboratorHelpButton,
       collaboratorHelpBubble,
       closeCollaboratorHelp,
+      { align: 'start' },
     );
     const onKeydown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {

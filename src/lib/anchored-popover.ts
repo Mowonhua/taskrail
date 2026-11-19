@@ -1,8 +1,11 @@
 /** 文件职责：提供设置下拉菜单共用的锚点定位与展开期间的事件生命周期。 */
 
 export interface AnchoredPopoverOptions {
-  /** 'stretch' 保持与触发器同宽；'end' 保持浮层固有宽度并与触发器右缘对齐。 */
-  align?: 'stretch' | 'end';
+  /**
+   * 'stretch' 保持与触发器同宽；'start' 使用浮层内容固有宽度并与触发器左缘对齐；
+   * 'end' 使用浮层内容固有宽度并与触发器右缘对齐。
+   */
+  align?: 'stretch' | 'start' | 'end';
 }
 
 /**
@@ -42,11 +45,11 @@ export function positionAnchoredPopover(
   const maxViewportWidth = Math.max(0, viewportWidth - margin * 2);
   let width: number;
   let desiredLeft: number;
-  if (options.align === 'end') {
+  if (options.align === 'start' || options.align === 'end') {
     popup.style.width = '';
     const measuredWidth = popup.getBoundingClientRect().width || popup.offsetWidth || popup.scrollWidth;
     width = Math.min(measuredWidth, maxViewportWidth);
-    desiredLeft = bounds.right - width;
+    desiredLeft = options.align === 'end' ? bounds.right - width : bounds.left;
   } else {
     width = Math.min(bounds.width, maxViewportWidth);
     popup.style.width = `${width}px`;

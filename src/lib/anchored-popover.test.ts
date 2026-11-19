@@ -41,6 +41,27 @@ describe('锚点浮层', () => {
     expect(close).toHaveBeenCalledOnce();
   });
 
+  it('align=start 使用浮层固有宽度并与触发器左缘对齐', () => {
+    const trigger = document.createElement('button');
+    const popup = document.createElement('div');
+    document.body.append(trigger, popup);
+    vi.spyOn(trigger, 'getBoundingClientRect').mockReturnValue({
+      top: 100,
+      bottom: 130,
+      left: 40,
+      right: 70,
+      width: 30,
+    } as DOMRect);
+    vi.spyOn(popup, 'getBoundingClientRect').mockReturnValue({
+      width: 160,
+      height: 80,
+    } as DOMRect);
+    positionAnchoredPopover(trigger, popup, vi.fn(), { align: 'start' });
+    expect(popup.style.width).toBe('');
+    expect(popup.style.left).toBe('40px');
+    expect(popup.style.top).toBe('134px');
+  });
+
   it('align=end 保留浮层固有宽度并与触发器右缘对齐', () => {
     const trigger = document.createElement('button');
     const popup = document.createElement('div');
