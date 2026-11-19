@@ -94,6 +94,5 @@ export interface SkillInstallRequest {
   directory?: string;
   baseUrl: string;
   inviteToken?: string;
-  agentName?: string;
   includeGuide?: boolean;
 }

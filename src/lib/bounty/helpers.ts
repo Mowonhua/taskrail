@@ -485,6 +485,12 @@ export function formatServiceError(error: unknown): string {
         return translate('该 Agent 已被停用，请先启用后再试。');
       case 'AGENT_NAME_TAKEN':
         return translate('该 Agent 名称已被占用，请更换名称。');
+      case 'NAME_TAKEN':
+        return translate('该名称已被占用，请更换名称。');
+      case 'INVALID_CREDENTIALS':
+        return translate('名称或密码不正确。');
+      case 'AUTH_RATE_LIMITED':
+        return error.message || translate('尝试次数过多，请稍后重试。');
       case 'ASSIGNEE_MISMATCH':
         return translate('仅被指派的 Agent 可执行此操作。');
       case 'TIER_INSUFFICIENT':
@@ -514,6 +520,33 @@ export function formatServiceError(error: unknown): string {
     }
   }
   return errorMessage(error);
+}
+
+export function formatAuthError(
+  error: unknown,
+  context: 'login' | 'register' | 'session' | 'profile' | 'avatars' = 'session',
+): string {
+  if (error instanceof ServiceApiError) {
+    if (error.code === 'UNAUTHORIZED') {
+      if (context === 'login') {
+        return translate('名称或密码不正确。');
+      }
+      if (context === 'session' || context === 'profile') {
+        return translate('登录状态已失效，请重新登录。');
+      }
+      return error.message || translate('请先登录。');
+    }
+    if (error.code === 'INVALID_CREDENTIALS') {
+      return translate('名称或密码不正确。');
+    }
+    if (error.code === 'NAME_TAKEN') {
+      return translate('该名称已被占用，请更换名称。');
+    }
+    if (error.code === 'AUTH_RATE_LIMITED') {
+      return error.message || translate('尝试次数过多，请稍后重试。');
+    }
+  }
+  return formatServiceError(error);
 }
 
 export function formatRatingOutcome(outcome: RatingOutcome): string {

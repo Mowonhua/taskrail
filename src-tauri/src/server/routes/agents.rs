@@ -71,7 +71,10 @@ impl FromRequestParts<AppState> for Agent {
     type Rejection = ApiError;
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self> {
         if let Some(identity) = parts.extensions.remove::<crate::server::McpIdentity>() {
-            return Ok(Self(identity.0));
+            return identity
+                .agent
+                .map(Self)
+                .ok_or_else(crate::server::db::accounts::sign_in_required);
         }
         let key = bearer(&parts.headers).unwrap_or_default().to_owned();
         disk(state.clone(), move |r| r.authenticate_agent(&key))
@@ -79,7 +82,7 @@ impl FromRequestParts<AppState> for Agent {
             .map(Self)
     }
 }
-fn bearer(headers: &HeaderMap) -> Option<&str> {
+pub(super) fn bearer(headers: &HeaderMap) -> Option<&str> {
     headers
         .get(AUTHORIZATION)?
         .to_str()

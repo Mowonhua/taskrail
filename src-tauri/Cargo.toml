@@ -48,6 +48,8 @@ reqwest = { version = "0.13", default-features = false, features = ["query", "fo
 [target.'cfg(not(target_os = "android"))'.dependencies]
 tauri-plugin-updater = "2.13.1"
 base64 = "0.22"
+argon2 = "0.5"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 minisign-verify = "0.2"
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "json"] }
 clap = { version = "4", features = ["derive"] }

@@ -70,7 +70,7 @@ pub(crate) struct InstallRequest {
     invite_token: Option<String>,
     #[serde(default)]
     mode: InstallMode,
-    agent_name: Option<String>,
+
     #[serde(default)]
     include_guide: bool,
 }
@@ -378,18 +378,9 @@ pub(crate) fn install(
         }
         InstallMode::McpStdio | InstallMode::McpHttp => {
             let entry = if let Some(profile) = profile.as_ref() {
-                let name = request
-                    .agent_name
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|name| {
-                        (1..=64).contains(&name.chars().count()) && !name.starts_with('-')
-                    })
-                    .ok_or_else(invalid)?;
                 ServerEntry::Stdio {
                     executable,
                     profile,
-                    name,
                 }
             } else {
                 ServerEntry::Http { url: &mcp_url }
@@ -455,7 +446,7 @@ mod tests {
                     mode,
                     base_url: "https://rail.example".into(),
                     invite_token: None,
-                    agent_name: Some("shared-agent".into()),
+
                     include_guide: !is_skill,
                 },
                 root,
@@ -552,7 +543,7 @@ mod tests {
                     mode: InstallMode::Skill,
                     base_url: "https://rail.example".into(),
                     invite_token: None,
-                    agent_name: None,
+
                     include_guide: false,
                 },
                 root,
@@ -583,7 +574,7 @@ mod tests {
             directory: Some(root.to_owned()),
             base_url: "https://taskrail.example/".into(),
             invite_token: Some(token.clone()),
-            agent_name: Some("test".into()),
+
             include_guide: false,
         };
         let installed = install(
@@ -663,7 +654,7 @@ mod tests {
                 base_url: "https://rail.example".into(),
                 invite_token: None,
                 mode: InstallMode::McpHttp,
-                agent_name: None,
+
                 include_guide: true,
             },
             root,

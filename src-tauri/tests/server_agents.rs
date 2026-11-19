@@ -714,7 +714,8 @@ async fn skill_documents_follow_request_address_and_never_export_admin_credentia
         assert!(!content.contains(raw));
         assert!(!content.contains(admin_token));
         for endpoint in [
-            "taskrail-agent register",
+            "taskrail-agent account register",
+            "taskrail_register",
             "taskrail_me",
             "taskrail_set_subscriptions",
             "taskrail_list_projects",

@@ -46,7 +46,6 @@
   let serviceAddress = $state(untrack(() => baseUrl));
   let directory = $state('');
   let pastedToken = $state('');
-  let agentName = $state('');
   let includeGuide = $state(false);
   let picking = $state(false);
   let installing = $state(false);
@@ -136,7 +135,6 @@
         baseUrl: serviceAddress.trim(),
         ...(inviteToken ? { inviteToken } : {}),
         ...(mode !== 'skill' ? { mode, includeGuide } : {}),
-        ...(mode === 'mcp-stdio' ? { agentName: agentName.trim() } : {}),
       });
       close();
     } catch (cause) {
@@ -216,19 +214,12 @@
           </div>
         {/if}
       </div>
-      <div class="skill-install-connection" class:has-agent-name={mode === 'mcp-stdio'}>
+      <div class="skill-install-connection">
         <div class="project-form-field">
           <label class="composer-label" for="skill-install-url">{$t('服务地址')}</label>
           <input id="skill-install-url" type="url" class="settings-text-input"
             bind:value={serviceAddress} disabled={installing} required />
         </div>
-        {#if mode === 'mcp-stdio'}
-          <div class="project-form-field">
-            <label class="composer-label" for="skill-install-agent-name">{$t('Agent 名称')}</label>
-            <input id="skill-install-agent-name" class="settings-text-input" bind:value={agentName}
-              required maxlength="64" disabled={installing} />
-          </div>
-        {/if}
       </div>
       {#if mode !== 'mcp-http' && token}
         <div class="project-form-field">
@@ -242,20 +233,26 @@
           {/if}
         </div>
       {/if}
-      {#if mode !== 'skill'}
-        <label class="skill-install-choice">
-          <input type="checkbox" name="skill-install-include-guide" bind:checked={includeGuide} disabled={installing} />
-          <span>{$t('附带简短 Skill')}</span>
-        </label>
-      {/if}
       {#if error}
         <p class="dialog-error" role="alert">{error}</p>
       {/if}
     </div>
     <footer class="modal-actions skill-install-actions">
+      {#if mode !== 'skill'}
+        <div class="skill-install-guide">
+          <label class="composer-label" for="skill-install-include-guide">{$t('附带简短 Skill')}</label>
+          <label class="settings-switch">
+            <input id="skill-install-include-guide" type="checkbox" role="switch"
+              name="skill-install-include-guide" bind:checked={includeGuide} disabled={installing} />
+            <span class="settings-switch-track" aria-hidden="true">
+              <span class="settings-switch-thumb"></span>
+            </span>
+          </label>
+        </div>
+      {/if}
       <button type="button" class="secondary-action" onclick={close}>{$t('取消')}</button>
-    <button type="submit" class="primary" data-action="confirm-install-skill"
-      disabled={picking || installing || (scope !== 'custom' && !selectedAgents.length)}>
+      <button type="submit" class="primary" data-action="confirm-install-skill"
+        disabled={picking || installing || (scope !== 'custom' && !selectedAgents.length)}>
         {$t(installing ? '正在安装…' : '安装')}
       </button>
     </footer>

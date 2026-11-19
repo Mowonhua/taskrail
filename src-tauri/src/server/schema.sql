@@ -220,7 +220,7 @@ CREATE TABLE IF NOT EXISTS mcp_flows (
 );
 CREATE TABLE IF NOT EXISTS mcp_codes (
     hash TEXT PRIMARY KEY,
-    agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+    agent_id TEXT REFERENCES agents(id) ON DELETE CASCADE,
     client_id TEXT NOT NULL REFERENCES mcp_clients(id) ON DELETE CASCADE,
     redirect_uri TEXT NOT NULL,
     resource TEXT NOT NULL,
@@ -231,8 +231,30 @@ CREATE TABLE IF NOT EXISTS mcp_tokens (
     access_hash TEXT PRIMARY KEY,
     refresh_hash TEXT NOT NULL UNIQUE,
     client_id TEXT NOT NULL REFERENCES mcp_clients(id) ON DELETE CASCADE,
-    agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+    agent_id TEXT REFERENCES agents(id) ON DELETE CASCADE,
     resource TEXT NOT NULL,
     access_expires INTEGER NOT NULL,
     refresh_expires INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS accounts (
+    id TEXT PRIMARY KEY,
+    role TEXT NOT NULL CHECK (role IN ('user', 'agent')),
+    name TEXT NOT NULL UNIQUE,
+    password_hash TEXT,
+    avatar_json TEXT,
+    agent_id TEXT UNIQUE REFERENCES agents(id) ON DELETE CASCADE,
+    CHECK ((role = 'agent' AND agent_id IS NOT NULL AND id = agent_id)
+        OR (role = 'user' AND agent_id IS NULL AND password_hash IS NOT NULL))
+);
+CREATE TABLE IF NOT EXISTS account_sessions (
+    token_hash TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    expires INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS account_sessions_expiry ON account_sessions(expires);
+CREATE TABLE IF NOT EXISTS account_login_attempts (
+    account_id TEXT PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+    until INTEGER NOT NULL,
+    attempts INTEGER NOT NULL
 );

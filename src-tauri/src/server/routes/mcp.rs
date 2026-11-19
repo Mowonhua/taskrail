@@ -44,6 +44,7 @@ pub(super) fn router(app: AppState) -> Router {
         issuer: origin,
     };
     let agent_api = Router::new()
+        .merge(accounts::router())
         .merge(agents::router())
         .merge(events::router())
         .with_state(app);
@@ -51,7 +52,8 @@ pub(super) fn router(app: AppState) -> Router {
     let mut config = StreamableHttpServerConfig::default()
         .with_json_response(true)
         .with_allowed_hosts([oauth.authority.clone()])
-        .with_allowed_origins([oauth.issuer.clone()]);
+        .with_allowed_origins([oauth.issuer.clone()])
+        .with_max_request_body_bytes(384 * 1024);
     config.legacy_session_mode = false;
     let service: StreamableHttpService<ToolServer, LocalSessionManager> =
         StreamableHttpService::new(move || Ok(handler.clone()), Default::default(), config);
@@ -119,10 +121,8 @@ async fn authenticate(State(oauth): State<OAuth>, mut request: Request, next: Ne
         })
         .await
         {
-            Ok(agent) => {
-                request
-                    .extensions_mut()
-                    .insert(crate::server::McpIdentity(agent));
+            Ok(identity) => {
+                request.extensions_mut().insert(identity);
                 request.headers_mut().remove(header::AUTHORIZATION);
                 return next.run(request).await;
             }
@@ -310,8 +310,7 @@ fn consent_page(flow: &str, host: &str, error: Option<&str>) -> Response {
 <main><h1>授权 Taskrail MCP</h1>{notice}
 <form method="post" action="{AUTH}">
 <input type="hidden" name="flow" value="{}">
-<p><label>新 Agent 名称 <input name="name" maxlength="64" autocomplete="off"></label></p>
-<p><label>邀请令牌或现有 Agent 密钥 <input type="password" name="credential" maxlength="256" autocomplete="off"></label></p>
+<p>授权后，Agent 可以在宿主中注册或登录。</p>
 <button name="decision" value="allow">授权</button>
 <button name="decision" value="deny">取消</button>
 </form></main></html>"#,
@@ -335,35 +334,14 @@ fn authorization_page(html: String) -> Response {
     response
 }
 
-fn continue_after_registration(key: &str, callback: &str) -> Response {
-    authorization_page(format!(
-        r#"<!doctype html>
-<html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width">
-<title>已创建 Taskrail Agent</title>
-<main><h1>已创建 Taskrail Agent</h1>
-<p>请保存此 Agent 密钥。以后重新连接时，用它授权同一个 Agent。</p>
-<p><code>{}</code></p>
-<p><a href="{}">返回 Agent 宿主</a></p>
-</main></html>"#,
-        escape(key),
-        escape(callback)
-    ))
-}
-
 #[derive(Deserialize)]
 struct Consent {
     flow: String,
-    name: String,
-    credential: String,
     decision: String,
 }
 
 async fn consent(State(oauth): State<OAuth>, Form(input): Form<Consent>) -> Response {
-    if input.flow.len() != 64
-        || input.name.len() > 256
-        || input.credential.len() > 256
-        || !matches!(input.decision.as_str(), "allow" | "deny")
-    {
+    if input.flow.len() != 64 || !matches!(input.decision.as_str(), "allow" | "deny") {
         return oauth_error("invalid_request");
     }
     let denied = input.decision == "deny";
@@ -372,21 +350,15 @@ async fn consent(State(oauth): State<OAuth>, Form(input): Form<Consent>) -> Resp
     let issuer = oauth.issuer;
     let result = disk(oauth.app, move |repo| {
         if denied {
-            repo.oauth_deny(&flow, &resource)
-                .map(|grant| (grant, None, None))
+            repo.oauth_deny(&flow, &resource).map(|grant| (grant, None))
         } else {
-            repo.oauth_consent(
-                &flow,
-                &resource,
-                input.name,
-                input.credential.trim().to_owned(),
-            )
-            .map(|result| (result.grant, Some(result.code), result.new_agent_key))
+            repo.oauth_consent(&flow, &resource)
+                .map(|result| (result.grant, Some(result.code)))
         }
     })
     .await;
     match result {
-        Ok((grant, code, new_agent_key)) => {
+        Ok((grant, code)) => {
             let mut url = redirect_uri(&grant.redirect_uri).expect("回调地址已在授权请求校验");
             let mut query = url.query_pairs_mut();
             if let Some(code) = code {
@@ -399,9 +371,6 @@ async fn consent(State(oauth): State<OAuth>, Form(input): Form<Consent>) -> Resp
             }
             query.append_pair("iss", &issuer);
             drop(query);
-            if let Some(key) = new_agent_key {
-                return continue_after_registration(&key, url.as_str());
-            }
             private((StatusCode::SEE_OTHER, [(header::LOCATION, url.to_string())]).into_response())
         }
         Err(error) if error.status.is_server_error() => error.into_response(),

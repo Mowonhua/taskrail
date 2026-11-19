@@ -133,7 +133,7 @@ impl Repository {
         self.write(|tx| self.register_agent_in(tx, input))
     }
 
-    /// OAuth 在同一事务中消费邀请并写入授权代码。
+    /// 账户注册可以在同一事务中创建 Agent 并消费邀请。
     pub(super) fn register_agent_in(
         &self,
         tx: &Transaction<'_>,
@@ -167,7 +167,7 @@ impl Repository {
                 }
             };
             let exists: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM agents WHERE name=?1)",
+                "SELECT EXISTS(SELECT 1 FROM agents WHERE name=?1 UNION ALL SELECT 1 FROM accounts WHERE name=?1)",
                 [name],
                 |r| r.get(0),
             )?;
@@ -198,10 +198,14 @@ impl Repository {
         })
     }
 
-    /// 函数职责：按密钥摘要认证并更新最近活动时间；停用和吊销分别返回 403 与 401。
+    /// 函数职责：认证 Agent 会话或旧密钥并更新最近活动时间。停用和吊销分别返回 403 与 401。
     pub fn authenticate_agent(&self, api_key: &str) -> Result<AgentSummary> {
         self.write(|tx| {
-            let id = agent_id_for_key(tx, api_key)?;
+            let id = if api_key.starts_with("tr_ac_") {
+                accounts::agent_id_for_session(tx, api_key)?
+            } else {
+                agent_id_for_key(tx, api_key)?
+            };
             self.agent_seen(tx, &id)
         })
     }
@@ -479,13 +483,7 @@ pub(super) fn agent_id_for_key(conn: &Connection, api_key: &str) -> Result<Strin
         |row| row.get(0),
     )
     .optional()?
-    .ok_or_else(|| {
-        ApiError::new(
-            StatusCode::UNAUTHORIZED,
-            "UNAUTHORIZED",
-            "需要有效的 Agent Bearer api_key",
-        )
-    })
+    .ok_or_else(accounts::sign_in_required)
 }
 
 pub(super) fn active_agent(conn: &Connection, id: &str) -> Result<AgentSummary> {

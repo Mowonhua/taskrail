@@ -22,6 +22,7 @@ import {
   formatAgentSubscriptionSummary,
   formatAgentTier,
   formatAssigneeConstraint,
+  formatAuthError,
   formatBountyArbitrator,
   formatBountyExecutor,
   formatBountyPublisher,
@@ -42,6 +43,12 @@ import {
   formatServiceError,
   formatTierGateReason,
 } from '../bounty/helpers';
+import {
+  getAvatarInitial,
+  validateUserAvatar,
+  validateUserNameError,
+  validateUserPasswordError,
+} from '../auth/avatars';
 import { setLocalePreference } from '../i18n';
 import {
   ServiceApiError,
@@ -3320,7 +3327,7 @@ describe('Issue 08 仲裁顺位配置、裁判回避与仲裁验收闭环', () =
       inviteToken: string,
     ): void => {
       expect(content).toContain(`base_url: ${baseUrl}`);
-      expect(content).toContain('taskrail-agent register');
+      expect(content).toContain('taskrail-agent account register');
       expect(content).toContain(policy);
       const example = content.match(/```json\r?\n([\s\S]*?)\r?\n```/)?.[1];
       expect(JSON.parse(example ?? '')).toMatchObject({ invite_token: '<INVITE_TOKEN>' });
@@ -4510,5 +4517,215 @@ describe('评级执行者不变量', () => {
       await expect(client.approveArbitration(bounty.id, { comment: 'approved' })).rejects.toMatchObject({ code: 'INTERNAL_ERROR', status: 500 });
       expect(await client.getBountyDetail(bounty.id)).toEqual(before);
     }
+  });
+});
+
+describe('用户账号注册、登录、个人设置与头像校验', () => {
+  it('HttpBountyClient 构造独立于管理员凭证的 /api/v1/auth/* 请求与 204 logout', async () => {
+    const calls: Array<{ url: string; method: string; auth: string | null; body: string | null }> = [];
+    const fetchMock: typeof fetch = async (input, init) => {
+      const headers = new Headers(init?.headers);
+      const url = typeof input === 'string' ? input : input.toString();
+      const method = init?.method ?? 'GET';
+      const body = typeof init?.body === 'string' ? init.body : null;
+      calls.push({ url, method, auth: headers.get('Authorization'), body });
+
+      if (url.endsWith('/api/v1/auth/register')) {
+        return new Response(
+          JSON.stringify({
+            token: 'user-tok-1',
+            profile: { id: 'u-1', role: 'user', name: 'Alice', avatar: { kind: 'preset', id: 'blue' } },
+          }),
+          { status: 201, headers: { 'Content-Type': 'application/json' } },
+        );
+      }
+      if (url.endsWith('/api/v1/auth/login')) {
+        return new Response(
+          JSON.stringify({
+            token: 'user-tok-2',
+            profile: { id: 'u-1', role: 'user', name: 'Alice', avatar: null },
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        );
+      }
+      if (url.endsWith('/api/v1/auth/me') && method === 'GET') {
+        return new Response(
+          JSON.stringify({ id: 'u-1', role: 'user', name: 'Alice', avatar: null }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        );
+      }
+      if (url.endsWith('/api/v1/auth/me') && method === 'PATCH') {
+        return new Response(
+          JSON.stringify({ id: 'u-1', role: 'user', name: 'Alice Chen', avatar: null }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        );
+      }
+      if (url.endsWith('/api/v1/auth/avatars')) {
+        return new Response(
+          JSON.stringify([
+            { id: 'slate', label: '石板灰' },
+            { id: 'blue', label: '蓝色' },
+            { id: 'green', label: '绿色' },
+            { id: 'amber', label: '琥珀色' },
+            { id: 'purple', label: '紫色' },
+            { id: 'rose', label: '玫瑰色' },
+          ]),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        );
+      }
+      if (url.endsWith('/api/v1/auth/logout')) {
+        return new Response(null, { status: 204 });
+      }
+      return new Response('{}', { status: 200 });
+    };
+
+    const client = new HttpBountyClient('http://127.0.0.1:4312', 'admin-secret', fetchMock);
+
+    const registered = await client.registerUser({
+      name: 'Alice',
+      password: 'correct-horse-battery',
+      avatar: { kind: 'preset', id: 'blue' },
+    });
+    expect(registered.token).toBe('user-tok-1');
+    expect(calls[0].method).toBe('POST');
+    expect(calls[0].auth).toBeNull();
+    expect(JSON.parse(calls[0].body ?? '')).toEqual({
+      role: 'user',
+      name: 'Alice',
+      password: 'correct-horse-battery',
+      avatar: { kind: 'preset', id: 'blue' },
+    });
+
+    const loggedIn = await client.loginUser({ name: 'Alice', password: 'correct-horse-battery' });
+    expect(loggedIn.token).toBe('user-tok-2');
+    expect(calls[1].auth).toBeNull();
+    expect(JSON.parse(calls[1].body ?? '')).toEqual({
+      role: 'user',
+      name: 'Alice',
+      password: 'correct-horse-battery',
+    });
+
+    const me = await client.getAuthMe('user-tok-2');
+    expect(me.name).toBe('Alice');
+    expect(calls[2].auth).toBe('Bearer user-tok-2');
+
+    const patched = await client.updateAuthMe('user-tok-2', { name: 'Alice Chen', avatar: null });
+    expect(patched.name).toBe('Alice Chen');
+    expect(calls[3].auth).toBe('Bearer user-tok-2');
+    expect(JSON.parse(calls[3].body ?? '')).toEqual({ name: 'Alice Chen', avatar: null });
+
+    const presets = await client.listAuthAvatars();
+    expect(presets.map(item => item.id)).toEqual(['slate', 'blue', 'green', 'amber', 'purple', 'rose']);
+    expect(calls[4].auth).toBeNull();
+
+    await client.logoutUser('user-tok-2');
+    expect(calls[5].method).toBe('POST');
+    expect(calls[5].auth).toBe('Bearer user-tok-2');
+  });
+
+  it('createMemoryBountyClient 强制用户名称空间、密码、头像上限、会话退出及预设列表', async () => {
+    const client = createMemoryBountyClient({ lan_open_registration: true });
+    await client.registerAgent({ name: 'agent-taken' });
+
+    const presets = await client.listAuthAvatars();
+    expect(presets.map(p => p.id)).toEqual(['slate', 'blue', 'green', 'amber', 'purple', 'rose']);
+
+    // 与 Agent 重名及密码/名称长度拦截
+    await expect(
+      client.registerUser({ name: 'agent-taken', password: 'valid-password-123' }),
+    ).rejects.toMatchObject({ code: 'NAME_TAKEN', status: 409 });
+
+    await expect(
+      client.registerUser({ name: '   ', password: 'valid-password-123' }),
+    ).rejects.toMatchObject({ code: 'VALIDATION_ERROR', status: 400 });
+
+    await expect(
+      client.registerUser({ name: 'Alice', password: 'short' }),
+    ).rejects.toMatchObject({ code: 'VALIDATION_ERROR', status: 400 });
+
+    // 超出 256 KiB 的上传头像拦截
+    const oversizedBytes = new Uint8Array(256 * 1024 + 1);
+    const oversizedBase64 = Buffer.from(oversizedBytes).toString('base64');
+    await expect(
+      client.registerUser({
+        name: 'Alice',
+        password: 'valid-password-123',
+        avatar: { kind: 'upload', media_type: 'image/png', data_base64: oversizedBase64 },
+      }),
+    ).rejects.toMatchObject({ code: 'VALIDATION_ERROR', status: 400 });
+
+    // 合法注册、个人资料更新、重名碰撞不覆盖原资料与退出登录
+    const s1 = await client.registerUser({
+      name: '  Alice  ',
+      password: 'valid-password-123',
+      avatar: { kind: 'preset', id: 'green' },
+    });
+    expect(s1.profile).toEqual({
+      id: expect.any(String),
+      role: 'user',
+      name: 'Alice',
+      avatar: { kind: 'preset', id: 'green' },
+    });
+
+    await client.registerUser({ name: 'Bob', password: 'valid-password-456' });
+
+    await expect(
+      client.updateAuthMe(s1.token, { name: 'Bob' }),
+    ).rejects.toMatchObject({ code: 'NAME_TAKEN', status: 409 });
+    expect((await client.getAuthMe(s1.token)).name).toBe('Alice');
+
+    const smallPng = Buffer.from([0x89, 0x50, 0x4e, 0x47]).toString('base64');
+    const updated = await client.updateAuthMe(s1.token, {
+      name: 'Alice Lin',
+      avatar: { kind: 'upload', media_type: 'image/png', data_base64: smallPng },
+    });
+    expect(updated.name).toBe('Alice Lin');
+    expect(updated.avatar).toEqual({
+      kind: 'upload',
+      media_type: 'image/png',
+      data_base64: smallPng,
+    });
+
+    const cleared = await client.updateAuthMe(s1.token, { avatar: null });
+    expect(cleared.avatar).toBeNull();
+
+    await expect(
+      client.loginUser({ name: 'Alice Lin', password: 'wrong-password-123' }),
+    ).rejects.toMatchObject({ code: 'INVALID_CREDENTIALS', status: 401 });
+
+    const s2 = await client.loginUser({ name: 'Alice Lin', password: 'valid-password-123' });
+    expect(s2.profile.name).toBe('Alice Lin');
+
+    await client.logoutUser(s2.token);
+    await expect(client.getAuthMe(s2.token)).rejects.toMatchObject({
+      code: 'UNAUTHORIZED',
+      status: 401,
+    });
+  });
+
+  it('avatars 校验与 formatAuthError 正确映射错误并支持中英文切换', () => {
+    setLocalePreference('zh-CN');
+    expect(getAvatarInitial('  alice ')).toBe('A');
+    expect(getAvatarInitial('张三')).toBe('张');
+    expect(getAvatarInitial('   ')).toBe('?');
+    expect(validateUserNameError('   ')).toContain('1 至 64');
+    expect(validateUserPasswordError('12345')).toContain('12 至 128');
+    expect(validateUserAvatar({ kind: 'preset', id: 'slate' })).toBeNull();
+
+    expect(
+      formatAuthError(new ServiceApiError('NAME_TAKEN', 409, 'taken'), 'register'),
+    ).toBe('该名称已被占用，请更换名称。');
+    expect(
+      formatAuthError(new ServiceApiError('INVALID_CREDENTIALS', 401, 'bad'), 'login'),
+    ).toBe('名称或密码不正确。');
+    expect(
+      formatAuthError(new ServiceApiError('UNAUTHORIZED', 401, 'expired'), 'session'),
+    ).toBe('登录状态已失效，请重新登录。');
+
+    setLocalePreference('en');
+    expect(
+      formatAuthError(new ServiceApiError('NAME_TAKEN', 409, 'taken'), 'profile'),
+    ).toBe('This name is already taken. Choose another name.');
+    setLocalePreference('zh-CN');
   });
 });

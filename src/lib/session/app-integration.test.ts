@@ -1935,6 +1935,7 @@ describe('任务板工作台外壳集成测试', () => {
     const host = (value: string) => dialog.querySelector<HTMLInputElement>(`[name="skill-install-agent"][value="${value}"]`);
     const global = () => dialog.querySelector<HTMLInputElement>('[name="skill-install-scope"][value="global"]')!;
     expect(method('skill').checked).toBe(true);
+    expect(dialog.querySelector('#skill-install-agent-name')).toBeNull();
     host('shared')!.click();
     await flush();
     expect(global().checked).toBe(true);
@@ -1944,7 +1945,7 @@ describe('任务板工作台外壳集成测试', () => {
     await flush();
     method('mcp-stdio').click();
     await flush();
-    expect(dialog.querySelector('#skill-install-agent-name')).not.toBeNull();
+    expect(dialog.querySelector('#skill-install-agent-name')).toBeNull();
     expect(dialog.querySelector<HTMLInputElement>('[name="skill-install-scope"][value="project"]')!.checked).toBe(true);
     expect(dialog.querySelector('[name="skill-install-scope"][value="custom"]')).toBeNull();
     expect(host('shared')).toBeNull();
@@ -5463,5 +5464,335 @@ describe('Issue 10 UI 集成测试：草稿共创拆单、前置依赖选择器�
     await flush();
     expect(target.querySelector('[data-dialog="bounty-detail"]')).toBeNull();
     expect(document.activeElement).toBe(openerBtn);
+  });
+});
+
+describe('用户账号注册、登录、个人设置与服务隔离集成测试', () => {
+  let instance: Record<string, unknown> | null = null;
+  let target: HTMLDivElement;
+
+  beforeEach(() => {
+    const storageMap = new Map<string, string>();
+    if (typeof globalThis.localStorage?.clear !== 'function') {
+      const mockStorage: Storage = {
+        get length() {
+          return storageMap.size;
+        },
+        clear: () => storageMap.clear(),
+        getItem: (key: string) => storageMap.get(key) ?? null,
+        key: (index: number) => [...storageMap.keys()][index] ?? null,
+        removeItem: (key: string) => {
+          storageMap.delete(key);
+        },
+        setItem: (key: string, value: string) => {
+          storageMap.set(key, String(value));
+        },
+      };
+      Object.defineProperty(globalThis, 'localStorage', { value: mockStorage, configurable: true });
+      Object.defineProperty(window, 'localStorage', { value: mockStorage, configurable: true });
+    } else {
+      globalThis.localStorage.clear();
+    }
+    setLocalePreference('zh-CN');
+    target = document.createElement('div');
+    document.body.appendChild(target);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    if (instance) {
+      unmount(instance);
+      instance = null;
+    }
+    target?.remove();
+    setLocalePreference('zh-CN');
+  });
+
+  it('侧栏底部悬浮用户卡片支持注册、登录、个人设置（预设/上传/清除头像与改名）、错误提示与退出登录', async () => {
+    const { port } = createMemoryPort();
+    const bountyApi = createMemoryBountyClient({ lan_open_registration: true });
+    await bountyApi.registerAgent({ name: 'taken-agent' });
+    const listAvatarsSpy = vi.spyOn(bountyApi, 'listAuthAvatars');
+    const updateMeSpy = vi.spyOn(bountyApi, 'updateAuthMe');
+    const logoutSpy = vi.spyOn(bountyApi, 'logoutUser');
+
+    instance = mount(App, { target, props: { files: port, bountyApi } });
+    await flush();
+
+    // 初始未登录状态：侧栏底部显示占位头像与「登录 / 注册」
+    const trigger = target.querySelector<HTMLButtonElement>('[data-slot="sidebar-user-trigger"]')!;
+    expect(trigger).not.toBeNull();
+    expect(trigger.dataset.authState).toBe('signed-out');
+    expect(trigger.querySelector('[data-avatar-kind="guest"]')).not.toBeNull();
+    expect(trigger.querySelector('.sidebar-user-meta')).toBeNull();
+    expect(trigger.querySelector('.sidebar-user-sub')).toBeNull();
+    expect(trigger.querySelector('[data-slot="sidebar-user-connector"]')).toBeNull();
+    expect(trigger.querySelector('.sidebar-user-action-icon')).not.toBeNull();
+    expect(target.querySelector('[data-slot="sidebar-user-name"]')?.textContent?.trim()).toBe('登录 / 注册');
+    expect(trigger.textContent).not.toContain('点击登录或创建账号');
+    expect(target.querySelector('#sidebar-user-menu')).toBeNull();
+
+    // 点击卡片弹出登录/注册弹窗，切换至注册并拉取系统预制头像
+    trigger.click();
+    await flush();
+    const authDialog = () => target.querySelector<HTMLDialogElement>('[data-dialog="user-auth"]');
+    expect(authDialog()).not.toBeNull();
+
+    authDialog()!.querySelector<HTMLButtonElement>('[data-auth-tab="register"]')!.click();
+    await flush();
+    expect(listAvatarsSpy).toHaveBeenCalledOnce();
+    for (const id of ['slate', 'blue', 'green', 'amber', 'purple', 'rose']) {
+      expect(authDialog()!.querySelector(`[data-avatar-preset-option="${id}"]`)).not.toBeNull();
+    }
+
+    // 密码过短先触发客户端校验拦截，随后填写合法信息且与 Agent 重名触发 409 NAME_TAKEN 错误
+    const nameInput = authDialog()!.querySelector<HTMLInputElement>('#auth-name-input')!;
+    const passInput = authDialog()!.querySelector<HTMLInputElement>('#auth-password-input')!;
+    nameInput.value = 'taken-agent';
+    nameInput.dispatchEvent(new Event('input', { bubbles: true }));
+    passInput.value = 'short';
+    passInput.dispatchEvent(new Event('input', { bubbles: true }));
+    authDialog()!.querySelector<HTMLFormElement>('form')!.dispatchEvent(
+      new Event('submit', { bubbles: true, cancelable: true }),
+    );
+    await flush();
+    expect(authDialog()!.querySelector('[data-slot="auth-error"]')?.textContent).toContain('12 至 128');
+
+    passInput.value = 'secure-password-123';
+    passInput.dispatchEvent(new Event('input', { bubbles: true }));
+    authDialog()!.querySelector<HTMLButtonElement>('[data-avatar-preset-option="blue"]')!.click();
+    authDialog()!.querySelector<HTMLFormElement>('form')!.dispatchEvent(
+      new Event('submit', { bubbles: true, cancelable: true }),
+    );
+    await flush();
+    expect(authDialog()!.querySelector('[data-slot="auth-error"]')?.textContent).toContain('已被占用');
+
+    // 使用新用户名注册成功：侧栏底部显示用户名称与 blue 预设头像，不需要邀请码且无「用户账号」副标题
+    nameInput.value = '  Alice  ';
+    nameInput.dispatchEvent(new Event('input', { bubbles: true }));
+    authDialog()!.querySelector<HTMLFormElement>('form')!.dispatchEvent(
+      new Event('submit', { bubbles: true, cancelable: true }),
+    );
+    await flush();
+    expect(authDialog()).toBeNull();
+    expect(trigger.dataset.authState).toBe('signed-in');
+    expect(target.querySelector('[data-slot="sidebar-user-name"]')?.textContent?.trim()).toBe('Alice');
+    expect(trigger.textContent).not.toContain('用户账号');
+    expect(trigger.querySelector('.sidebar-user-sub')).toBeNull();
+    expect(trigger.querySelector('[data-avatar-kind="preset"][data-avatar-preset="blue"]')).not.toBeNull();
+
+    // 点击已登录用户卡片打开悬浮菜单，点击「个人设置」打开设置弹窗
+    trigger.click();
+    await flush();
+    const menu = target.querySelector<HTMLElement>('#sidebar-user-menu')!;
+    expect(menu.hidden).toBe(false);
+    menu.querySelector<HTMLButtonElement>('[data-action="open-user-profile"]')!.click();
+    await flush();
+    expect(menu.hidden).toBe(true);
+
+    const profileDialog = () => target.querySelector<HTMLDialogElement>('[data-dialog="user-profile"]');
+    expect(profileDialog()).not.toBeNull();
+
+    // 修改显示名称并上传 PNG 头像
+    const profileNameInput = profileDialog()!.querySelector<HTMLInputElement>('#profile-name-input')!;
+    profileNameInput.value = 'Alice Wang';
+    profileNameInput.dispatchEvent(new Event('input', { bubbles: true }));
+
+    const pngBytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    const file = new File([pngBytes], 'avatar.png', { type: 'image/png' });
+    Object.defineProperty(file, 'arrayBuffer', {
+      value: async () => pngBytes.buffer.slice(0),
+    });
+    const fileInput = profileDialog()!.querySelector<HTMLInputElement>('[data-slot="avatar-upload-input"]')!;
+    Object.defineProperty(fileInput, 'files', { value: [file], configurable: true });
+    fileInput.dispatchEvent(new Event('change', { bubbles: true }));
+    await flush();
+
+    profileDialog()!.querySelector<HTMLFormElement>('form')!.dispatchEvent(
+      new Event('submit', { bubbles: true, cancelable: true }),
+    );
+    await flush();
+    expect(profileDialog()).toBeNull();
+    expect(updateMeSpy).toHaveBeenCalledWith(expect.any(String), {
+      name: 'Alice Wang',
+      avatar: {
+        kind: 'upload',
+        media_type: 'image/png',
+        data_base64: Buffer.from(pngBytes).toString('base64'),
+      },
+    });
+    expect(target.querySelector('[data-slot="sidebar-user-name"]')?.textContent?.trim()).toBe('Alice Wang');
+    expect(trigger.querySelector('img')?.getAttribute('src')).toContain('data:image/png;base64,');
+
+    // 重新打开个人设置并清除头像 -> 传 avatar: null 并回退首字母渲染
+    trigger.click();
+    await flush();
+    target.querySelector<HTMLButtonElement>('[data-action="open-user-profile"]')!.click();
+    await flush();
+    profileDialog()!.querySelector<HTMLButtonElement>('[data-action="clear-avatar"]')!.click();
+    await flush();
+    profileDialog()!.querySelector<HTMLFormElement>('form')!.dispatchEvent(
+      new Event('submit', { bubbles: true, cancelable: true }),
+    );
+    await flush();
+    expect(updateMeSpy).toHaveBeenLastCalledWith(expect.any(String), { avatar: null });
+    expect(trigger.querySelector('[data-avatar-kind="initial"]')?.textContent?.trim()).toBe('A');
+
+    // 点击「退出登录」恢复未登录占位，再次打开弹窗使用错误密码登录展示错误提示
+    trigger.click();
+    await flush();
+    target.querySelector<HTMLButtonElement>('[data-action="logout-user"]')!.click();
+    await flush();
+    expect(logoutSpy).toHaveBeenCalledOnce();
+    expect(trigger.dataset.authState).toBe('signed-out');
+    expect(trigger.querySelector('[data-avatar-kind="guest"]')).not.toBeNull();
+
+    trigger.click();
+    await flush();
+    authDialog()!.querySelector<HTMLInputElement>('#auth-name-input')!.value = 'Alice Wang';
+    authDialog()!.querySelector<HTMLInputElement>('#auth-name-input')!.dispatchEvent(new Event('input', { bubbles: true }));
+    authDialog()!.querySelector<HTMLInputElement>('#auth-password-input')!.value = 'wrong-password-123';
+    authDialog()!.querySelector<HTMLInputElement>('#auth-password-input')!.dispatchEvent(new Event('input', { bubbles: true }));
+    authDialog()!.querySelector<HTMLFormElement>('form')!.dispatchEvent(
+      new Event('submit', { bubbles: true, cancelable: true }),
+    );
+    await flush();
+    expect(authDialog()!.querySelector('[data-slot="auth-error"]')?.textContent).toContain('名称或密码不正确');
+  });
+
+  it('用户登录凭证按服务隔离且独立于管理员凭证，切换服务互不串话并在 401 时清理失效会话', async () => {
+    localStorage.setItem('taskrail.userAuthToken:https://service-a.test', 'user-a-token');
+    localStorage.setItem('taskrail.userAuthToken:https://service-b.test', 'expired-b-token');
+
+    const authHeadersByUrl = new Map<string, string | null>();
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      const auth = new Headers(init?.headers).get('Authorization');
+      authHeadersByUrl.set(url, auth);
+
+      if (url.startsWith('https://service-a.test')) {
+        if (url.endsWith('/api/v1/auth/me')) {
+          return new Response(
+            JSON.stringify({
+              id: 'ua-1',
+              role: 'user',
+              name: 'User Alpha',
+              avatar: { kind: 'preset', id: 'purple' },
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+          );
+        }
+        if (url.endsWith('/api/v1/auth/avatars')) {
+          return new Response('[]', { status: 200, headers: { 'Content-Type': 'application/json' } });
+        }
+        if (url.includes('/api/v1/projects')) {
+          return new Response('[]', { status: 200, headers: { 'Content-Type': 'application/json' } });
+        }
+        if (url.includes('/api/v1/bounties')) {
+          return new Response('[]', { status: 200, headers: { 'Content-Type': 'application/json' } });
+        }
+        if (url.endsWith('/api/v1/onboarding')) {
+          return new Response(
+            JSON.stringify({ lan_open_registration: false, invite_tokens: [] }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+          );
+        }
+        if (url.endsWith('/api/v1/agents')) {
+          return new Response('[]', { status: 200, headers: { 'Content-Type': 'application/json' } });
+        }
+        if (url.endsWith('/api/v1/arbitration/config')) {
+          return new Response(JSON.stringify({ arbitrator_chain: [] }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+      }
+
+      if (url.startsWith('https://service-b.test')) {
+        if (url.endsWith('/api/v1/auth/me')) {
+          return new Response(
+            JSON.stringify({ error: { code: 'UNAUTHORIZED', message: 'invalid session' } }),
+            { status: 401, headers: { 'Content-Type': 'application/json' } },
+          );
+        }
+        if (url.includes('/api/v1/projects')) {
+          return new Response('[]', { status: 200, headers: { 'Content-Type': 'application/json' } });
+        }
+        if (url.includes('/api/v1/bounties')) {
+          return new Response('[]', { status: 200, headers: { 'Content-Type': 'application/json' } });
+        }
+        if (url.endsWith('/api/v1/onboarding')) {
+          return new Response(
+            JSON.stringify({ lan_open_registration: false, invite_tokens: [] }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+          );
+        }
+        if (url.endsWith('/api/v1/agents')) {
+          return new Response('[]', { status: 200, headers: { 'Content-Type': 'application/json' } });
+        }
+        if (url.endsWith('/api/v1/arbitration/config')) {
+          return new Response(JSON.stringify({ arbitrator_chain: [] }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+      }
+
+      return new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } });
+    });
+
+    const { port } = createMemoryPort({
+      preferences: {
+        ...emptyAppConfig().preferences,
+        workspaceSection: 'settings',
+        serviceMode: 'remote',
+        remoteServerUrl: 'https://service-a.test',
+        remoteAdminToken: 'admin-secret-a',
+      },
+    });
+
+    instance = mount(App, { target, props: { files: port } });
+    await vi.waitFor(() => {
+      expect(target.querySelector('[data-slot="sidebar-user-name"]')?.textContent?.trim()).toBe('User Alpha');
+    });
+
+    // 用户态 /auth/me 使用用户 Bearer，管理员接口仍使用 adminToken
+    expect(authHeadersByUrl.get('https://service-a.test/api/v1/auth/me')).toBe('Bearer user-a-token');
+    expect(authHeadersByUrl.get('https://service-a.test/api/v1/projects?include_archived=true')).toBe(
+      'Bearer admin-secret-a',
+    );
+
+    // 切换到服务 B：不继承服务 A 登录态；服务 B 的失效凭证返回 401 后清理本地 B 令牌并展示错误，保留服务 A 令牌
+    const urlInput = target.querySelector<HTMLInputElement>('#remote-server-url-input')!;
+    const adminTokenInput = target.querySelector<HTMLInputElement>('#remote-admin-token-input')!;
+    urlInput.value = 'https://service-b.test';
+    urlInput.dispatchEvent(new Event('input', { bubbles: true }));
+    adminTokenInput.value = 'admin-secret-b';
+    adminTokenInput.dispatchEvent(new Event('input', { bubbles: true }));
+    await flush();
+
+    target.querySelector<HTMLButtonElement>('[data-action="save-reconnect"]')!.click();
+    await vi.waitFor(() => {
+      expect(target.querySelector('[data-slot="sidebar-user-trigger"]')?.getAttribute('data-auth-state')).toBe(
+        'signed-out',
+      );
+      expect(target.querySelector('[data-slot="sidebar-user-error"]')?.textContent).toContain('登录状态已失效');
+    });
+    expect(localStorage.getItem('taskrail.userAuthToken:https://service-b.test')).toBeNull();
+    expect(localStorage.getItem('taskrail.userAuthToken:https://service-a.test')).toBe('user-a-token');
+
+    // 切回服务 A：自动恢复 User Alpha 登录态
+    urlInput.value = 'https://service-a.test';
+    urlInput.dispatchEvent(new Event('input', { bubbles: true }));
+    adminTokenInput.value = 'admin-secret-a';
+    adminTokenInput.dispatchEvent(new Event('input', { bubbles: true }));
+    await flush();
+
+    target.querySelector<HTMLButtonElement>('[data-action="save-reconnect"]')!.click();
+    await vi.waitFor(() => {
+      expect(target.querySelector('[data-slot="sidebar-user-name"]')?.textContent?.trim()).toBe('User Alpha');
+      expect(target.querySelector('[data-slot="sidebar-user-error"]')).toBeNull();
+    });
   });
 });

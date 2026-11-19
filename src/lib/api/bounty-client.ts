@@ -6,6 +6,12 @@ import { invoke } from '@tauri-apps/api/core';
 import skillTemplate from '../../../assets/skills/taskrail-agent/SKILL.md?raw';
 import { parseProjectIcon } from '../project-icons';
 import {
+  DEFAULT_AUTH_AVATAR_PRESETS,
+  validateUserAvatar,
+  validateUserNameError,
+  validateUserPasswordError,
+} from '../auth/avatars';
+import {
   ServiceApiError,
   type AbandonBountyInput,
   type AckAgentEventsResult,
@@ -26,6 +32,8 @@ import {
   type ApproveArbitrationInput,
   type ArbitrationConfig,
   type AssigneeMode,
+  type AuthAvatarPreset,
+  type AuthSessionResult,
   type BountyComment,
   type BountyCommentMutationResult,
   type BountyDependencySummary,
@@ -47,12 +55,14 @@ import {
   type InviteDraftCollaboratorInput,
   type InviteTokenSummary,
   type LeaseHeartbeatInput,
+  type LoginUserInput,
   type OnboardingSettings,
   type PublishBountiesBatchInput,
   type QualityGrade,
   type RatingOutcome,
   type RegisterAgentInput,
   type RegisteredAgentResult,
+  type RegisterUserInput,
   type RejectArbitrationInput,
   type RequestInfoInput,
   type ServerHealth,
@@ -66,6 +76,9 @@ import {
   type UpdateBountyInput,
   type UpdateOnboardingInput,
   type UpdateProjectInput,
+  type UpdateUserProfileInput,
+  type UserAvatar,
+  type UserProfile,
 } from './types';
 
 const VALID_DIFFICULTIES = new Set<BountyDifficulty>(['C', 'B', 'A', 'S']);
@@ -175,6 +188,12 @@ export interface BountyApiPort {
   enableAgent(id: string): Promise<AgentSummary>;
   revokeAgent(id: string): Promise<AgentSummary>;
   agentCreateBounty?(apiKey: string, input: AgentCreateBountyInput): Promise<BountyTask>;
+  registerUser?(input: RegisterUserInput): Promise<AuthSessionResult>;
+  loginUser?(input: LoginUserInput): Promise<AuthSessionResult>;
+  getAuthMe?(token: string): Promise<UserProfile>;
+  updateAuthMe?(token: string, input: UpdateUserProfileInput): Promise<UserProfile>;
+  logoutUser?(token: string): Promise<void>;
+  listAuthAvatars?(): Promise<AuthAvatarPreset[]>;
 }
 
 export interface AgentApiPort {
@@ -216,6 +235,12 @@ export interface AgentApiPort {
 }
 
 export interface MemoryBountyClient extends BountyApiPort {
+  registerUser(input: RegisterUserInput): Promise<AuthSessionResult>;
+  loginUser(input: LoginUserInput): Promise<AuthSessionResult>;
+  getAuthMe(token: string): Promise<UserProfile>;
+  updateAuthMe(token: string, input: UpdateUserProfileInput): Promise<UserProfile>;
+  logoutUser(token: string): Promise<void>;
+  listAuthAvatars(): Promise<AuthAvatarPreset[]>;
   inviteDraftCollaborator(
     id: string,
     input: InviteDraftCollaboratorInput,
@@ -388,6 +413,54 @@ export class HttpBountyClient implements BountyApiPort {
 
   async health(): Promise<ServerHealth> {
     return await this.request<ServerHealth>('GET', '/api/v1/health', { auth: false });
+  }
+
+  async registerUser(input: RegisterUserInput): Promise<AuthSessionResult> {
+    return await this.request<AuthSessionResult>('POST', '/api/v1/auth/register', {
+      auth: false,
+      body: {
+        role: 'user',
+        name: input.name,
+        password: input.password,
+        ...(input.avatar !== undefined ? { avatar: input.avatar } : {}),
+      },
+    });
+  }
+
+  async loginUser(input: LoginUserInput): Promise<AuthSessionResult> {
+    return await this.request<AuthSessionResult>('POST', '/api/v1/auth/login', {
+      auth: false,
+      body: {
+        role: 'user',
+        name: input.name,
+        password: input.password,
+      },
+    });
+  }
+
+  async getAuthMe(token: string): Promise<UserProfile> {
+    return await this.request<UserProfile>('GET', '/api/v1/auth/me', {
+      bearerToken: token,
+    });
+  }
+
+  async updateAuthMe(token: string, input: UpdateUserProfileInput): Promise<UserProfile> {
+    return await this.request<UserProfile>('PATCH', '/api/v1/auth/me', {
+      bearerToken: token,
+      body: input,
+    });
+  }
+
+  async logoutUser(token: string): Promise<void> {
+    await this.request<void>('POST', '/api/v1/auth/logout', {
+      bearerToken: token,
+    });
+  }
+
+  async listAuthAvatars(): Promise<AuthAvatarPreset[]> {
+    return await this.request<AuthAvatarPreset[]>('GET', '/api/v1/auth/avatars', {
+      auth: false,
+    });
   }
 
   async adminStatus(): Promise<AdminStatus> {
@@ -620,10 +693,12 @@ export class HttpBountyClient implements BountyApiPort {
   private async request<T>(
     method: string,
     path: string,
-    options?: { body?: unknown; auth?: boolean },
+    options?: { body?: unknown; auth?: boolean; bearerToken?: string },
   ): Promise<T> {
     const headers: Record<string, string> = {};
-    if (options?.auth !== false) {
+    if (options?.bearerToken !== undefined) {
+      headers.Authorization = `Bearer ${options.bearerToken}`;
+    } else if (options?.auth !== false) {
       headers.Authorization = `Bearer ${this.adminToken}`;
     }
     if (options?.body !== undefined) {
@@ -962,7 +1037,11 @@ function asciiLower(text: string): string {
 }
 
 function clone<T>(value: T): T {
-  return structuredClone(value);
+  try {
+    return structuredClone(value);
+  } catch {
+    return JSON.parse(JSON.stringify(value)) as T;
+  }
 }
 
 function randomHex64(): string {
@@ -1204,6 +1283,15 @@ export function createMemoryBountyClient(seed?: {
   const inviteTokensByRaw = new Map<string, StoredInviteToken>();
   const agentsById = new Map<string, StoredAgent>();
   const agentsByApiKey = new Map<string, StoredAgent>();
+  interface StoredUserAccount {
+    id: string;
+    role: 'user';
+    name: string;
+    password: string;
+    avatar: UserAvatar | null;
+  }
+  const userAccountsById = new Map<string, StoredUserAccount>();
+  const userSessionsByToken = new Map<string, string>();
   const bountyDispatches = new Map<string, Set<string>>();
   const leaseWarnedIdByBounty = new Map<string, number>();
   const arbitrationTriedIdsByBounty = new Map<string, string[]>();
@@ -1216,6 +1304,76 @@ export function createMemoryBountyClient(seed?: {
   let nextStreamConnectionId = 1;
   let nextLedgerId = 1;
   let lastTimestampMs = 0;
+
+  function toUserProfile(account: StoredUserAccount): UserProfile {
+    return clone({
+      id: account.id,
+      role: account.role,
+      name: account.name,
+      avatar: account.avatar,
+    });
+  }
+
+  function validateAccountName(raw: unknown): string {
+    if (typeof raw !== 'string') {
+      throw new ServiceApiError('VALIDATION_ERROR', 400, '名称须为 1 至 64 个字符');
+    }
+    const err = validateUserNameError(raw);
+    if (err) {
+      throw new ServiceApiError('VALIDATION_ERROR', 400, err);
+    }
+    return raw.trim();
+  }
+
+  function validateAccountPassword(raw: unknown): string {
+    if (typeof raw !== 'string') {
+      throw new ServiceApiError('VALIDATION_ERROR', 400, '密码须为 12 至 128 个字符');
+    }
+    const err = validateUserPasswordError(raw);
+    if (err) {
+      throw new ServiceApiError('VALIDATION_ERROR', 400, err);
+    }
+    return raw;
+  }
+
+  function validateAccountAvatar(raw: unknown): UserAvatar | null {
+    if (raw === null) {
+      return null;
+    }
+    if (!raw || typeof raw !== 'object') {
+      throw new ServiceApiError('VALIDATION_ERROR', 400, '头像格式无效');
+    }
+    const err = validateUserAvatar(raw as UserAvatar);
+    if (err) {
+      throw new ServiceApiError('VALIDATION_ERROR', 400, err);
+    }
+    return clone(raw as UserAvatar);
+  }
+
+  function ensureAccountNameAvailable(name: string, ownId: string | null): void {
+    for (const account of userAccountsById.values()) {
+      if (account.id !== ownId && account.name === name) {
+        throw new ServiceApiError('NAME_TAKEN', 409, '名称已被使用');
+      }
+    }
+    for (const agent of agentsById.values()) {
+      if (agent.summary.id !== ownId && agent.summary.name === name) {
+        throw new ServiceApiError('NAME_TAKEN', 409, '名称已被使用');
+      }
+    }
+  }
+
+  function authenticateUserSession(token: string): StoredUserAccount {
+    if (typeof token !== 'string' || !token) {
+      throw new ServiceApiError('UNAUTHORIZED', 401, '请先注册或登录');
+    }
+    const accountId = userSessionsByToken.get(token);
+    const account = accountId ? userAccountsById.get(accountId) : undefined;
+    if (!account) {
+      throw new ServiceApiError('UNAUTHORIZED', 401, '请先注册或登录');
+    }
+    return account;
+  }
 
   function withTransaction<T>(fn: () => T): T {
     const snapBounties = clone(bounties);
@@ -2524,6 +2682,86 @@ export function createMemoryBountyClient(seed?: {
 
     async adminStatus(): Promise<AdminStatus> {
       return { ok: true, mode: 'embedded', db_path: ':memory:', version: '0.8.8' };
+    },
+
+    async registerUser(input: RegisterUserInput): Promise<AuthSessionResult> {
+      const name = validateAccountName(input?.name);
+      const password = validateAccountPassword(input?.password);
+      const avatar = input?.avatar !== undefined ? validateAccountAvatar(input.avatar) : null;
+      ensureAccountNameAvailable(name, null);
+      const account: StoredUserAccount = {
+        id: crypto.randomUUID(),
+        role: 'user',
+        name,
+        password,
+        avatar,
+      };
+      userAccountsById.set(account.id, account);
+      const token = `tr_ac_${randomHex64()}`;
+      userSessionsByToken.set(token, account.id);
+      return {
+        token,
+        profile: toUserProfile(account),
+      };
+    },
+
+    async loginUser(input: LoginUserInput): Promise<AuthSessionResult> {
+      if (typeof input?.name !== 'string' || typeof input?.password !== 'string') {
+        throw new ServiceApiError('INVALID_CREDENTIALS', 401, '名称或凭证不正确');
+      }
+      const trimmedName = input.name.trim();
+      const nameErr = validateUserNameError(trimmedName);
+      const passwordErr = validateUserPasswordError(input.password);
+      if (nameErr || passwordErr) {
+        throw new ServiceApiError('INVALID_CREDENTIALS', 401, '名称或凭证不正确');
+      }
+      let matched: StoredUserAccount | undefined;
+      for (const account of userAccountsById.values()) {
+        if (account.name === trimmedName && account.password === input.password) {
+          matched = account;
+          break;
+        }
+      }
+      if (!matched) {
+        throw new ServiceApiError('INVALID_CREDENTIALS', 401, '名称或凭证不正确');
+      }
+      const token = `tr_ac_${randomHex64()}`;
+      userSessionsByToken.set(token, matched.id);
+      return {
+        token,
+        profile: toUserProfile(matched),
+      };
+    },
+
+    async getAuthMe(token: string): Promise<UserProfile> {
+      return toUserProfile(authenticateUserSession(token));
+    },
+
+    async updateAuthMe(token: string, input: UpdateUserProfileInput): Promise<UserProfile> {
+      const account = authenticateUserSession(token);
+      const nextName =
+        input?.name !== undefined ? validateAccountName(input.name) : undefined;
+      const nextAvatar =
+        input?.avatar !== undefined ? validateAccountAvatar(input.avatar) : undefined;
+      if (nextName !== undefined) {
+        ensureAccountNameAvailable(nextName, account.id);
+      }
+      if (nextName !== undefined) {
+        account.name = nextName;
+      }
+      if (nextAvatar !== undefined) {
+        account.avatar = nextAvatar;
+      }
+      return toUserProfile(account);
+    },
+
+    async logoutUser(token: string): Promise<void> {
+      authenticateUserSession(token);
+      userSessionsByToken.delete(token);
+    },
+
+    async listAuthAvatars(): Promise<AuthAvatarPreset[]> {
+      return clone([...DEFAULT_AUTH_AVATAR_PRESETS]);
     },
 
     async listProjects(includeArchived = false): Promise<BountyProject[]> {

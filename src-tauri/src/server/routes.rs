@@ -24,6 +24,7 @@ use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use tower_http::cors::{Any, CorsLayer};
 
+mod accounts;
 mod agents;
 mod events;
 mod mcp;
@@ -31,6 +32,7 @@ mod mcp;
 pub(super) fn router(state: AppState) -> Router {
     let mcp = mcp::router(state.clone());
     Router::new()
+        .merge(accounts::router())
         .merge(agents::router())
         .merge(events::router())
         .route("/api/v1/health", get(health))
@@ -65,7 +67,9 @@ pub(super) fn router(state: AppState) -> Router {
         )
         .route(
             "/api/v1/bounties/{id}",
-            get(bounty_detail).patch(update_bounty).delete(delete_bounty),
+            get(bounty_detail)
+                .patch(update_bounty)
+                .delete(delete_bounty),
         )
         .route(
             "/api/v1/bounties/{id}/comments",
@@ -74,7 +78,10 @@ pub(super) fn router(state: AppState) -> Router {
         .route("/api/v1/bounties/{id}/publish", post(publish_bounty))
         .route("/api/v1/bounties/{id}/withdraw", post(withdraw_bounty))
         .route("/api/v1/bounties/{id}/cancel", post(cancel_bounty))
-        .route("/api/v1/bounties/{id}/restore-draft", post(restore_bounty_draft))
+        .route(
+            "/api/v1/bounties/{id}/restore-draft",
+            post(restore_bounty_draft),
+        )
         .route("/api/v1/bounties/{id}/release-lease", post(release_lease))
         .fallback(|| async { ApiError::new(StatusCode::NOT_FOUND, "NOT_FOUND", "接口不存在") })
         .method_not_allowed_fallback(|| async {

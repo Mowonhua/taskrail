@@ -1,5 +1,5 @@
 //! 文件职责：读取本机 Agent 连接、执行原生命令，并提供 STDIO 传输。
-use crate::agent_tools::{Operation, ToolResult, ToolServer, ACTIONS};
+use crate::agent_tools::{sign_in_required, Operation, ToolResult, ToolServer, ACTIONS};
 use clap::Parser;
 use rmcp::ServiceExt;
 use serde::{Deserialize, Serialize};
@@ -86,11 +86,11 @@ pub(crate) fn service_url(raw: &str) -> Result<url::Url, url::ParseError> {
 #[derive(Clone)]
 pub(crate) struct Client {
     http: reqwest::Client,
-    connection: std::sync::Arc<Connection>,
+    path: PathBuf,
 }
 
 impl Client {
-    fn new(connection: &Connection) -> Result<Self, Box<dyn Error>> {
+    fn new(path: &Path) -> Result<Self, Box<dyn Error>> {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let http = reqwest::Client::builder()
             .use_rustls_tls()
@@ -99,30 +99,76 @@ impl Client {
             .build()?;
         Ok(Self {
             http,
-            connection: std::sync::Arc::new(Connection {
-                base_url: connection.base_url.clone(),
-                local_address_file: connection.local_address_file.clone(),
-                invite_token: None,
-                api_key: connection.api_key.clone(),
-            }),
+            path: path.to_owned(),
         })
     }
 
-    pub(crate) async fn execute(&self, operation: Operation, registering: bool) -> ToolResult {
-        let fail = |code, message: String| json!({"error":{"code":code,"message":message}});
-        let base = self
-            .connection
+    fn connection(&self) -> io::Result<Connection> {
+        Ok(serde_json::from_reader(fs::File::open(&self.path)?)?)
+    }
+
+    pub(crate) fn has_credentials(&self) -> bool {
+        self.connection()
+            .is_ok_and(|connection| connection.api_key.is_some())
+    }
+
+    pub(crate) async fn call(&self, operation: Operation, signs_in: bool) -> ToolResult {
+        if signs_in {
+            return self.sign_in(operation).await.map_err(|_| {
+                failure(
+                    "AGENT_CONFIG_ERROR",
+                    "无法保存 Agent 登录会话。请检查连接配置并重试登录。",
+                )
+            })?;
+        }
+        let connection = self
+            .connection()
+            .map_err(|_| failure("AGENT_CONFIG_ERROR", "无法读取 Agent 连接配置"))?;
+        self.execute(&connection, operation, false).await
+    }
+
+    async fn sign_in(&self, mut operation: Operation) -> Result<ToolResult, Box<dyn Error>> {
+        let _lock = lock_connection(&self.path).await?;
+        let mut connection = self.connection()?;
+        if operation.path == "/api/v1/auth/register" {
+            if let Some(body) = operation.body.as_mut().and_then(Value::as_object_mut) {
+                if let Some(invite) = &connection.invite_token {
+                    body.entry("invite_token").or_insert_with(|| json!(invite));
+                }
+            }
+        }
+        let mut value = match self.execute(&connection, operation, true).await {
+            Ok(value) => value,
+            Err(error) => return Ok(Err(error)),
+        };
+        let token = value
+            .as_object_mut()
+            .and_then(|value| value.remove("token"))
+            .and_then(|token| token.as_str().map(str::to_owned))
+            .ok_or("登录响应缺少 Agent 会话令牌")?;
+        connection.api_key = Some(token);
+        connection.invite_token = None;
+        connection.save(&self.path)?;
+        Ok(Ok(value))
+    }
+
+    async fn execute(
+        &self,
+        connection: &Connection,
+        operation: Operation,
+        public: bool,
+    ) -> ToolResult {
+        if !public && connection.api_key.is_none() {
+            return Err(sign_in_required());
+        }
+        let base = connection
             .address()
-            .map_err(|_| fail("CONNECTION_FAILED", "无法读取 Taskrail 服务地址".into()))?;
+            .map_err(|_| failure("CONNECTION_FAILED", "无法读取 Taskrail 服务地址"))?;
         let url = base
             .join(&operation.path)
-            .map_err(|_| fail("INVALID_ARGUMENT", "无效的 Taskrail 请求".into()))?;
+            .map_err(|_| failure("INVALID_ARGUMENT", "无效的 Taskrail 请求"))?;
         let mut req = self.http.request(operation.method, url);
-        if !registering {
-            let key =
-                self.connection.api_key.as_deref().ok_or_else(|| {
-                    fail("UNAUTHORIZED", "请先运行 taskrail-agent register".into())
-                })?;
+        if let Some(key) = connection.api_key.as_deref().filter(|_| !public) {
             req = req.bearer_auth(key);
         }
         if let Some(body) = operation.body {
@@ -131,7 +177,7 @@ impl Client {
         let response = req
             .send()
             .await
-            .map_err(|error| fail("CONNECTION_FAILED", error.without_url().to_string()))?;
+            .map_err(|error| failure("CONNECTION_FAILED", error.without_url().to_string()))?;
         let status = response.status();
         if status == reqwest::StatusCode::NO_CONTENT {
             return Ok(Value::Null);
@@ -139,13 +185,17 @@ impl Client {
         let value = response
             .json()
             .await
-            .map_err(|_| fail("INVALID_RESPONSE", format!("Taskrail 返回 HTTP {status}")))?;
+            .map_err(|_| failure("INVALID_RESPONSE", format!("Taskrail 返回 HTTP {status}")))?;
         if status.is_success() {
             Ok(value)
         } else {
             Err(value)
         }
     }
+}
+
+fn failure(code: &str, message: impl Into<String>) -> Value {
+    json!({"error":{"code":code,"message":message.into()}})
 }
 
 fn read_args(path: Option<&Path>) -> Result<Map<String, Value>, Box<dyn Error>> {
@@ -157,8 +207,7 @@ fn read_args(path: Option<&Path>) -> Result<Map<String, Value>, Box<dyn Error>> 
 }
 
 fn command_help() {
-    println!("taskrail-agent --config FILE register NAME");
-    println!("taskrail-agent --config FILE mcp [AGENT_NAME]");
+    println!("taskrail-agent --config FILE mcp");
     for action in ACTIONS {
         println!(
             "{} {}  {}",
@@ -207,15 +256,8 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
     let result = match words.as_slice() {
         ["register", name] => register(&path, name).await?,
         ["mcp"] | ["mcp", _] => {
-            let mut config: Connection = serde_json::from_reader(fs::File::open(&path)?)?;
-            if config.api_key.is_none() {
-                let name = words.get(1).ok_or("请先运行 taskrail-agent register")?;
-                register(&path, name)
-                    .await?
-                    .map_err(|error| error.to_string())?;
-                config = serde_json::from_reader(fs::File::open(&path)?)?;
-            }
-            let client = Client::new(&config)?;
+            let client = Client::new(&path)?;
+            client.connection()?;
             ToolServer::Stdio(client)
                 .serve(rmcp::transport::stdio())
                 .await?
@@ -228,9 +270,14 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
                 .iter()
                 .find(|action| action.group == *group && action.command == *command)
                 .ok_or("未知 Taskrail 命令。运行 taskrail-agent commands 查看命令")?;
-            let operation = action.operation(read_args(json.as_deref())?)?;
-            let config = serde_json::from_reader(fs::File::open(path)?)?;
-            Client::new(&config)?.execute(operation, false).await
+            let client = Client::new(&path)?;
+            let signs_in = action.signs_in();
+            if !signs_in && client.connection()?.api_key.is_none() {
+                Err(sign_in_required())
+            } else {
+                let operation = action.operation(read_args(json.as_deref())?)?;
+                client.call(operation, signs_in).await
+            }
         }
         _ => return Err("无效的 Taskrail 命令。运行 taskrail-agent commands 查看命令".into()),
     };
@@ -244,7 +291,7 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
 }
 
 /// 锁文件与配置分开，配置被原子替换后，其他注册进程仍在同一把锁上排队。
-async fn register(path: &Path, name: &str) -> Result<ToolResult, Box<dyn Error>> {
+async fn lock_connection(path: &Path) -> Result<fs::File, Box<dyn Error>> {
     let mut lock_path = path.as_os_str().to_os_string();
     lock_path.push(".register.lock");
     let lock = fs::OpenOptions::new()
@@ -252,17 +299,22 @@ async fn register(path: &Path, name: &str) -> Result<ToolResult, Box<dyn Error>>
         .create(true)
         .truncate(false)
         .open(lock_path)?;
-    // 多个宿主首次同时启动时，后续进程等待首个进程保存凭证，再重读配置。
-    let _lock = tokio::task::spawn_blocking(move || {
+    Ok(tokio::task::spawn_blocking(move || {
         lock.lock()?;
         Ok::<_, std::io::Error>(lock)
     })
-    .await??;
-    let mut config: Connection = serde_json::from_reader(fs::File::open(path)?)?;
-    let client = Client::new(&config)?;
+    .await??)
+}
+
+// 保留旧 Skill 的显式注册命令。新安装通过 account register 走共享账户入口。
+async fn register(path: &Path, name: &str) -> Result<ToolResult, Box<dyn Error>> {
+    let _lock = lock_connection(path).await?;
+    let client = Client::new(path)?;
+    let mut config = client.connection()?;
     if config.api_key.is_some() {
         return Ok(client
             .execute(
+                &config,
                 Operation {
                     method: axum::http::Method::GET,
                     path: "/api/v1/agent/me".into(),
@@ -277,7 +329,7 @@ async fn register(path: &Path, name: &str) -> Result<ToolResult, Box<dyn Error>>
         path: "/api/v1/agents/register".into(),
         body: Some(json!({"name":name,"invite_token":config.invite_token})),
     };
-    let value = match client.execute(operation, true).await {
+    let value = match client.execute(&config, operation, true).await {
         Ok(value) => value,
         Err(error) => return Ok(Err(error)),
     };

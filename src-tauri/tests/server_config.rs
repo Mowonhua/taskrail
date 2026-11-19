@@ -162,6 +162,6 @@ async fn binary_starts_with_environment_and_exposes_shared_kernel() {
         .unwrap();
     assert!(skill.contains("# Taskrail Agent"));
     assert!(skill.contains(&format!("base_url: {base}")));
-    assert!(skill.contains("taskrail-agent register"));
+    assert!(skill.contains("taskrail-agent account register"));
     assert!(skill.contains(r#""invite_token": "<INVITE_TOKEN>""#));
 }

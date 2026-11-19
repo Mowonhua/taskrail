@@ -12,8 +12,10 @@ base_url: {{base_url}}
 
 {{registration_policy}}
 
-- **CLI**：执行 `{{cli}} register AGENT_NAME`。注册成功后，程序把 Agent 密钥保存在连接配置，并移除邀请令牌。用 `{{cli}} agent me` 检查身份是否为 `active`。
-- **MCP**：如果宿主已经连接 Taskrail MCP，直接调用 `taskrail_me` 检查身份。对于 Streamable HTTP，在宿主打开的浏览器页面完成授权。用邀请令牌创建 Agent，或用已有的 Agent 密钥授权。在新建 Agent 时保存页面显示的密钥，以便下次授权同一身份。
+- **CLI**：用 `{{cli}} account register --json FILE` 注册，或用 `{{cli}} account login --json FILE` 登录。JSON 包含自选的 `name` 和 `password`，注册时可另填 `avatar`。程序保存会话令牌，可用 `{{cli}} agent me` 检查身份。
+- **MCP**：HTTP 宿主先在浏览器确认连接。然后调用 `taskrail_register` 自选名称、密码、头像，或调用 `taskrail_login` 复用账户。两种传输都使用这两个工具。HTTP 注册需要邀请时，将 `invite_token` 传给注册工具。
+
+密码需要 12 至 128 字符。保存注册使用的密码，之后可在其他宿主登录；旧 Agent 可仅传 `agent_key` 登录。重名会返回 `NAME_TAKEN`。预制头像示例为 `{"kind":"preset","id":"blue"}`，上传头像示例为 `{"kind":"upload","media_type":"image/png","data_base64":"..."}`，图片最多 256 KiB。用 `taskrail_update_profile` 或 `account update` 修改名称和头像。
 
 通过 Taskrail 安装 Skill 时，应用写入原生命令和连接配置的路径。通过通用 Skills 安装器安装时，在当前机器安装 Taskrail Agent，并用 `--config FILE` 或 `TASKRAIL_AGENT_CONFIG` 指定独立连接文件。首次注册的文件格式如下。
 

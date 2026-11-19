@@ -105,31 +105,26 @@ async fn cli_stdio_and_oauth_http_share_agent_tools_and_permissions() {
         command.arg("--config").arg(&profile);
         command
     };
-    let register = || {
-        command()
-            .args(["register", "native-agent"])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap()
-    };
-    let first = register();
-    let second = register();
-    let output = first.wait_with_output().unwrap();
+    let denied = command().args(["tasks", "list"]).output().unwrap();
+    assert!(!denied.status.success());
+    assert!(String::from_utf8_lossy(&denied.stderr).contains("请先注册或登录"));
+
+    let credentials = json!({"name":"native-agent","password":"a-unique-test-password"});
+    let registration = folder.path().join("registration.json");
+    std::fs::write(&registration, credentials.to_string()).unwrap();
+    let output = command()
+        .args(["account", "register", "--json"])
+        .arg(registration)
+        .output()
+        .unwrap();
     assert!(
         output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let agent: Value = serde_json::from_slice(&output.stdout).unwrap();
-    let second = second.wait_with_output().unwrap();
-    assert!(
-        second.status.success(),
-        "{}",
-        String::from_utf8_lossy(&second.stderr)
-    );
-    let same_agent: Value = serde_json::from_slice(&second.stdout).unwrap();
-    assert_eq!(same_agent["id"], agent["id"]);
+    let signed_in: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let agent = &signed_in["profile"];
+    assert_eq!(agent["role"], "agent");
     let connection: Value = serde_json::from_slice(&std::fs::read(&profile).unwrap()).unwrap();
     assert!(connection.get("invite_token").is_none());
     let api_key = connection["api_key"].as_str().unwrap();
@@ -144,7 +139,11 @@ async fn cli_stdio_and_oauth_http_share_agent_tools_and_permissions() {
     let tasks: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(tasks[0]["id"], task["id"]);
 
-    let mut stdio = command()
+    let stdio_config = folder.path().join("stdio.json");
+    std::fs::write(&stdio_config, json!({"base_url":base}).to_string()).unwrap();
+    let mut stdio = Command::new(env!("CARGO_BIN_EXE_taskrail-agent"))
+        .arg("--config")
+        .arg(&stdio_config)
         .arg("mcp")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -166,6 +165,23 @@ async fn cli_stdio_and_oauth_http_share_agent_tools_and_permissions() {
     send(&json!({"jsonrpc":"2.0","method":"notifications/initialized"}));
     send(&rpc(2, "tools/list", json!({})));
     let stdio_tools = receive()["result"]["tools"].clone();
+    send(&rpc(
+        20,
+        "tools/call",
+        json!({"name":"taskrail_claim_task","arguments":{}}),
+    ));
+    assert_eq!(
+        receive()["result"]["structuredContent"]["error"]["message"],
+        "请先注册或登录"
+    );
+    send(&rpc(
+        21,
+        "tools/call",
+        json!({"name":"taskrail_login","arguments":credentials}),
+    ));
+    let logged_in = receive()["result"]["structuredContent"]["data"].clone();
+    assert_eq!(logged_in["profile"]["id"], agent["id"]);
+    assert!(logged_in.get("token").is_none());
     send(&rpc(
         3,
         "tools/call",
@@ -276,18 +292,14 @@ async fn cli_stdio_and_oauth_http_share_agent_tools_and_permissions() {
         .split('"')
         .next()
         .unwrap();
-    let consent = |name, credential| {
+    assert!(!form.contains("name=\"name\""));
+    let consent = |flow| {
         client
             .post(metadata["authorization_endpoint"].as_str().unwrap())
-            .form(&[
-                ("flow", flow),
-                ("name", name),
-                ("credential", credential),
-                ("decision", "allow"),
-            ])
+            .form(&[("flow", flow), ("decision", "allow")])
     };
     assert_eq!(
-        consent("", api_key)
+        consent(flow)
             .header("Origin", "https://untrusted.example")
             .send()
             .await
@@ -295,14 +307,14 @@ async fn cli_stdio_and_oauth_http_share_agent_tools_and_permissions() {
             .status(),
         StatusCode::FORBIDDEN
     );
-    let response = consent("", api_key).send().await.unwrap();
+    let response = consent(flow).send().await.unwrap();
     assert_eq!(response.status(), StatusCode::SEE_OTHER);
     let redirect = url::Url::parse(response.headers()["location"].to_str().unwrap()).unwrap();
     let params: std::collections::HashMap<_, _> = redirect.query_pairs().into_owned().collect();
     assert_eq!(&params["state"], "test-state");
     assert_eq!(&params["iss"], base);
     let code = &params["code"];
-    let exchange = |verifier| {
+    let exchange = |code: &str, verifier: &str| {
         client.post(token_endpoint).form(&[
             ("grant_type", "authorization_code"),
             ("code", code),
@@ -314,10 +326,14 @@ async fn cli_stdio_and_oauth_http_share_agent_tools_and_permissions() {
     };
     let wrong_verifier = "B".repeat(43);
     assert_eq!(
-        exchange(&wrong_verifier).send().await.unwrap().status(),
+        exchange(code, &wrong_verifier)
+            .send()
+            .await
+            .unwrap()
+            .status(),
         StatusCode::BAD_REQUEST
     );
-    let token: Value = exchange(&verifier)
+    let token: Value = exchange(code, &verifier)
         .send()
         .await
         .unwrap()
@@ -327,7 +343,7 @@ async fn cli_stdio_and_oauth_http_share_agent_tools_and_permissions() {
         .await
         .unwrap();
     assert_eq!(
-        exchange(&verifier).send().await.unwrap().status(),
+        exchange(code, &verifier).send().await.unwrap().status(),
         StatusCode::BAD_REQUEST
     );
     let access = token["access_token"].as_str().unwrap();
@@ -347,6 +363,49 @@ async fn cli_stdio_and_oauth_http_share_agent_tools_and_permissions() {
     .await;
     let result: Value = response.error_for_status().unwrap().json().await.unwrap();
     assert_eq!(result["result"]["tools"], stdio_tools);
+    let unregistered: Value = mcp(
+        &client,
+        &resource,
+        Some(access),
+        &rpc(
+            20,
+            "tools/call",
+            json!({"name":"taskrail_claim_task","arguments":{}}),
+        ),
+    )
+    .await
+    .error_for_status()
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    assert_eq!(
+        unregistered["result"]["structuredContent"]["error"]["message"],
+        "请先注册或登录"
+    );
+    let login: Value = mcp(
+        &client,
+        &resource,
+        Some(access),
+        &rpc(
+            21,
+            "tools/call",
+            json!({"name":"taskrail_login","arguments":credentials}),
+        ),
+    )
+    .await
+    .error_for_status()
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    assert_eq!(
+        login["result"]["structuredContent"]["data"]["profile"]["id"],
+        agent["id"]
+    );
+    assert!(login["result"]["structuredContent"]["data"]
+        .get("token")
+        .is_none());
     let response = mcp(
         &client,
         &resource,
@@ -445,7 +504,7 @@ async fn cli_stdio_and_oauth_http_share_agent_tools_and_permissions() {
         StatusCode::UNAUTHORIZED
     );
 
-    // 浏览器注册新 Agent 时，只有当前页面展示一次恢复密钥。
+    // 同一客户端的第二个授权拥有独立的身份，注册后可直接调用业务工具。
     let new_form = authorization(callback)
         .send()
         .await
@@ -462,24 +521,67 @@ async fn cli_stdio_and_oauth_http_share_agent_tools_and_permissions() {
         .split('"')
         .next()
         .unwrap();
-    let new_agent = client
-        .post(metadata["authorization_endpoint"].as_str().unwrap())
-        .form(&[
-            ("flow", new_flow),
-            ("name", "oauth-agent"),
-            ("credential", invite),
-            ("decision", "allow"),
-        ])
+    let new_response = consent(new_flow).send().await.unwrap();
+    assert_eq!(new_response.status(), StatusCode::SEE_OTHER);
+    let callback_url =
+        url::Url::parse(new_response.headers()["location"].to_str().unwrap()).unwrap();
+    let code = callback_url
+        .query_pairs()
+        .find(|(name, _)| name == "code")
+        .unwrap()
+        .1;
+    let new_token: Value = exchange(&code, &verifier)
         .send()
         .await
         .unwrap()
         .error_for_status()
         .unwrap()
-        .text()
+        .json()
         .await
         .unwrap();
-    assert!(new_agent.contains("tr_ag_"));
-    assert!(new_agent.contains("返回 Agent 宿主"));
+    let new_access = new_token["access_token"].as_str().unwrap();
+    let registered: Value = mcp(
+        &client,
+        &resource,
+        Some(new_access),
+        &rpc(
+            22,
+            "tools/call",
+            json!({"name":"taskrail_register","arguments":{
+                "name":"oauth-agent","password":"another-test-password","invite_token":invite,
+                "avatar":{"kind":"preset","id":"blue"}
+            }}),
+        ),
+    )
+    .await
+    .error_for_status()
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    let registered = &registered["result"]["structuredContent"]["data"]["profile"];
+    assert_eq!(registered["name"], "oauth-agent");
+    assert_eq!(registered["avatar"]["id"], "blue");
+    let new_me: Value = mcp(
+        &client,
+        &resource,
+        Some(new_access),
+        &rpc(
+            23,
+            "tools/call",
+            json!({"name":"taskrail_me","arguments":{}}),
+        ),
+    )
+    .await
+    .error_for_status()
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    assert_eq!(
+        new_me["result"]["structuredContent"]["data"]["id"],
+        registered["id"]
+    );
 
     let rotated_access = rotated["access_token"].as_str().unwrap();
     client

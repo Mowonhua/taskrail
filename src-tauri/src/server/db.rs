@@ -14,6 +14,7 @@ use std::{
 };
 use uuid::Uuid;
 
+pub(crate) mod accounts;
 mod agents;
 mod arbitration;
 mod comments;
@@ -55,6 +56,7 @@ impl Repository {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         tx.execute_batch(include_str!("schema.sql"))?;
+        oauth::migrate_unbound_grants(&tx)?;
         tx.commit()?;
         Ok(repo)
     }

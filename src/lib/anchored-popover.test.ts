@@ -82,4 +82,25 @@ describe('锚点浮层', () => {
     expect(popup.style.left).toBe('370px');
     expect(popup.style.top).toBe('134px');
   });
+
+  it('align=center 保留浮层固有宽度并与触发器水平居中对齐', () => {
+    const trigger = document.createElement('button');
+    const popup = document.createElement('div');
+    document.body.append(trigger, popup);
+    vi.spyOn(trigger, 'getBoundingClientRect').mockReturnValue({
+      top: 100,
+      bottom: 130,
+      left: 60,
+      right: 160,
+      width: 100,
+    } as DOMRect);
+    vi.spyOn(popup, 'getBoundingClientRect').mockReturnValue({
+      width: 180,
+      height: 80,
+    } as DOMRect);
+    positionAnchoredPopover(trigger, popup, vi.fn(), { align: 'center' });
+    expect(popup.style.width).toBe('');
+    expect(popup.style.left).toBe('20px');
+    expect(popup.style.top).toBe('134px');
+  });
 });

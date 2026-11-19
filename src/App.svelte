@@ -33,19 +33,29 @@
     CreateInviteTokenInput,
     CreateProjectInput,
     InviteTokenSummary,
+    LoginUserInput,
     OnboardingSettings,
+    RegisterUserInput,
     RejectArbitrationInput,
     ServiceMode,
     SkillDocument,
     UpdateBountyInput,
     UpdateProjectInput,
+    UpdateUserProfileInput,
+    UserProfile,
   } from './lib/api/types';
   import { ServiceApiError } from './lib/api/types';
+  import { observeAnchoredPopover, positionAnchoredPopover } from './lib/anchored-popover';
+  import AuthDialog from './lib/auth/AuthDialog.svelte';
+  import UserAvatar from './lib/auth/UserAvatar.svelte';
+  import UserProfileDialog from './lib/auth/UserProfileDialog.svelte';
+  import { DEFAULT_AUTH_AVATAR_PRESETS } from './lib/auth/avatars';
   import AgentDirectory from './lib/bounty/AgentDirectory.svelte';
   import BountyCard from './lib/bounty/BountyCard.svelte';
   import BountyComposerModal from './lib/bounty/BountyComposerModal.svelte';
   import BountyDetailDrawer from './lib/bounty/BountyDetailDrawer.svelte';
-  import { formatServiceError } from './lib/bounty/helpers';
+  import { formatAuthError, formatServiceError } from './lib/bounty/helpers';
+  import type { AuthAvatarPreset } from './lib/api/types';
   import { BrowserFilePort } from './lib/browser-files';
   import { defaultPreferences, defaultThemeId, emptyAppConfig } from './lib/config-defaults';
   import type {
@@ -223,6 +233,23 @@
   let refreshingAgents = $state(false);
   let skillDocument = $state<SkillDocument | null>(null);
   let agentDetailOpen = $state(false);
+
+  const USER_AUTH_STORAGE_PREFIX = 'taskrail.userAuthToken:';
+  const memoryUserAuthTokens = new WeakMap<BountyApiPort, string>();
+  let userProfile = $state<UserProfile | null>(null);
+  let userAuthToken = $state('');
+  let userAuthLoading = $state(false);
+  let userAuthError = $state('');
+  let loggingOutUser = $state(false);
+  let avatarPresets = $state<AuthAvatarPreset[]>([...DEFAULT_AUTH_AVATAR_PRESETS]);
+  let avatarPresetsLoaded = $state(false);
+  let avatarPresetsError = $state('');
+  let userMenuOpen = $state(false);
+  let authDialogOpen = $state(false);
+  let authDialogMode = $state<'login' | 'register'>('login');
+  let profileDialogOpen = $state(false);
+  let userMenuTrigger = $state<HTMLButtonElement>();
+  let userMenuPopup = $state<HTMLDivElement>();
 
   let composerOpen = $state(false);
   let editingBounty = $state<BountyTask | null>(null);
@@ -427,6 +454,8 @@
   let onboardingRequestSeq = 0;
   let arbitrationConfigRequestSeq = 0;
   let skillDocRequestSeq = 0;
+  let userAuthRequestSeq = 0;
+  let avatarPresetsRequestSeq = 0;
   let serviceReconnectSeq = 0;
   let connectionStatusSeq = 0;
 
@@ -1106,6 +1135,374 @@
     return { api: fallbackMemoryBountyClient, url: '' };
   }
 
+  function userAuthStorageKey(url: string): string | null {
+    const normalized = url.trim();
+    return normalized ? `${USER_AUTH_STORAGE_PREFIX}${normalized}` : null;
+  }
+
+  function readStoredUserAuthToken(api: BountyApiPort, url: string): string {
+    const key = userAuthStorageKey(url);
+    if (!key) {
+      return memoryUserAuthTokens.get(api) ?? '';
+    }
+    try {
+      return localStorage.getItem(key) ?? '';
+    } catch {
+      return '';
+    }
+  }
+
+  function writeStoredUserAuthToken(api: BountyApiPort, url: string, token: string): void {
+    const key = userAuthStorageKey(url);
+    if (!key) {
+      if (token) memoryUserAuthTokens.set(api, token);
+      else memoryUserAuthTokens.delete(api);
+      return;
+    }
+    try {
+      if (token) localStorage.setItem(key, token);
+      else localStorage.removeItem(key);
+    } catch {
+      /* 忽略无存储权限环境 */
+    }
+  }
+
+  async function hydrateUserSession(
+    api: BountyApiPort,
+    url: string,
+    token: string,
+    serviceSeq: number,
+  ): Promise<void> {
+    if (!token || typeof api.getAuthMe !== 'function') return;
+    const seq = ++userAuthRequestSeq;
+    userAuthLoading = true;
+    userAuthError = '';
+    try {
+      const profile = await api.getAuthMe(token);
+      if (
+        componentDisposed ||
+        seq !== userAuthRequestSeq ||
+        serviceSeq !== serviceReconnectSeq ||
+        api !== activeBountyApi
+      ) {
+        return;
+      }
+      userProfile = profile;
+      userAuthError = '';
+    } catch (error) {
+      if (
+        componentDisposed ||
+        seq !== userAuthRequestSeq ||
+        serviceSeq !== serviceReconnectSeq ||
+        api !== activeBountyApi
+      ) {
+        return;
+      }
+      userProfile = null;
+      if (error instanceof ServiceApiError && error.status === 401) {
+        userAuthToken = '';
+        writeStoredUserAuthToken(api, url, '');
+      }
+      userAuthError = formatAuthError(error, 'session');
+    } finally {
+      if (
+        !componentDisposed &&
+        seq === userAuthRequestSeq &&
+        serviceSeq === serviceReconnectSeq &&
+        api === activeBountyApi
+      ) {
+        userAuthLoading = false;
+      }
+    }
+  }
+
+  async function loadAuthAvatars(): Promise<void> {
+    const api = activeBountyApi;
+    const serviceSeq = serviceReconnectSeq;
+    if (typeof api.listAuthAvatars !== 'function') {
+      avatarPresets = [...DEFAULT_AUTH_AVATAR_PRESETS];
+      avatarPresetsLoaded = true;
+      avatarPresetsError = '';
+      return;
+    }
+    if (avatarPresetsLoaded) return;
+    const seq = ++avatarPresetsRequestSeq;
+    try {
+      const presets = await api.listAuthAvatars();
+      if (
+        componentDisposed ||
+        seq !== avatarPresetsRequestSeq ||
+        serviceSeq !== serviceReconnectSeq ||
+        api !== activeBountyApi
+      ) {
+        return;
+      }
+      avatarPresets =
+        Array.isArray(presets) && presets.length > 0 ? presets : [...DEFAULT_AUTH_AVATAR_PRESETS];
+      avatarPresetsLoaded = true;
+      avatarPresetsError = '';
+    } catch (error) {
+      if (
+        componentDisposed ||
+        seq !== avatarPresetsRequestSeq ||
+        serviceSeq !== serviceReconnectSeq ||
+        api !== activeBountyApi
+      ) {
+        return;
+      }
+      avatarPresetsError = formatAuthError(error, 'avatars');
+    }
+  }
+
+  function closeUserMenu(options: { restoreFocus?: boolean } = {}): void {
+    const wasOpen = userMenuOpen;
+    userMenuOpen = false;
+    if (userMenuPopup && typeof userMenuPopup.hidePopover === 'function' && userMenuPopup.matches(':popover-open')) {
+      userMenuPopup.hidePopover();
+    }
+    if (wasOpen && options.restoreFocus) {
+      userMenuTrigger?.focus();
+    }
+  }
+
+  async function openUserMenu(focusFirstItem = false): Promise<void> {
+    if (!userProfile) return;
+    userMenuOpen = true;
+    await tick();
+    if (!userMenuOpen || !userMenuTrigger || !userMenuPopup || !userMenuPopup.isConnected) return;
+    if (typeof userMenuPopup.showPopover === 'function' && !userMenuPopup.matches(':popover-open')) {
+      userMenuPopup.showPopover();
+    }
+    positionAnchoredPopover(userMenuTrigger, userMenuPopup, () => closeUserMenu(), {
+      align: 'stretch',
+    });
+    if (focusFirstItem) {
+      userMenuPopup.querySelector<HTMLButtonElement>('[role="menuitem"]:not(:disabled)')?.focus();
+    }
+  }
+
+  function openAuthDialog(mode: 'login' | 'register' = 'login'): void {
+    closeUserMenu();
+    mobileSidebarOpen = false;
+    userAuthError = '';
+    authDialogMode = mode;
+    authDialogOpen = true;
+  }
+
+  function openProfileDialog(): void {
+    if (!userProfile) {
+      openAuthDialog('login');
+      return;
+    }
+    closeUserMenu();
+    mobileSidebarOpen = false;
+    profileDialogOpen = true;
+  }
+
+  function handleSidebarUserClick(event: MouseEvent): void {
+    if (!userProfile) {
+      openAuthDialog('login');
+      return;
+    }
+    if (userMenuOpen) {
+      closeUserMenu();
+      return;
+    }
+    void openUserMenu(event.detail === 0);
+  }
+
+  function handleUserMenuTriggerKeydown(event: KeyboardEvent): void {
+    if (!userProfile) return;
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault();
+      void openUserMenu(true);
+    }
+  }
+
+  function handleUserMenuKeydown(event: KeyboardEvent): void {
+    if (event.key === 'Tab') {
+      closeUserMenu();
+      return;
+    }
+    if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+    const popup = event.currentTarget as HTMLElement;
+    const items = [...popup.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not(:disabled)')];
+    if (items.length === 0) return;
+    const current = items.indexOf(document.activeElement as HTMLButtonElement);
+    const next =
+      event.key === 'Home'
+        ? 0
+        : event.key === 'End'
+          ? items.length - 1
+          : current < 0
+            ? 0
+            : (current + (event.key === 'ArrowUp' ? -1 : 1) + items.length) % items.length;
+    event.preventDefault();
+    items[next].focus();
+  }
+
+  $effect(() => {
+    if (!userMenuOpen || !userMenuTrigger || !userMenuPopup) return;
+    const trigger = userMenuTrigger;
+    const popup = userMenuPopup;
+    const stopObserve = observeAnchoredPopover(trigger, popup, () => closeUserMenu(), {
+      align: 'stretch',
+    });
+    const onKeydown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        event.stopPropagation();
+        closeUserMenu({ restoreFocus: true });
+      }
+    };
+    const onFocusin = (event: FocusEvent) => {
+      const target = event.target as Node | null;
+      if (target && !trigger.contains(target) && !popup.contains(target)) {
+        closeUserMenu();
+      }
+    };
+    document.addEventListener('keydown', onKeydown, true);
+    document.addEventListener('focusin', onFocusin, true);
+    return () => {
+      document.removeEventListener('keydown', onKeydown, true);
+      document.removeEventListener('focusin', onFocusin, true);
+      stopObserve();
+    };
+  });
+
+  async function handleLoginUser(input: LoginUserInput): Promise<void> {
+    const api = activeBountyApi;
+    const url = serviceUrl;
+    const serviceSeq = serviceReconnectSeq;
+    if (typeof api.loginUser !== 'function') {
+      throw new Error($t('当前服务不支持用户登录。'));
+    }
+    const seq = ++userAuthRequestSeq;
+    const session = await api.loginUser(input);
+    if (
+      componentDisposed ||
+      serviceSeq !== serviceReconnectSeq ||
+      api !== activeBountyApi ||
+      seq !== userAuthRequestSeq
+    ) {
+      return;
+    }
+    userAuthToken = session.token;
+    userProfile = session.profile;
+    userAuthError = '';
+    writeStoredUserAuthToken(api, url, session.token);
+  }
+
+  async function handleRegisterUser(input: RegisterUserInput): Promise<void> {
+    const api = activeBountyApi;
+    const url = serviceUrl;
+    const serviceSeq = serviceReconnectSeq;
+    if (typeof api.registerUser !== 'function') {
+      throw new Error($t('当前服务不支持用户注册。'));
+    }
+    const seq = ++userAuthRequestSeq;
+    const session = await api.registerUser(input);
+    if (
+      componentDisposed ||
+      serviceSeq !== serviceReconnectSeq ||
+      api !== activeBountyApi ||
+      seq !== userAuthRequestSeq
+    ) {
+      return;
+    }
+    userAuthToken = session.token;
+    userProfile = session.profile;
+    userAuthError = '';
+    writeStoredUserAuthToken(api, url, session.token);
+  }
+
+  async function handleUpdateUserProfile(input: UpdateUserProfileInput): Promise<void> {
+    const api = activeBountyApi;
+    const url = serviceUrl;
+    const token = userAuthToken;
+    const serviceSeq = serviceReconnectSeq;
+    if (typeof api.updateAuthMe !== 'function' || !token) {
+      throw new Error($t('请先登录后再修改个人设置。'));
+    }
+    const seq = ++userAuthRequestSeq;
+    try {
+      const updated = await api.updateAuthMe(token, input);
+      if (
+        componentDisposed ||
+        serviceSeq !== serviceReconnectSeq ||
+        api !== activeBountyApi ||
+        seq !== userAuthRequestSeq
+      ) {
+        return;
+      }
+      userProfile = updated;
+      userAuthError = '';
+      showToast($t('个人设置已更新'));
+    } catch (error) {
+      if (
+        !componentDisposed &&
+        serviceSeq === serviceReconnectSeq &&
+        api === activeBountyApi &&
+        seq === userAuthRequestSeq &&
+        error instanceof ServiceApiError &&
+        error.status === 401
+      ) {
+        userAuthToken = '';
+        userProfile = null;
+        writeStoredUserAuthToken(api, url, '');
+        userAuthError = formatAuthError(error, 'profile');
+      }
+      throw error;
+    }
+  }
+
+  async function handleLogoutUser(): Promise<void> {
+    if (loggingOutUser) return;
+    const api = activeBountyApi;
+    const url = serviceUrl;
+    const token = userAuthToken;
+    const serviceSeq = serviceReconnectSeq;
+    const seq = ++userAuthRequestSeq;
+    closeUserMenu();
+    loggingOutUser = true;
+    try {
+      if (token && typeof api.logoutUser === 'function') {
+        try {
+          await api.logoutUser(token);
+        } catch (error) {
+          if (!(error instanceof ServiceApiError && error.status === 401)) {
+            if (
+              !componentDisposed &&
+              serviceSeq === serviceReconnectSeq &&
+              api === activeBountyApi &&
+              seq === userAuthRequestSeq
+            ) {
+              const message = formatAuthError(error, 'session');
+              userAuthError = message;
+              showToast(message);
+            }
+            return;
+          }
+        }
+      }
+      if (
+        componentDisposed ||
+        serviceSeq !== serviceReconnectSeq ||
+        api !== activeBountyApi ||
+        seq !== userAuthRequestSeq
+      ) {
+        return;
+      }
+      userAuthToken = '';
+      userProfile = null;
+      userAuthError = '';
+      profileDialogOpen = false;
+      writeStoredUserAuthToken(api, url, '');
+    } finally {
+      loggingOutUser = false;
+    }
+  }
+
   async function reconnectBountyService(preferInjected = false, throwOnError = false): Promise<void> {
     const serviceSeq = ++serviceReconnectSeq;
     if (bountyDeleteDialog?.open) bountyDeleteDialog.close();
@@ -1133,6 +1530,8 @@
         allAgentListRequestSeq += 1;
         onboardingRequestSeq += 1;
         arbitrationConfigRequestSeq += 1;
+        userAuthRequestSeq += 1;
+        avatarPresetsRequestSeq += 1;
         allBountyProjects = [];
         bounties = [];
         actionableBounties = [];
@@ -1151,6 +1550,22 @@
         allAgentsLoaded = false;
         allAgentsLoadError = '';
         activeDetail = null;
+        closeUserMenu();
+        authDialogOpen = false;
+        profileDialogOpen = false;
+        userProfile = null;
+        userAuthToken = readStoredUserAuthToken(resolved.api, resolved.url);
+        userAuthError = '';
+        userAuthLoading = false;
+        loggingOutUser = false;
+        avatarPresets = [...DEFAULT_AUTH_AVATAR_PRESETS];
+        avatarPresetsLoaded = false;
+        avatarPresetsError = '';
+        if (userAuthToken) {
+          void hydrateUserSession(resolved.api, resolved.url, userAuthToken, serviceSeq);
+        }
+      } else if (userAuthToken && !userProfile && !userAuthLoading) {
+        void hydrateUserSession(resolved.api, resolved.url, userAuthToken, serviceSeq);
       }
       statusSeq = ++connectionStatusSeq;
       await refreshBountyWorkspace(true, statusSeq);
@@ -2049,6 +2464,7 @@
   }
 
   function toggleSidebar(collapsed: boolean): void {
+    if (collapsed) closeUserMenu();
     preferences = { ...preferences, sidebarOpen: !collapsed };
     if (!collapsed && files.isMobile) mobileSidebarOpen = true;
     else if (collapsed && files.isMobile) mobileSidebarOpen = false;
@@ -2254,6 +2670,8 @@
             updateDialogOpen ||
             composerOpen ||
             agentDetailOpen ||
+            authDialogOpen ||
+            profileDialogOpen ||
             activeDetail !== null,
           setOpen: open => {
             mobileSidebarOpen = open;
@@ -2491,6 +2909,124 @@
         <span class="workspace-nav-label">{$t('设置')}</span>
       </button>
     </nav>
+
+    <div class="sidebar-user-dock" data-slot="sidebar-user-dock">
+      {#if userAuthError}
+        <div class="sidebar-user-error" role="alert" data-slot="sidebar-user-error">
+          <span class="sidebar-user-error-text">{userAuthError}</span>
+          {#if userAuthToken}
+            <button
+              type="button"
+              class="sidebar-user-retry"
+              data-action="retry-user-session"
+              disabled={userAuthLoading}
+              onclick={() => {
+                if (userAuthToken) {
+                  void hydrateUserSession(activeBountyApi, serviceUrl, userAuthToken, serviceReconnectSeq);
+                }
+              }}
+            >
+              {$t('重试')}
+            </button>
+          {/if}
+        </div>
+      {/if}
+
+      <button
+        bind:this={userMenuTrigger}
+        id="sidebar-user-trigger"
+        type="button"
+        class="sidebar-user-card"
+        data-slot="sidebar-user-trigger"
+        data-auth-state={userProfile ? 'signed-in' : 'signed-out'}
+        aria-haspopup={userProfile ? 'menu' : 'dialog'}
+        aria-expanded={userProfile ? userMenuOpen : undefined}
+        aria-controls={userProfile ? 'sidebar-user-menu' : undefined}
+        disabled={loggingOutUser}
+        onclick={handleSidebarUserClick}
+        onkeydown={handleUserMenuTriggerKeydown}
+      >
+        <UserAvatar
+          name={userProfile?.name ?? ''}
+          avatar={userProfile?.avatar ?? null}
+          size="sm"
+          guest={!userProfile}
+        />
+        <span class="sidebar-user-name" data-slot="sidebar-user-name">
+          {#if userAuthLoading && !userProfile}
+            {$t('正在验证登录…')}
+          {:else if userProfile}
+            {userProfile.name}
+          {:else}
+            {$t('登录 / 注册')}
+          {/if}
+        </span>
+        <svg
+          class="sidebar-user-action-icon"
+          width="16"
+          height="16"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true"
+        >
+          <path d="m7 15 5 5 5-5" />
+          <path d="m7 9 5-5 5 5" />
+        </svg>
+      </button>
+
+      {#if userProfile}
+        <div
+          bind:this={userMenuPopup}
+          id="sidebar-user-menu"
+          class="sidebar-user-menu dropdown"
+          role="menu"
+          tabindex="-1"
+          popover="manual"
+          hidden={!userMenuOpen}
+          style="position: fixed; margin: 0; bottom: auto; right: auto; box-sizing: border-box;"
+          data-menu="sidebar-user"
+          aria-labelledby="sidebar-user-trigger"
+          onkeydown={handleUserMenuKeydown}
+        >
+          <button
+            type="button"
+            role="menuitem"
+            class="theme-select-option sidebar-user-menu-item"
+            data-action="open-user-profile"
+            onclick={() => openProfileDialog()}
+          >
+            <span class="sidebar-user-menu-icon" aria-hidden="true">
+              <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="8" cy="5.5" r="2.5" />
+                <path d="M3.2 13.5c.8-2.2 2.5-3.3 4.8-3.3s4 1.1 4.8 3.3" />
+              </svg>
+            </span>
+            <span class="sidebar-user-menu-label">{$t('个人设置')}</span>
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            class="theme-select-option sidebar-user-menu-item danger-text"
+            data-action="logout-user"
+            disabled={loggingOutUser}
+            onclick={() => void handleLogoutUser()}
+          >
+            <span class="sidebar-user-menu-icon" aria-hidden="true">
+              <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M6.2 2.8H3.8a1.2 1.2 0 0 0-1.2 1.2v8a1.2 1.2 0 0 0 1.2 1.2h2.4" />
+                <path d="M10.2 11 13.2 8l-3-3" />
+                <path d="M13 8H6.5" />
+              </svg>
+            </span>
+            <span class="sidebar-user-menu-label">{$t(loggingOutUser ? '正在退出…' : '退出登录')}</span>
+          </button>
+        </div>
+      {/if}
+    </div>
   </aside>
 
   <main class="workspace">
@@ -3094,6 +3630,32 @@
         />
       </div>
     </div>
+  {/if}
+
+  {#if authDialogOpen}
+    <AuthDialog
+      initialMode={authDialogMode}
+      presets={avatarPresets}
+      onLoadAvatars={loadAuthAvatars}
+      onLogin={handleLoginUser}
+      onRegister={handleRegisterUser}
+      onClose={() => {
+        authDialogOpen = false;
+      }}
+    />
+  {/if}
+
+  {#if profileDialogOpen && userProfile}
+    <UserProfileDialog
+      profile={userProfile}
+      presets={avatarPresets}
+      presetsError={avatarPresetsError}
+      onLoadAvatars={loadAuthAvatars}
+      onSave={handleUpdateUserProfile}
+      onClose={() => {
+        profileDialogOpen = false;
+      }}
+    />
   {/if}
 
   {#if toast}

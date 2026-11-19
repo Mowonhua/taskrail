@@ -9,9 +9,12 @@ use axum::{
 use serde_json::json;
 use tower::ServiceExt;
 
-/// 该扩展只能由服务端鉴权层构造，OAuth 令牌不会转发给 REST API。
+/// 该扩展只能由服务端鉴权层构造。刚授权的宿主可调用注册和登录工具，尚无 Agent 身份。
 #[derive(Clone)]
-pub(crate) struct McpIdentity(pub(super) AgentSummary);
+pub(crate) struct McpIdentity {
+    pub(crate) agent: Option<AgentSummary>,
+    pub(super) access_hash: String,
+}
 
 impl McpIdentity {
     pub(crate) async fn execute(&self, api: Router, operation: Operation) -> ToolResult {

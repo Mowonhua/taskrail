@@ -14,7 +14,6 @@ pub(super) enum ServerEntry<'a> {
     Stdio {
         executable: &'a Path,
         profile: &'a Path,
-        name: &'a str,
     },
     Http {
         url: &'a str,
@@ -129,16 +128,10 @@ fn read_host_config(path: &Path) -> Result<Option<String>, FileError> {
 fn stdio_arguments<'a>(
     executable: &'a Path,
     profile: &'a Path,
-    name: &'a str,
-) -> Result<(&'a str, [&'a str; 4]), FileError> {
+) -> Result<(&'a str, [&'a str; 3]), FileError> {
     Ok((
         executable.to_str().ok_or_else(invalid)?,
-        [
-            "--config",
-            profile.to_str().ok_or_else(invalid)?,
-            "mcp",
-            name,
-        ],
+        ["--config", profile.to_str().ok_or_else(invalid)?, "mcp"],
     ))
 }
 
@@ -162,9 +155,8 @@ fn toml_config(old: &str, entry: ServerEntry<'_>) -> Result<String, FileError> {
         ServerEntry::Stdio {
             executable,
             profile,
-            name,
         } => {
-            let (command, args) = stdio_arguments(executable, profile, name)?;
+            let (command, args) = stdio_arguments(executable, profile)?;
             config["command"] = value(command);
             let args: Array = args.into_iter().collect();
             config["args"] = value(Value::Array(args));
@@ -233,9 +225,8 @@ fn json_config(
         ServerEntry::Stdio {
             executable,
             profile,
-            name,
         } => {
-            let (command, args) = stdio_arguments(executable, profile, name)?;
+            let (command, args) = stdio_arguments(executable, profile)?;
             let mut item = json!({"command":command,"args":args});
             if matches!(agent, SkillAgent::ClaudeCode | SkillAgent::Zcode) {
                 item["type"] = json!("stdio");
@@ -253,12 +244,11 @@ fn dsh_config(old: &str, entry: ServerEntry<'_>) -> Result<String, FileError> {
     let ServerEntry::Stdio {
         executable,
         profile,
-        name,
     } = entry
     else {
         return Err(invalid());
     };
-    let (command, args) = stdio_arguments(executable, profile, name)?;
+    let (command, args) = stdio_arguments(executable, profile)?;
     let mut document = old.parse::<YamlFile>().map_err(|_| invalid_config())?;
     if document.documents().next().is_none() {
         document = format!("{old}\n[]\n")
@@ -356,7 +346,6 @@ mod tests {
                     ServerEntry::Stdio {
                         executable: &executable,
                         profile: &profile,
-                        name: "test",
                     }
                 };
                 let actual = install(root, agent, global, entry).unwrap();
@@ -369,7 +358,13 @@ mod tests {
                         assert_eq!(server["url"].as_str(), Some(url));
                     } else {
                         assert_eq!(server["command"].as_str(), executable.to_str());
-                        assert_eq!(server["args"].as_array().unwrap().len(), 4);
+                        let args: Vec<_> = server["args"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .map(|arg| arg.as_str().unwrap())
+                            .collect();
+                        assert_eq!(args, ["--config", profile.to_str().unwrap(), "mcp"]);
                     }
                     continue;
                 }
@@ -397,7 +392,7 @@ mod tests {
                     assert_eq!(server["command"], executable.to_str().unwrap());
                     assert_eq!(
                         server["args"],
-                        json!(["--config", profile.to_str().unwrap(), "mcp", "test"])
+                        json!(["--config", profile.to_str().unwrap(), "mcp"])
                     );
                 }
             }
@@ -435,7 +430,6 @@ mod tests {
         let entry = || ServerEntry::Stdio {
             executable: Path::new("C:/Program Files/Taskrail/taskrail-agent.exe"),
             profile: Path::new("C:/User Data/connections/agent.json"),
-            name: "test",
         };
         for old in ["", "# empty\n", "[]\n", original] {
             let updated = dsh_config(old, entry()).unwrap();

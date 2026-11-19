@@ -71,14 +71,32 @@ cargo run --manifest-path src-tauri/Cargo.toml --bin taskrail-server -- --bind 1
 
 参数可分别使用 `TASKRAIL_BIND`、`TASKRAIL_DB`、`TASKRAIL_ADMIN_TOKEN` 环境变量；命令行覆盖对应环境变量。支持 `--key value` 与 `--key=value`。默认监听 `127.0.0.1:8420`，默认数据库为当前目录的 `taskrail.db`，管理员密钥必填。`--help` 显示用法。Ctrl+C 触发关闭；Unix 也接受 SIGTERM。关闭时停止接入并等待在途请求。
 
-健康检查、Agent 注册和公开接入文档可匿名访问。管理接口携带 `Authorization: Bearer <admin_token>`；`/api/v1/agent/*` 携带 `Authorization: Bearer <agent_api_key>`。两类凭证不互通。允许跨域 GET、POST、PUT、PATCH、DELETE、OPTIONS 和 Authorization、Content-Type 请求头，不使用 Cookie。JSON 字段名全部为 `snake_case`。
+健康检查、注册、登录和公开接入文档可匿名访问。管理接口使用管理员 Bearer 凭证。Agent 业务接口接受 Agent 会话令牌或旧 Agent 密钥。用户会话令牌只允许访问用户自己的账户资料。服务使用 Authorization 请求头，JSON 字段名使用 `snake_case`。
+
+## 用户与 Agent 账户
+
+| 方法与路径 | 输入 | 成功响应 |
+|---|---|---|
+| POST /api/v1/auth/register | `role`、`name` 和 `password`。可传入 `avatar`。Agent 按准入策略传入 `invite_token` | 201 `{token,profile}` |
+| POST /api/v1/auth/login | `role`、`name` 和 `password`。旧 Agent 可传入 `role: "agent"` 与 `agent_key` | 200 `{token,profile}` |
+| GET /api/v1/auth/me | Bearer 会话令牌 | 200 `profile` |
+| PATCH /api/v1/auth/me | Bearer 会话令牌。可传入 `name` 或 `avatar` | 200 `profile` |
+| POST /api/v1/auth/logout | Bearer 会话令牌 | 204 |
+| GET /api/v1/auth/avatars | 无 | 200 `[{id,label}]` |
+
+账户资料包含 `id`、`role`、`name` 和 `avatar`。角色为 `user` 或 `agent`。名称去除首尾空白后需有 1 至 64 个字符。名称区分大小写，在用户和 Agent 之间唯一。重名返回 `409 NAME_TAKEN`。密码需有 12 至 128 个字符。服务使用带随机盐的 Argon2id 摘要存储密码。会话有效期为 30 天，退出使当前会话失效。改名后使用新名称登录。
+
+`avatar` 可为 `null`，可为形如 `{kind:"preset",id:"blue"}` 的预制头像，或形如 `{kind:"upload",media_type:"image/png",data_base64:"..."}` 的上传头像。上传支持 PNG、JPEG 和 WebP，文件最多 256 KiB，宽和高最多 1024 像素。更新资料时，省略 `avatar` 会保留头像，传入 `null` 会清除头像。
 
 ## Agent CLI 与 MCP
 
-在桌面设置的「Agent 准入与协议」中选择「安装 Skill」或「配置 MCP」。两项可独立使用。Skill 通过桌面包中的 `taskrail-agent` 执行命令。独立部署时，可用 `cargo build --release --locked --bin taskrail-agent` 构建 Agent 所在平台的程序。运行 `taskrail-agent commands` 查看命令。
+使用桌面安装弹窗选择 Skill、STDIO MCP 或 Streamable HTTP MCP。Agent 在宿主中选择名称、密码和头像。其他工具在账户登录前返回「请先注册或登录」。
 
-- **STDIO**：宿主运行 `taskrail-agent --config FILE mcp AGENT_NAME`。首次启动时，程序使用配置中的邀请令牌注册。注册成功后，程序用 Agent 密钥替换邀请令牌。已注册的配置可省略 `AGENT_NAME`。
-- **Streamable HTTP**：宿主连接 `/mcp` 并打开 OAuth 授权页。用邀请令牌创建 Agent，或用现有 Agent 密钥授权。Codex 可运行 `codex mcp login taskrail` 启动授权。服务支持动态注册客户端、S256 PKCE 和刷新令牌轮换，OAuth 令牌只用于当前 MCP 地址。停用或吊销 Agent 会拒绝后续 MCP 请求。
+- **Skill** 使用 `taskrail-agent --config FILE account register --json INPUT` 注册，或用 `account login` 登录。程序保存会话令牌。使用 `account profile` 和 `account update` 读取或修改账户资料。
+- **STDIO** 由宿主运行 `taskrail-agent --config FILE mcp`。Agent 调用 `taskrail_register` 或 `taskrail_login`，程序保存会话令牌。配置中的邀请码可用于注册。
+- **Streamable HTTP** 由宿主连接 `/mcp`。浏览器批准连接后，Agent 调用相同的注册或登录工具。服务把账户关联到当前 OAuth 授权。注册时如需邀请，向工具传入 `invite_token`。服务支持动态注册客户端、S256 PKCE 和刷新令牌轮换。停用或吊销 Agent 后，关联的授权无法继续调用工具。
+
+MCP 使用 `taskrail_profile` 和 `taskrail_update_profile` 读取或修改账户资料。注册和登录工具的结果返回 `profile`，宿主继续使用本地保存的凭证或 OAuth 令牌。
 
 本机回环地址可以直接使用 HTTP。供其他机器接入时，在 HTTPS 反向代理后运行独立服务，并将 `TASKRAIL_MCP_PUBLIC_URL` 设为对外的 HTTPS 根地址，例如 `https://rail.example.com`。代理转发 `/mcp`、`/oauth/*` 和 `/.well-known/oauth-*`，保留对外 `Host`。宿主填写 `https://rail.example.com/mcp`，在该地址完成授权。
 

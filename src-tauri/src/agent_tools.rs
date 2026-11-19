@@ -30,6 +30,17 @@ macro_rules! action {
 }
 
 pub(crate) const ACTIONS: &[Action] = &[
+    action!("account", "register", "register", "POST", "/register", "注册并登录。自选名称和至少 12 字符的密码，按需提供邀请码和头像。", "name":"string!", "password":"string!", "invite_token":"string", "avatar":"avatar"),
+    action!("account", "login", "login", "POST", "/login", "使用名称和密码登录，或仅提供已有 Agent 密钥 agent_key。", "name":"string", "password":"string", "agent_key":"string"),
+    action!(
+        "account",
+        "profile",
+        "profile",
+        "GET",
+        "/me",
+        "读取账户名称和头像"
+    ),
+    action!("account", "update", "update_profile", "PATCH", "/me", "修改名称和头像。avatar 为 null 时清除头像。", "name":"string", "avatar":"avatar"),
     action!(
         "agent",
         "me",
@@ -80,6 +91,16 @@ pub(crate) const ACTIONS: &[Action] = &[
 fn property(kind: &str) -> Value {
     match kind {
         "strings" => json!({"type":"array", "items":{"type":"string"}}),
+        "avatar" => json!({"oneOf":[
+            {"type":"null"},
+            {"type":"object","additionalProperties":false,"required":["kind","id"],"properties":{
+                "kind":{"const":"preset"}, "id":{"enum":crate::server::db::accounts::PRESETS.iter().map(|(id, _)| id).collect::<Vec<_>>()}
+            }},
+            {"type":"object","additionalProperties":false,"required":["kind","media_type","data_base64"],"properties":{
+                "kind":{"const":"upload"}, "media_type":{"enum":["image/png","image/jpeg","image/webp"]},
+                "data_base64":{"type":"string","description":"标准 Base64，图片最多 256 KiB，宽高最多 1024 像素"}
+            }}
+        ]}),
         "nullable" => json!({"type":["string","null"]}),
         "tier" => json!({"type":"string","enum":["C","B","A","S"]}),
         "mode" => json!({"type":"string","enum":["any","min_tier","specific"]}),
@@ -104,6 +125,10 @@ pub(crate) struct Operation {
 }
 
 impl Action {
+    pub(crate) fn signs_in(self) -> bool {
+        self.group == "account" && matches!(self.command, "register" | "login")
+    }
+
     pub(crate) fn tool(self) -> Tool {
         let mut required = Vec::new();
         let properties: Map<String, Value> = self
@@ -140,7 +165,15 @@ impl Action {
         {
             return Err(format!("未知参数 {name}"));
         }
-        let mut path = format!("/api/v1/agent{}", self.path);
+        let namespace = if self.group == "account" {
+            "auth"
+        } else {
+            "agent"
+        };
+        let mut path = format!("/api/v1/{namespace}{}", self.path);
+        if self.signs_in() {
+            args.insert("role".into(), json!("agent"));
+        }
         if let Some(id) = args.remove("task_id") {
             let id = id
                 .as_str()
@@ -177,6 +210,10 @@ impl Action {
 
 pub(crate) type ToolResult = Result<Value, Value>;
 
+pub(crate) fn sign_in_required() -> Value {
+    json!({"error":{"code":"UNAUTHORIZED","message":"请先注册或登录"}})
+}
+
 /// HTTP MCP 只传递已验证的身份。CLI 与 STDIO 使用其本地连接配置访问相同的 API。
 #[derive(Clone)]
 pub(crate) enum ToolServer {
@@ -188,7 +225,7 @@ impl ServerHandler for ToolServer {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("taskrail", env!("CARGO_PKG_VERSION")))
-            .with_instructions("认领后保存 lease_id 并在到期前续租。遇到 STALE_LEASE 时重读任务。按 event_id 顺序处理收件箱，再确认已处理的最后一个事件。")
+            .with_instructions("首次使用请调用 taskrail_register 或 taskrail_login。认领后保存 lease_id 并在到期前续租。遇到 STALE_LEASE 时重读任务。按 event_id 顺序处理收件箱，再确认已处理的最后一个事件。")
     }
 
     async fn list_tools(
@@ -210,21 +247,29 @@ impl ServerHandler for ToolServer {
             .iter()
             .find(|action| action.name == request.name)
             .ok_or_else(|| ErrorData::invalid_params("未知 Taskrail 工具", None))?;
-        let result = match spec.operation(request.arguments.unwrap_or_default()) {
-            Err(message) => Err(json!({"error":{"code":"INVALID_ARGUMENT","message":message}})),
-            Ok(operation) => match self {
-                Self::Stdio(client) => client.execute(operation, false).await,
-                Self::Http(router) => {
-                    let identity = context
-                        .extensions
-                        .get::<axum::http::request::Parts>()
-                        .and_then(|parts| parts.extensions.get::<crate::server::McpIdentity>())
-                        .ok_or_else(|| {
+        let identity = context
+            .extensions
+            .get::<axum::http::request::Parts>()
+            .and_then(|parts| parts.extensions.get::<crate::server::McpIdentity>());
+        let authorized = match self {
+            Self::Stdio(client) => client.has_credentials(),
+            Self::Http(_) => identity.is_some_and(|identity| identity.agent.is_some()),
+        };
+        let result = if !spec.signs_in() && !authorized {
+            Err(sign_in_required())
+        } else {
+            match spec.operation(request.arguments.unwrap_or_default()) {
+                Err(message) => Err(json!({"error":{"code":"INVALID_ARGUMENT","message":message}})),
+                Ok(operation) => match self {
+                    Self::Stdio(client) => client.call(operation, spec.signs_in()).await,
+                    Self::Http(router) => {
+                        let identity = identity.ok_or_else(|| {
                             ErrorData::internal_error("缺少已验证的 Agent 身份", None)
                         })?;
-                    identity.execute(router.clone(), operation).await
-                }
-            },
+                        identity.execute(router.clone(), operation).await
+                    }
+                },
+            }
         };
         Ok(match result {
             Ok(value) => CallToolResult::structured(json!({"data":value})),

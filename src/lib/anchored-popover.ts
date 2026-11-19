@@ -3,9 +3,9 @@
 export interface AnchoredPopoverOptions {
   /**
    * 'stretch' 保持与触发器同宽；'start' 使用浮层内容固有宽度并与触发器左缘对齐；
-   * 'end' 使用浮层内容固有宽度并与触发器右缘对齐。
+   * 'end' 使用浮层内容固有宽度并与触发器右缘对齐；'center' 与触发器水平居中对齐。
    */
-  align?: 'stretch' | 'start' | 'end';
+  align?: 'stretch' | 'start' | 'end' | 'center';
 }
 
 /**
@@ -45,11 +45,16 @@ export function positionAnchoredPopover(
   const maxViewportWidth = Math.max(0, viewportWidth - margin * 2);
   let width: number;
   let desiredLeft: number;
-  if (options.align === 'start' || options.align === 'end') {
+  if (options.align === 'start' || options.align === 'end' || options.align === 'center') {
     popup.style.width = '';
     const measuredWidth = popup.getBoundingClientRect().width || popup.offsetWidth || popup.scrollWidth;
     width = Math.min(measuredWidth, maxViewportWidth);
-    desiredLeft = options.align === 'end' ? bounds.right - width : bounds.left;
+    desiredLeft =
+      options.align === 'end'
+        ? bounds.right - width
+        : options.align === 'center'
+          ? bounds.left + (bounds.width - width) / 2
+          : bounds.left;
   } else {
     width = Math.min(bounds.width, maxViewportWidth);
     popup.style.width = `${width}px`;

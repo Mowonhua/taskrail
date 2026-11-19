@@ -513,9 +513,53 @@ export interface AckAgentEventsResult {
   acked_event_id: number;
 }
 
+export type AuthAccountRole = 'user' | 'agent';
+export type AuthAvatarPresetId = 'slate' | 'blue' | 'green' | 'amber' | 'purple' | 'rose';
+export type AuthAvatarMediaType = 'image/png' | 'image/jpeg' | 'image/webp';
+
+export type UserAvatar =
+  | { kind: 'preset'; id: AuthAvatarPresetId | string }
+  | { kind: 'upload'; media_type: AuthAvatarMediaType; data_base64: string };
+
+export interface AuthAvatarPreset {
+  id: AuthAvatarPresetId | string;
+  label: string;
+}
+
+export interface UserProfile {
+  id: string;
+  role: AuthAccountRole;
+  name: string;
+  avatar: UserAvatar | null;
+}
+
+export interface AuthSessionResult {
+  token: string;
+  profile: UserProfile;
+}
+
+export interface RegisterUserInput {
+  name: string;
+  password: string;
+  avatar?: UserAvatar | null;
+}
+
+export interface LoginUserInput {
+  name: string;
+  password: string;
+}
+
+export interface UpdateUserProfileInput {
+  name?: string;
+  avatar?: UserAvatar | null;
+}
+
 export type ServiceErrorCode =
   | 'VALIDATION_ERROR'
   | 'UNAUTHORIZED'
+  | 'INVALID_CREDENTIALS'
+  | 'AUTH_RATE_LIMITED'
+  | 'NAME_TAKEN'
   | 'INVITE_TOKEN_REQUIRED'
   | 'INVITE_TOKEN_INVALID'
   | 'AGENT_REVOKED'
