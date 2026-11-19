@@ -36,7 +36,7 @@ impl Role {
 }
 
 /// 系统预制头像由 ID 标识，自定义头像保存经过解码验证的限长图片。
-#[derive(Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Avatar {
     Preset {
@@ -280,6 +280,30 @@ fn account_id_for_session(conn: &Connection, token: &str, role: Option<&str>) ->
 
 pub(super) fn agent_id_for_session(conn: &Connection, token: &str) -> Result<String> {
     account_id_for_session(conn, token, Some("agent"))
+}
+
+pub(super) fn user_id_for_session(conn: &Connection, token: &str) -> Result<String> {
+    account_id_for_session(conn, token, Some("user"))
+}
+
+/// 函数职责：读取任务关联的创建者名称与头像，沿用 Agent 领域的当前名称。
+pub(super) fn bounty_creator(conn: &Connection, bounty: &Bounty) -> Result<Option<BountyCreator>> {
+    let account: Option<(String, Option<String>)> = conn
+        .query_row(
+            "SELECT name, avatar_json FROM accounts
+             WHERE id=COALESCE(?1, (SELECT account_id FROM bounty_user_creators WHERE bounty_id=?2))",
+            params![bounty.created_by_agent_id, bounty.id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let (account_name, avatar) = account.unzip();
+    let name = bounty.created_by_agent_name.clone().or(account_name);
+    let avatar = avatar
+        .flatten()
+        .map(|raw| serde_json::from_str(&raw))
+        .transpose()
+        .map_err(ApiError::internal)?;
+    Ok(name.map(|name| BountyCreator { name, avatar }))
 }
 
 fn profile_id(conn: &Connection, access: &Access) -> Result<String> {

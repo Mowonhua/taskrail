@@ -32,7 +32,6 @@
     formatAssigneeConstraint,
     formatBountyArbitrator,
     formatBountyExecutor,
-    formatBountyPublisher,
     formatBountyStatus,
     formatCompactTimestamp,
     formatCompletionCost,
@@ -420,10 +419,9 @@
     return formatAssigneeConstraint(bounty);
   });
 
-  const publisher = $derived.by(() => {
-    const _lang = $locale;
-    return formatBountyPublisher(bounty);
-  });
+  const creatorName = $derived(
+    detail.creator?.name ?? bounty.created_by_agent_name ?? bounty.created_by_agent_id,
+  );
 
   const collaborator = $derived.by(() => {
     const _lang = $locale;
@@ -2029,15 +2027,10 @@
           </div>
 
           <div class="detail-attr-row">
-            <span class="detail-attr-label">{$t('来源')}</span>
-            <div class="detail-attr-value">
-              <span
-                class="detail-meta-inline"
-                data-slot="detail-publisher"
-                data-publisher-kind={publisher.isAgent ? 'agent' : 'human'}
-              >
-                {publisher.label}
-              </span>
+            <span class="detail-attr-label">{$t('创建者')}</span>
+            <div class="detail-attr-value detail-attr-creator" data-slot="detail-creator">
+              <UserAvatar name={creatorName ?? ''} avatar={detail.creator?.avatar} />
+              <span class="detail-creator-name">{creatorName ?? $t('未知创建者')}</span>
             </div>
           </div>
 

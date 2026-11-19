@@ -182,7 +182,7 @@ describe('HttpBountyClient', () => {
       difficulty: 'B',
       assignee_mode: 'any',
       status: 'DRAFT',
-    });
+    }, 'user-session');
     await client.getBountyDetail('b1');
     await client.updateBounty('b1', { title: 'Updated', assignee_min_tier: null });
     await client.publishBounty('b1');
@@ -205,6 +205,11 @@ describe('HttpBountyClient', () => {
       'DELETE https://host.example/prefix/api/v1/bounties/b1',
     ]);
     expect(JSON.parse(calls[2].body!)).toEqual({ icon: null, archived: true });
+    expect(calls[3].headers).toMatchObject({
+      Authorization: 'Bearer tok',
+      'X-Taskrail-User-Session': 'user-session',
+    });
+    expect(calls[4].headers['X-Taskrail-User-Session']).toBeUndefined();
     expect(calls[6].body).toBeUndefined();
     expect(calls[7].body).toBeUndefined();
     expect(calls[8].body).toBeUndefined();

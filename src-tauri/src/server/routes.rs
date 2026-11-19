@@ -10,7 +10,7 @@ use axum::{
     http::{
         header::{AUTHORIZATION, CONTENT_TYPE},
         request::Parts,
-        Method, StatusCode,
+        HeaderMap, HeaderName, Method, StatusCode,
     },
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -28,6 +28,8 @@ mod accounts;
 mod agents;
 mod events;
 mod mcp;
+
+const USER_SESSION_HEADER: HeaderName = HeaderName::from_static("x-taskrail-user-session");
 
 pub(super) fn router(state: AppState) -> Router {
     let mcp = mcp::router(state.clone());
@@ -107,6 +109,7 @@ pub(super) fn router(state: AppState) -> Router {
                 .allow_headers([
                     AUTHORIZATION,
                     CONTENT_TYPE,
+                    USER_SESSION_HEADER,
                     axum::http::HeaderName::from_static("last-event-id"),
                 ])
                 .allow_methods([
@@ -250,11 +253,26 @@ async fn list_bounties(
 }
 async fn create_bounty(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Body(input): Body<CreateBounty>,
 ) -> Result<(StatusCode, Json<Bounty>)> {
+    let session = headers
+        .get(USER_SESSION_HEADER)
+        .map(|value| {
+            value
+                .to_str()
+                .map(str::to_owned)
+                .map_err(|_| super::db::accounts::sign_in_required())
+        })
+        .transpose()?;
     Ok((
         StatusCode::CREATED,
-        Json(disk(state, move |r| r.create_bounty(input)).await?),
+        Json(
+            disk(state, move |r| {
+                r.create_bounty_with_session(input, session.as_deref())
+            })
+            .await?,
+        ),
     ))
 }
 async fn bounty_detail(State(state): State<AppState>, Id(id): Id) -> Result<Json<BountyDetail>> {

@@ -143,6 +143,16 @@ impl Repository {
     }
 
     pub fn create_bounty(&self, input: CreateBounty) -> Result<Bounty> {
+        self.create_bounty_with_session(input, None)
+    }
+
+    /// 函数职责：创建任务并在同一写事务内校验账户会话、记录实际创建者。
+    /// 输入说明：不传会话时允许管理员创建匿名任务。
+    pub(crate) fn create_bounty_with_session(
+        &self,
+        input: CreateBounty,
+        user_session: Option<&str>,
+    ) -> Result<Bounty> {
         if !matches!(input.status, BountyStatus::Draft | BountyStatus::Open) {
             return Err(ApiError::invalid("初始状态必须为 DRAFT 或 OPEN"));
         }
@@ -156,6 +166,9 @@ impl Repository {
             return Err(ApiError::invalid("created_by 不能为空"));
         }
         self.write(|tx| {
+            let creator = user_session
+                .map(|token| accounts::user_id_for_session(tx, token))
+                .transpose()?;
             active_project(tx, &input.project_id)?;
             let id = Uuid::new_v4().to_string();
             let timestamp = now();
@@ -163,6 +176,12 @@ impl Repository {
             let assignment: Option<String> = None;
             tx.execute("INSERT INTO bounties(id,project_id,title,description,acceptance_criteria,difficulty,assignee_mode,assignee_min_tier,assignee_agent_id,require_arbitration,status,created_by,published_at,created_at,updated_at,assignment_expires_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?14,?15)",
                 params![id,input.project_id,input.title,input.description,input.acceptance_criteria,input.difficulty.as_str(),input.assignee_mode.as_str(),input.assignee_min_tier.map(Tier::as_str),input.assignee_agent_id,input.require_arbitration,input.status.as_str(),input.created_by,published,timestamp,assignment])?;
+            if let Some(account_id) = creator {
+                tx.execute(
+                    "INSERT INTO bounty_user_creators(bounty_id, account_id) VALUES(?1, ?2)",
+                    params![id, account_id],
+                )?;
+            }
             dependencies::replace(tx, &id, input.blocked_by, None, &timestamp)?;
             let mut b = find_bounty(tx, &id)?;
             event(tx, &b, "created", &b.created_by, None, json!({}))?;
@@ -223,7 +242,9 @@ impl Repository {
     pub fn get_bounty_detail(&self, id: &str) -> Result<BountyDetail> {
         let mut conn = self.connect()?;
         let tx = conn.transaction()?;
-        bounty_detail_on(&tx, id)
+        let mut detail = bounty_detail_on(&tx, id)?;
+        detail.creator = accounts::bounty_creator(&tx, &detail.bounty)?;
+        Ok(detail)
     }
 
     pub fn update_bounty(&self, id: &str, patch: UpdateBounty, actor: &str) -> Result<Bounty> {
@@ -504,6 +525,7 @@ fn bounty_detail_on(conn: &Connection, id: &str) -> Result<BountyDetail> {
     let blocks = dependencies::related(conn, id, false)?;
     let child_bounties = dependencies::related(conn, id, true)?;
     Ok(BountyDetail {
+        creator: None,
         blocks,
         child_bounties,
         bounty,

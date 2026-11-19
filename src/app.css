@@ -3845,16 +3845,6 @@ button.ghost-action:hover:not(:disabled) {
   border-top-color: color-mix(in oklab, var(--divider-color, var(--line)) 65%, transparent);
 }
 
-.detail-meta-inline {
-  color: var(--ink);
-  font-size: 12.5px;
-}
-
-.detail-meta-inline[data-publisher-kind="agent"] {
-  color: var(--accent);
-  font-weight: 550;
-}
-
 .detail-completion-card {
   padding: 12px 14px;
   border: 0;
@@ -3933,6 +3923,21 @@ button.ghost-action:hover:not(:disabled) {
 
 .detail-attr-project {
   font-weight: 500;
+}
+
+.detail-attr-creator {
+  flex-wrap: nowrap;
+}
+
+.detail-attr-creator .user-avatar {
+  width: 20px;
+  height: 20px;
+  font-size: 10px;
+}
+
+.detail-creator-name {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .detail-attr-text {

@@ -194,6 +194,8 @@ export interface BountyCommentMutationResult {
 }
 
 export interface BountyDetail {
+  /** 管理端详情可展示的创建者资料。未记录创建者时省略。 */
+  creator?: { name: string; avatar: UserAvatar | null };
   bounty: BountyTask;
   events: BountyEvent[];
   comments: BountyComment[];

@@ -455,8 +455,18 @@ pub struct BountyEvent {
     pub created_at: String,
 }
 
+/// 结构职责：管理端任务详情可展示的创建者资料。
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct BountyCreator {
+    pub name: String,
+    pub avatar: Option<super::db::accounts::Avatar>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct BountyDetail {
+    /// 仅管理端读取时填充；缺少可信的创建者记录时省略。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) creator: Option<BountyCreator>,
     /// 下游按 created_at、id 排序；Agent 视角隐藏不可见草稿。
     pub blocks: Vec<BountyDependencySummary>,
     /// 派生任务按 created_at、id 排序；Agent 视角仅返回有权查看的记录。

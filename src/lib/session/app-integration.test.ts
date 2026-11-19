@@ -612,6 +612,9 @@ describe('任务板工作台外壳集成测试', () => {
     let drawer = target.querySelector<HTMLElement>('[data-dialog="bounty-detail"]');
     expect(drawer).not.toBeNull();
     expect(drawer!.querySelector('[data-slot="detail-description"] .katex')).not.toBeNull();
+    const unknownCreator = drawer!.querySelector('[data-slot="detail-creator"]')!;
+    expect(unknownCreator.querySelector('.detail-creator-name')?.textContent).toBe('未知创建者');
+    expect(unknownCreator.querySelector('[data-avatar-kind="placeholder"]')).not.toBeNull();
 
     // 点击「编辑草稿」直接在原详情弹窗内原地编辑，不额外弹出第二个窗口
     drawer!.querySelector<HTMLButtonElement>('[data-action="edit-draft"]')!.click();
@@ -3478,9 +3481,9 @@ describe('任务板工作台外壳集成测试', () => {
     openCard.querySelector<HTMLButtonElement>('.bounty-card-button')!.click();
     await flush();
     const openDrawer = target.querySelector<HTMLElement>('[data-dialog="bounty-detail"]')!;
-    expect(openDrawer.querySelector('[data-slot="detail-publisher"]')?.textContent?.trim()).toBe(
-      'Agent 提交: 巡检机器人',
-    );
+    const openCreator = openDrawer.querySelector('[data-slot="detail-creator"]')!;
+    expect(openCreator.querySelector('.detail-creator-name')?.textContent).toBe('巡检机器人');
+    expect(openCreator.querySelector('[data-avatar-kind="initial"][aria-hidden="true"]')).not.toBeNull();
     expect(
       openDrawer.querySelector('.detail-timeline-item[data-event-type="created"] .detail-timeline-actor')
         ?.textContent?.trim(),
@@ -3598,8 +3601,8 @@ describe('任务板工作台外壳集成测试', () => {
     detail2.querySelector<HTMLButtonElement>('[data-action="publish-bounty"]')!.click();
     await flush();
     expect(detail2.dataset.bountyStatus).toBe('OPEN');
-    expect(detail2.querySelector('[data-slot="detail-publisher"]')?.textContent?.trim()).toBe(
-      'Agent 提交: 巡检机器人',
+    expect(detail2.querySelector('[data-slot="detail-creator"] .detail-creator-name')?.textContent).toBe(
+      '巡检机器人',
     );
     detail2.querySelector<HTMLButtonElement>('[aria-label="关闭对话框"]')!.click();
     await flush();
@@ -5644,6 +5647,7 @@ describe('用户账号注册、登录、个人设置与服务隔离集成测试'
     const { port } = createMemoryPort();
     const bountyApi = createMemoryBountyClient({ lan_open_registration: true });
     await bountyApi.registerAgent({ name: 'taken-agent' });
+    const project = await bountyApi.createProject({ name: '创建者测试项目' });
     const listAvatarsSpy = vi.spyOn(bountyApi, 'listAuthAvatars');
     const updateMeSpy = vi.spyOn(bountyApi, 'updateAuthMe');
     const logoutSpy = vi.spyOn(bountyApi, 'logoutUser');
@@ -5712,6 +5716,30 @@ describe('用户账号注册、登录、个人设置与服务隔离集成测试'
     expect(trigger.textContent).not.toContain('用户账号');
     expect(trigger.querySelector('.sidebar-user-sub')).toBeNull();
     expect(trigger.querySelector('[data-avatar-kind="preset"][data-avatar-preset="blue"]')).not.toBeNull();
+
+    // 从发布入口创建任务，详情显示创建账户的名称与头像。
+    const createBounty = vi.spyOn(bountyApi, 'createBounty');
+    target.querySelector<HTMLButtonElement>('[data-action="open-composer"]')!.click();
+    await flush();
+    const composer = target.querySelector('[data-dialog="bounty-composer"]')!;
+    const title = composer.querySelector<HTMLInputElement>('#bounty-title-input')!;
+    title.value = '记录任务创建者';
+    title.dispatchEvent(new Event('input', { bubbles: true }));
+    await flush();
+    composer.querySelector<HTMLButtonElement>('[data-action="save-draft"]')!.click();
+    await flush();
+    expect(createBounty).toHaveBeenCalledWith(
+      expect.objectContaining({ project_id: project.id, title: '记录任务创建者' }),
+      expect.any(String),
+    );
+    const task = await createBounty.mock.results[0].value;
+    target.querySelector<HTMLButtonElement>(`[data-bounty-id="${task.id}"] .bounty-card-button`)!.click();
+    await flush();
+    const createdDetail = target.querySelector('[data-dialog="bounty-detail"]')!;
+    expect(createdDetail.querySelector('[data-slot="detail-creator"] .detail-creator-name')?.textContent).toBe('Alice');
+    expect(createdDetail.querySelector('[data-slot="detail-creator"] [data-avatar-preset="blue"]')).not.toBeNull();
+    createdDetail.querySelector<HTMLButtonElement>('[aria-label="关闭对话框"]')!.click();
+    await flush();
 
     // 点击已登录用户卡片打开悬浮菜单，点击「个人设置」打开设置弹窗
     trigger.click();
@@ -5793,6 +5821,14 @@ describe('用户账号注册、登录、个人设置与服务隔离集成测试'
     expect(logoutSpy).toHaveBeenCalledOnce();
     expect(trigger.dataset.authState).toBe('signed-out');
     expect(trigger.querySelector('[data-avatar-kind="guest"]')).not.toBeNull();
+
+    target.querySelector<HTMLButtonElement>(`[data-bounty-id="${task.id}"] .bounty-card-button`)!.click();
+    await flush();
+    const reopenedDetail = target.querySelector('[data-dialog="bounty-detail"]')!;
+    expect(reopenedDetail.querySelector('[data-slot="detail-creator"] .detail-creator-name')?.textContent).toBe('Alice Wang');
+    expect(reopenedDetail.querySelector('[data-slot="detail-creator"] [data-avatar-kind="initial"]')).not.toBeNull();
+    reopenedDetail.querySelector<HTMLButtonElement>('[aria-label="关闭对话框"]')!.click();
+    await flush();
 
     trigger.click();
     await flush();

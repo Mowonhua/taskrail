@@ -207,6 +207,10 @@ PATCH 可修改上述字段及 `archived`（布尔值）。省略字段保留当
 
 必填 `project_id`、`title`、`difficulty`、`assignee_mode`、`status`。`description` 和 `acceptance_criteria` 默认空字符串，`require_arbitration` 默认 false，两个限制字段默认 null，`created_by` 默认 `human`。
 
+客户端可在创建任务时同时发送管理员 Bearer token 和 `X-Taskrail-User-Session` 请求头。服务校验请求头中的用户会话，并在创建任务的事务内记录账户 ID。省略请求头时，服务允许管理员创建匿名任务。无效的用户会话返回 `401 UNAUTHORIZED`。
+
+管理端详情在能识别创建者时返回 `creator: {name, avatar}`。名称和头像来自当前资料，未设置头像时 `avatar` 为 null。旧任务缺少创建者记录时省略 `creator`。Agent 接口继续通过任务的 `created_by_agent_id` 和 `created_by_agent_name` 字段提供 Agent 创建者的信息。
+
 `difficulty` 和 `assignee_min_tier` 只能为 `C/B/A/S`。
 
 - `assignee_mode=any`：两个限制字段应为 null。

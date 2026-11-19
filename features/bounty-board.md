@@ -59,6 +59,7 @@
 | 依赖 | F-SRV-001 |
 | 依赖 | F-BNT-001 |
 | 依赖 | F-INLINE-001 |
+| 依赖 | F-SRV-002 |
 
 ### 实现
 
@@ -77,6 +78,8 @@
 | 关键实现 | src/lib/api/bounty-client.ts::HttpBountyClient |
 | 关键实现 | src/lib/api/bounty-client.ts::createMemoryBountyClient |
 | 关键实现 | src-tauri/src/server/db.rs::Repository::create_bounty |
+| 关键实现 | src-tauri/src/server/db.rs::Repository::create_bounty_with_session |
+| 关键实现 | src-tauri/src/server/db/accounts.rs::bounty_creator |
 | 关键实现 | src-tauri/src/server/db.rs::Repository::list_bounties |
 | 关键实现 | src-tauri/src/server/db.rs::Repository::get_bounty_detail |
 | 关键实现 | src-tauri/src/server/db.rs::Repository::update_bounty |
@@ -111,6 +114,7 @@
 | S-08 | 正常 | 管理员可在已取消任务的详情抽屉打开带任务名的永久删除确认框。取消或点击确认框外部会返回详情。删除成功后关闭详情并留在当前分类 | src/lib/session/app-integration.test.ts::任务板工作台外壳集成测试 > 已取消任务在抽屉确认删除并显示依赖冲突, src-tauri/tests/server_http.rs::http_delete_cancelled_bounty_preserves_dependencies |
 | S-09 | 约束 | 仅管理员可永久删除已取消任务；仍被其他任务作为前置条件时拒绝删除并保留依赖，确认框显示受影响的任务 | src/lib/session/app-integration.test.ts::任务板工作台外壳集成测试 > 已取消任务在抽屉确认删除并显示依赖冲突, src-tauri/tests/server_http.rs::http_delete_cancelled_bounty_preserves_dependencies |
 | S-10 | 正常 | 管理员可在抽屉将 `CANCELLED` 转为 `DRAFT`，保留任务标识、内容、依赖、评论与事件历史。草稿清除上轮接取、发布和协作状态，保留递增的租约编号。抽屉显示草稿操作，「已取消」移除该任务，「待处理」可找到草稿 | src/lib/session/app-integration.test.ts::任务板工作台外壳集成测试 > 已取消任务可从抽屉转为草稿并重新发布, src-tauri/tests/server_agent_comments.rs::http_restore_cancelled_task_resets_execution_and_preserves_history |
+| S-11 | 正常 | 详情的「创建者」显示实际创建账户或 Agent 的头像和完整名称。没有头像时用名称首字作为头像，旁边仍显示完整名称。编辑、发布和退出登录后仍显示原创建者。缺少创建者记录时显示占位头像与「未知创建者」 | src/lib/session/app-integration.test.ts::用户账号注册、登录、个人设置与服务隔离集成测试 > 侧栏底部悬浮用户卡片支持注册、登录、个人设置（预设/上传/清除头像与改名）、错误提示与退出登录, src/lib/session/app-integration.test.ts::任务板工作台外壳集成测试 > 支持任务详情抽屉、草稿编辑发布、未接取 OPEN 撤回草稿、并发抢单 409 冲突拦截与待处理聚合, src/lib/session/app-integration.test.ts::任务板工作台外壳集成测试 > 覆盖两种项目发单策略下 Agent 自动发单、待处理聚合刷新、发布者身份与人工审阅转正或丢弃全流程, src-tauri/tests/server_accounts.rs::shared_accounts_validate_names_profiles_and_session_roles |
 
 ## F-BNT-003 Agent 自动发单与项目级草稿审核策略
 

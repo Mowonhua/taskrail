@@ -166,7 +166,8 @@ export interface BountyApiPort {
     input: UpdateBountyCommentInput,
   ): Promise<BountyComment>;
   deleteBountyComment?(id: string, commentId: number): Promise<DeleteBountyCommentResult>;
-  createBounty(input: CreateBountyInput): Promise<BountyTask>;
+  /** 用户会话用于记录创建者，写入权限仍由管理员凭证提供。 */
+  createBounty(input: CreateBountyInput, userSession?: string): Promise<BountyTask>;
   updateBounty(id: string, input: UpdateBountyInput): Promise<BountyTask>;
   publishBounty(id: string): Promise<BountyTask>;
   inviteDraftCollaborator?(
@@ -564,8 +565,8 @@ export class HttpBountyClient implements BountyApiPort {
     );
   }
 
-  async createBounty(input: CreateBountyInput): Promise<BountyTask> {
-    return await this.request<BountyTask>('POST', '/api/v1/bounties', { body: input });
+  async createBounty(input: CreateBountyInput, userSession?: string): Promise<BountyTask> {
+    return await this.request<BountyTask>('POST', '/api/v1/bounties', { body: input, userSession });
   }
 
   async updateBounty(id: string, input: UpdateBountyInput): Promise<BountyTask> {
@@ -736,7 +737,7 @@ export class HttpBountyClient implements BountyApiPort {
   private async request<T>(
     method: string,
     path: string,
-    options?: { body?: unknown; auth?: boolean; bearerToken?: string },
+    options?: { body?: unknown; auth?: boolean; bearerToken?: string; userSession?: string },
   ): Promise<T> {
     const headers: Record<string, string> = {};
     if (options?.bearerToken !== undefined) {
@@ -746,6 +747,9 @@ export class HttpBountyClient implements BountyApiPort {
     }
     if (options?.body !== undefined) {
       headers['Content-Type'] = 'application/json';
+    }
+    if (options?.userSession !== undefined) {
+      headers['X-Taskrail-User-Session'] = options.userSession;
     }
 
     const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
@@ -1319,6 +1323,7 @@ export function createMemoryBountyClient(seed?: {
 
   const projects = new Map<string, BountyProject>();
   const bounties = new Map<string, BountyTask>();
+  const bountyUserCreators = new Map<string, string>();
   const dependenciesByBounty = new Map<string, string[]>();
   const eventsByBounty = new Map<string, BountyEvent[]>();
   const commentsByBounty = new Map<string, BountyComment[]>();
@@ -2933,10 +2938,18 @@ export function createMemoryBountyClient(seed?: {
     },
 
     async getBountyDetail(id: string): Promise<BountyDetail> {
-      const bounty = requireBounty(id);
+      const bounty = hydrateBounty(requireBounty(id));
+      const accountId = bountyUserCreators.get(id);
+      const account = accountId ? userAccountsById.get(accountId) : undefined;
+      const creator = account
+        ? { name: account.name, avatar: clone(account.avatar) }
+        : bounty.created_by_agent_name
+          ? { name: bounty.created_by_agent_name, avatar: null }
+          : undefined;
       const events = [...(eventsByBounty.get(id) ?? [])].sort((a, b) => a.id - b.id);
       return {
-        bounty: hydrateBounty(bounty),
+        ...(creator ? { creator } : {}),
+        bounty,
         events: clone(events),
         comments: listHydratedComments(id),
         blocks: relatedSummaries(id, false),
@@ -3036,7 +3049,7 @@ export function createMemoryBountyClient(seed?: {
       };
     },
 
-    async createBounty(input: CreateBountyInput): Promise<BountyTask> {
+    async createBounty(input: CreateBountyInput, userSession?: string): Promise<BountyTask> {
       if (input.status !== 'DRAFT' && input.status !== 'OPEN') {
         throw new ServiceApiError('VALIDATION_ERROR', 400, '初始状态必须为 DRAFT 或 OPEN');
       }
@@ -3047,6 +3060,7 @@ export function createMemoryBountyClient(seed?: {
       const minTier = input.assignee_min_tier ?? null;
       const agentId = input.assignee_agent_id ?? null;
       validateBountyFields(input.title, input.difficulty, input.assignee_mode, minTier, agentId);
+      const creator = userSession === undefined ? undefined : authenticateUserSession(userSession);
       requireActiveProject(input.project_id);
 
       return withTransaction(() => {
@@ -3113,6 +3127,7 @@ export function createMemoryBountyClient(seed?: {
         if (hydrated.status === 'OPEN') {
           hydrated = dispatchReady(bounty.id, timestamp);
         }
+        if (creator) bountyUserCreators.set(bounty.id, creator.id);
         return hydrated;
       });
     },
@@ -3391,6 +3406,7 @@ export function createMemoryBountyClient(seed?: {
         agent.ledger = agent.ledger.filter(entry => entry.bounty_id !== id);
       }
       bounties.delete(id);
+      bountyUserCreators.delete(id);
       dependenciesByBounty.delete(id);
       eventsByBounty.delete(id);
       commentsByBounty.delete(id);

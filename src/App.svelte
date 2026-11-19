@@ -1818,7 +1818,7 @@
   }
 
   async function handleCreateBounty(input: CreateBountyInput): Promise<BountyTask> {
-    const created = await activeBountyApi.createBounty(input);
+    const created = await activeBountyApi.createBounty(input, userAuthToken || undefined);
     await refreshBountyWorkspace();
     showToast(created.status === 'OPEN' ? $t('任务已发布') : $t('草稿已保存'));
     return created;

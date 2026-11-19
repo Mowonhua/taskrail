@@ -260,6 +260,10 @@ CREATE TABLE IF NOT EXISTS account_sessions (
     expires INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS account_sessions_expiry ON account_sessions(expires);
+CREATE TABLE IF NOT EXISTS bounty_user_creators (
+    bounty_id TEXT PRIMARY KEY REFERENCES bounties(id) ON DELETE CASCADE,
+    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE
+);
 CREATE TABLE IF NOT EXISTS account_login_attempts (
     account_id TEXT PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
     until INTEGER NOT NULL,

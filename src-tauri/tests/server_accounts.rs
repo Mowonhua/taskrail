@@ -96,6 +96,74 @@ async fn shared_accounts_validate_names_profiles_and_session_roles() {
     .await
     .unwrap();
     let agent_token = agent["token"].as_str().unwrap();
+
+    let bounties_url = format!("{base}/api/v1/bounties");
+    let project: Value = client
+        .post(format!("{base}/api/v1/projects"))
+        .bearer_auth("test-admin")
+        .json(&json!({"name":"创建者测试"}))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let create_bounty = || {
+        client
+            .post(&bounties_url)
+            .bearer_auth("test-admin")
+            .json(&json!({
+                "project_id":project["id"],"title":"记录创建者","difficulty":"C",
+                "assignee_mode":"any","status":"OPEN","created_by":"worker"
+            }))
+    };
+    let get_detail = |id: &str| {
+        client
+            .get(format!("{bounties_url}/{id}"))
+            .bearer_auth("test-admin")
+    };
+    for invalid_token in ["invalid", agent_token] {
+        let response = create_bounty()
+            .header("X-Taskrail-User-Session", invalid_token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+    let attributed: Value = create_bounty()
+        .header("X-Taskrail-User-Session", user_token)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let bounty_id = attributed["id"].as_str().unwrap();
+    let detail: Value = get_detail(bounty_id)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        detail["creator"],
+        json!({"name":"林","avatar":{"kind":"preset","id":"blue"}})
+    );
+    let legacy: Value = create_bounty().send().await.unwrap().json().await.unwrap();
+    let anonymous: Value = get_detail(legacy["id"].as_str().unwrap())
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(anonymous.get("creator").is_none());
+
     let agent_me = |token| {
         client
             .get(format!("{base}/api/v1/agent/me"))
@@ -180,6 +248,14 @@ async fn shared_accounts_validate_names_profiles_and_session_roles() {
         .unwrap();
     assert_eq!(renamed["id"], user["profile"]["id"]);
     assert_eq!(renamed["avatar"], Value::Null);
+    let detail: Value = get_detail(bounty_id)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(detail["creator"], json!({"name":"林二","avatar":null}));
     assert_eq!(
         patch(agent_token, json!({"name":"worker-renamed"}))
             .send()
