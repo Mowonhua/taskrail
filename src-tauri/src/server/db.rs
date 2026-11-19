@@ -21,6 +21,7 @@ mod dependencies;
 mod drafts;
 mod events;
 mod leases;
+pub(crate) mod oauth;
 mod rating;
 
 /// 结构职责：可克隆的文件数据库入口；每次调用独立连接，可跨进程共享同一文件。

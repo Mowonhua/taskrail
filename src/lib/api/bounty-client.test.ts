@@ -1,6 +1,3 @@
-import { readFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const native = vi.hoisted(() => ({
@@ -623,7 +620,7 @@ describe('createMemoryBountyClient (Issue 03 Agent 准入、订阅与隔离)', (
     });
     expect(skillWithInvite.filename).toBe('SKILL.md');
     expect(skillWithInvite.base_url).toBe('http://192.168.1.10:8420');
-    expect(skillWithInvite.content).toContain(createdInvite.raw_token);
+    expect(skillWithInvite.content).not.toContain(createdInvite.raw_token);
     expect(skillWithInvite.content).toContain('需要有效邀请令牌');
     expect((await client.listInviteTokens())[0].use_count).toBe(0);
 
@@ -1526,7 +1523,7 @@ describe('Issue 05 Agent 自动发单与项目级草稿审核策略', () => {
 
     // SKILL.md 包含 /api/v1/agent/bounties 与 agent_draft_policy 说明
     const skillDoc = await client.getSkillMarkdown({ baseUrl: 'http://127.0.0.1:8420' });
-    expect(skillDoc.content).toContain('POST http://127.0.0.1:8420/api/v1/agent/bounties');
+    expect(skillDoc.content).toContain('taskrail_create_task');
     expect(skillDoc.content).toContain('agent_draft_policy');
   });
 
@@ -2468,7 +2465,6 @@ describe('Issue 07 评论区、提问挂起与回复唤醒', () => {
       status: 404,
     });
     const skill = await client.getSkillMarkdown();
-    expect(skill.content).toContain('发布者可读取自己定向给其他 Agent 的任务');
     expect(skill.content).toContain('发布者可读取并评论自己已发布的定向任务');
     expect(skill.content).not.toContain('指定其他 Agent 的任务不可见');
 
@@ -3094,11 +3090,11 @@ describe('Issue 08 仲裁顺位配置、裁判回避与仲裁验收闭环', () =
   it('SKILL.md 与 helpers.ts 完整包含仲裁协议说明与双语格式化（零中点）', async () => {
     const client = createMemoryBountyClient();
     const skill = await client.getSkillMarkdown();
-    expect(skill.content).toContain('/submit-arbitration');
-    expect(skill.content).toContain('/arbitration/approve');
-    expect(skill.content).toContain('/arbitration/reject');
-    expect(skill.content).toContain('403 `ARBITRATOR_CONFLICT`');
-    expect(skill.content).toContain('403 `ARBITRATOR_MISMATCH`');
+    expect(skill.content).toContain('taskrail_submit_arbitration');
+    expect(skill.content).toContain('taskrail_approve_arbitration');
+    expect(skill.content).toContain('taskrail_reject_arbitration');
+    expect(skill.content).toContain('ARBITRATOR_CONFLICT');
+    expect(skill.content).toContain('ARBITRATOR_MISMATCH');
 
     setLocalePreference('zh-CN');
     expect(
@@ -3316,58 +3312,35 @@ describe('Issue 08 仲裁顺位配置、裁判回避与仲裁验收闭环', () =
     }
   });
 
-  it('SKILL.md 与后端 src-tauri/src/server/routes/agents.rs 模板逐字 1:1 对齐（开放/邀请策略、令牌与自定义 baseUrl）', async () => {
-    const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
-    const agentsRs = readFileSync(
-      resolve(repoRoot, 'src-tauri/src/server/routes/agents.rs'),
-      'utf8',
-    ).replace(/\r\n/g, '\n');
-
-    const match = agentsRs.match(
-      /async fn skill_content[\s\S]*?Ok\(format!\(\s*r#"([\s\S]*?)"#\s*\)\)/,
-    );
-    expect(match).not.toBeNull();
-    const rustTemplate = match![1].replace(/\{\{/g, '{').replace(/\}\}/g, '}');
-
-    const renderExpectedFromRust = (
+  it('SKILL.md 填入注册策略和服务地址且不包含邀请令牌明文', async () => {
+    const assertDocument = (
+      content: string,
       baseUrl: string,
-      lanOpenRegistration: boolean,
-      inviteToken: string | null,
-    ): string => {
-      const policy = lanOpenRegistration
-        ? '已开启局域网免审注册；可省略 invite_token。显式提供邀请时仍须有效。'
-        : '需要有效邀请令牌；请向管理员获取 invite_token。';
-      const example = JSON.stringify(
-        {
-          capabilities: ['coding'],
-          description: 'Agent 能力说明',
-          invite_token: inviteToken ?? '<INVITE_TOKEN>',
-          name: 'my-agent',
-          subscribe_all_projects: true,
-        },
-        null,
-        2,
-      );
-      return rustTemplate
-        .replace(/\{base_url\}/g, () => baseUrl)
-        .replace(/\{policy\}/g, () => policy)
-        .replace(/\{example\}/g, () => example);
+      policy: string,
+      inviteToken: string,
+    ): void => {
+      expect(content).toContain(`base_url: ${baseUrl}`);
+      expect(content).toContain('taskrail-agent register');
+      expect(content).toContain(policy);
+      const example = content.match(/```json\r?\n([\s\S]*?)\r?\n```/)?.[1];
+      expect(JSON.parse(example ?? '')).toMatchObject({ invite_token: '<INVITE_TOKEN>' });
+      if (inviteToken !== '<INVITE_TOKEN>') expect(content).not.toContain(inviteToken);
     };
 
+    const closedPolicy = '需要有效邀请令牌；请向管理员获取 invite_token。';
+    const openPolicy = '已开启局域网免审注册；可省略 invite_token。显式提供邀请时仍须有效。';
     const closedClient = createMemoryBountyClient({ lan_open_registration: false });
     const closedInvite = await closedClient.createInviteToken({ label: 'closed-skill' });
 
     const closedDefault = await closedClient.getSkillMarkdown();
-    expect(closedDefault.content).toBe(
-      renderExpectedFromRust('http://127.0.0.1:8420', false, null),
-    );
+    assertDocument(closedDefault.content, 'http://127.0.0.1:8420', closedPolicy, '<INVITE_TOKEN>');
 
     const closedWithToken = await closedClient.getSkillMarkdown({
       baseUrl: 'https://board.example.test',
       inviteToken: closedInvite.raw_token,
     });
-    expect(closedWithToken.content).toBe(
-      renderExpectedFromRust('https://board.example.test', false, closedInvite.raw_token),
+    assertDocument(
+      closedWithToken.content, 'https://board.example.test', closedPolicy, closedInvite.raw_token,
     );
 
     const openClient = createMemoryBountyClient({ lan_open_registration: true });
@@ -3376,15 +3349,13 @@ describe('Issue 08 仲裁顺位配置、裁判回避与仲裁验收闭环', () =
     const openCustomUrl = await openClient.getSkillMarkdown({
       baseUrl: 'http://192.168.1.50:9000/',
     });
-    expect(openCustomUrl.content).toBe(
-      renderExpectedFromRust('http://192.168.1.50:9000', true, null),
-    );
+    assertDocument(openCustomUrl.content, 'http://192.168.1.50:9000', openPolicy, '<INVITE_TOKEN>');
 
     const openWithToken = await openClient.getSkillMarkdown({
       inviteToken: openInvite.raw_token,
     });
-    expect(openWithToken.content).toBe(
-      renderExpectedFromRust('http://127.0.0.1:8420', true, openInvite.raw_token),
+    assertDocument(
+      openWithToken.content, 'http://127.0.0.1:8420', openPolicy, openInvite.raw_token,
     );
   });
 });
@@ -3453,7 +3424,7 @@ describe('Issue 09 隐藏分评级、防刷规则与段位门槛', () => {
     const mem = createMemoryBountyClient();
     const skill = await mem.getSkillMarkdown();
     expect(skill.content).toContain('## 段位与定级');
-    expect(skill.content).toContain('前 5 单有效结算（完成、仲裁失败、超时或弃单）为定级赛');
+    expect(skill.content).toContain('前 5 单有效结算（完成、仲裁失败、超时或弃单）用于定级');
   });
 
   it('MemoryBountyClient 定级期与评级公式 1:1 校验（前 5 单 K=80 与第 6 单 K=32 及效率质量衰减）', async () => {
@@ -4237,8 +4208,8 @@ describe('Issue 10 草稿受邀共创拆单与前置依赖自动解锁', () => {
 
     // SKILL.md 协议文档包含 Issue 10 新路由与字段，且中英文格式化函数不含中点
     const skill = await client.getPublicSkillMarkdown({ baseUrl: 'http://127.0.0.1:4312' });
-    expect(skill).toContain('/api/v1/agent/bounties/{id}');
-    expect(skill).toContain('/api/v1/agent/bounties/{id}/split');
+    expect(skill).toContain('taskrail_get_task');
+    expect(skill).toContain('taskrail_split_draft');
     expect(skill).toContain('blocked_by');
     expect(skill).toContain('is_blocked');
     expect(skill).not.toContain('·');

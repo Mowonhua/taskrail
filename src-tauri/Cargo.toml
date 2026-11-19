@@ -10,6 +10,10 @@ default-run = "taskrail"
 name = "taskrail-server"
 path = "src/bin/taskrail-server.rs"
 
+[[bin]]
+name = "taskrail-agent"
+path = "src/bin/taskrail-agent.rs"
+
 [lib]
 name = "taskrail_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
@@ -38,11 +42,19 @@ tauri = { version = "2.12.0", features = ["test"] }
 [target.'cfg(target_os = "android")'.dependencies]
 tauri-plugin-taskrail-mobile = { path = "plugins/mobile" }
 
+[target.'cfg(not(target_os = "android"))'.dev-dependencies]
+reqwest = { version = "0.13", default-features = false, features = ["query", "form"] }
+
 [target.'cfg(not(target_os = "android"))'.dependencies]
 tauri-plugin-updater = "2.13.1"
 base64 = "0.22"
 minisign-verify = "0.2"
-reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "json"] }
+clap = { version = "4", features = ["derive"] }
+rmcp = { version = "3.11", default-features = false, features = ["server", "transport-io", "transport-streamable-http-server"] }
+tower = { version = "0.5", features = ["util"] }
+toml_edit = "0.25"
+yaml-edit = { version = "0.3.6", default-features = false }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 tokio = { version = "1", features = ["time", "net", "rt-multi-thread", "macros", "signal", "sync"] }
 axum = { version = "0.8", features = ["ws"] }

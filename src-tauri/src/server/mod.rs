@@ -2,9 +2,11 @@
 pub mod config;
 pub mod db;
 pub mod error;
+mod mcp_identity;
 pub mod models;
 mod push;
 mod routes;
+pub(crate) use mcp_identity::McpIdentity;
 
 use db::Repository;
 use error::{ApiError, Result};
@@ -40,6 +42,7 @@ pub(crate) struct AppState {
     pub mode: ServerMode,
     /// 无 Host 请求的文档使用实际监听地址；直接构造 Router 时使用缺省地址。
     pub base_url: String,
+    pub public_url: String,
 }
 
 /// 函数职责：创建共享路由；管理员凭证比较固定长度摘要，避免按首个不同字节提前退出。
@@ -49,6 +52,7 @@ pub fn router(repository: Repository, admin_token: &str, mode: ServerMode) -> Re
         admin_token,
         mode,
         "http://127.0.0.1:8420".into(),
+        None,
     )
 }
 
@@ -57,15 +61,18 @@ fn router_at(
     admin_token: &str,
     mode: ServerMode,
     base_url: String,
+    public_url: Option<url::Url>,
 ) -> Result<axum::Router> {
     if admin_token.trim().is_empty() {
         return Err(ApiError::invalid("admin_token 不能为空"));
     }
+    let public_url = public_url.map_or_else(|| base_url.clone(), |url| url.to_string());
     let state = AppState {
         repository,
         token_digest: Sha256::digest(admin_token.as_bytes()).into(),
         mode,
         base_url,
+        public_url,
     };
     Ok(routes::router(state))
 }
@@ -132,6 +139,14 @@ impl Drop for RunningServer {
 
 /// 函数职责：完成回调客户端构建、迁移与监听后才返回实际地址；SQLite 初始化不占用异步工作线程。
 pub async fn start(config: ServerConfig) -> Result<RunningServer> {
+    start_with_public_url(config, None).await
+}
+
+/// 为 HTTPS 反向代理公布固定的 OAuth 发行者地址；认证不使用客户端提交的转发头。
+pub async fn start_with_public_url(
+    config: ServerConfig,
+    public_url: Option<url::Url>,
+) -> Result<RunningServer> {
     let webhook_client = push::build_webhook_client()?;
     let repository = tokio::task::spawn_blocking(move || Repository::open(config.db_path))
         .await
@@ -145,6 +160,7 @@ pub async fn start(config: ServerConfig) -> Result<RunningServer> {
         &config.admin_token,
         config.mode,
         format!("http://{address}"),
+        public_url,
     )?;
     let info = EmbeddedServerInfo {
         base_url: format!("http://{address}"),

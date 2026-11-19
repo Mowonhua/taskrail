@@ -25,7 +25,7 @@
   import FontSelect from './FontSelect.svelte';
   import { t, type LocalePreference } from './i18n';
   import { observeAnchoredPopover, positionAnchoredPopover } from './anchored-popover';
-  import type { Preferences } from './contracts';
+  import type { Preferences, SkillInstallRequest } from './contracts';
   import type { ThemeDefinition, ThemeMode } from './themes';
   import ThemeSelect from './ThemeSelect.svelte';
 
@@ -86,7 +86,8 @@
       baseUrl?: string;
       inviteToken?: string;
     }) => Promise<SkillDocument>;
-    onExportSkillMarkdown?: (doc: SkillDocument) => Promise<boolean>;
+    onPickSkillDirectory?: () => Promise<string | null>;
+    onInstallSkill?: (request: SkillInstallRequest) => Promise<string[]>;
     onNotify?: (message: string) => void;
   }
 
@@ -158,7 +159,8 @@
     onLoadSkillMarkdown = async () => {
       throw new Error('Not configured');
     },
-    onExportSkillMarkdown,
+    onPickSkillDirectory,
+    onInstallSkill,
     onNotify,
   }: Props = $props();
 
@@ -987,7 +989,8 @@
       {onRevokeInviteToken}
       {onDeleteInviteToken}
       {onLoadSkillMarkdown}
-      {onExportSkillMarkdown}
+      {onPickSkillDirectory}
+      {onInstallSkill}
       {onNotify}
     />
   </section>

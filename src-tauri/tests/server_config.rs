@@ -104,8 +104,13 @@ async fn binary_starts_with_environment_and_exposes_shared_kernel() {
         }
     }
     let dir = tempfile::tempdir().unwrap();
+    // 将程序移入独立目录，验证它可以在没有配套模板文件的部署中运行。
+    let built_exe = std::path::Path::new(env!("CARGO_BIN_EXE_taskrail-server"));
+    let deployed_exe = dir.path().join(built_exe.file_name().unwrap());
+    std::fs::copy(built_exe, &deployed_exe).unwrap();
     let mut child = Child(
-        std::process::Command::new(env!("CARGO_BIN_EXE_taskrail-server"))
+        std::process::Command::new(deployed_exe)
+            .current_dir(dir.path())
             .env("TASKRAIL_BIND", "127.0.0.1:0")
             .env("TASKRAIL_DB", dir.path().join("daemon.db"))
             .env("TASKRAIL_ADMIN_TOKEN", "daemon-token")
@@ -144,4 +149,19 @@ async fn binary_starts_with_environment_and_exposes_shared_kernel() {
     assert_eq!(status["mode"], "standalone");
     assert_eq!(status["version"], env!("CARGO_PKG_VERSION"));
     assert!(status["db_path"].as_str().unwrap().ends_with("daemon.db"));
+
+    let skill = client
+        .get(format!("{base}/skill.md"))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(skill.contains("# Taskrail Agent"));
+    assert!(skill.contains(&format!("base_url: {base}")));
+    assert!(skill.contains("taskrail-agent register"));
+    assert!(skill.contains(r#""invite_token": "<INVITE_TOKEN>""#));
 }

@@ -5,7 +5,7 @@ use super::{
 };
 use std::{collections::HashMap, ffi::OsString};
 
-pub const USAGE: &str = "taskrail-server [--bind IP:PORT] [--db PATH] --admin-token TOKEN\n环境变量: TASKRAIL_BIND, TASKRAIL_DB, TASKRAIL_ADMIN_TOKEN\n默认 bind: 127.0.0.1:8420，默认 db: ./taskrail.db；admin-token 必填。";
+pub const USAGE: &str = "taskrail-server [--bind IP:PORT] [--db PATH] --admin-token TOKEN\n环境变量: TASKRAIL_BIND, TASKRAIL_DB, TASKRAIL_ADMIN_TOKEN, TASKRAIL_MCP_PUBLIC_URL\n默认 bind: 127.0.0.1:8420，默认 db: ./taskrail.db；admin-token 必填。";
 
 /// 函数职责：解析不含程序名的参数；通过注入环境读取器测试，不修改进程全局环境。
 pub fn parse_config(

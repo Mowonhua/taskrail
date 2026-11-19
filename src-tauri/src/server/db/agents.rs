@@ -130,6 +130,15 @@ impl Repository {
     /// 函数职责：原子执行准入校验、邀请次数递增、Agent 创建和初始订阅。
     /// 输出说明：失败回滚所有写入；成功仅此返回 api_key 明文。空白邀请视为未提供。
     pub fn register_agent(&self, input: RegisterAgent) -> Result<RegisteredAgent> {
+        self.write(|tx| self.register_agent_in(tx, input))
+    }
+
+    /// OAuth 在同一事务中消费邀请并写入授权代码。
+    pub(super) fn register_agent_in(
+        &self,
+        tx: &Transaction<'_>,
+        input: RegisterAgent,
+    ) -> Result<RegisteredAgent> {
         let name = input.name.trim();
         if !(1..=64).contains(&name.chars().count()) {
             return Err(ApiError::invalid("name 去除首尾空白后须为 1 至 64 字符"));
@@ -138,30 +147,50 @@ impl Repository {
         let api_key = credential("tr_ag_")?;
         let (webhook_url, webhook_secret) =
             super::events::webhook_values(input.webhook_url, input.webhook_secret, None)?;
-        let agent = self.write(|tx| {
+        let agent = {
             let timestamp = now();
-            let invite_id = match input.invite_token.as_deref().filter(|v| !v.trim().is_empty()) {
+            let invite_id = match input
+                .invite_token
+                .as_deref()
+                .filter(|v| !v.trim().is_empty())
+            {
                 Some(raw) => Some(valid_invite(tx, raw, &timestamp)?),
                 None => {
                     if !open_registration(tx)? {
-                        return Err(ApiError::new(StatusCode::UNAUTHORIZED,"INVITE_TOKEN_REQUIRED","需要注册邀请令牌"));
+                        return Err(ApiError::new(
+                            StatusCode::UNAUTHORIZED,
+                            "INVITE_TOKEN_REQUIRED",
+                            "需要注册邀请令牌",
+                        ));
                     }
                     None
                 }
             };
-            let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM agents WHERE name=?1)", [name], |r| r.get(0))?;
-            if exists { return Err(ApiError::conflict("AGENT_NAME_TAKEN", "Agent 名称已被使用")); }
+            let exists: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM agents WHERE name=?1)",
+                [name],
+                |r| r.get(0),
+            )?;
+            if exists {
+                return Err(ApiError::conflict("AGENT_NAME_TAKEN", "Agent 名称已被使用"));
+            }
             validate_subscriptions(tx, &projects)?;
             let id = Uuid::new_v4().to_string();
             if let Some(invite_id) = &invite_id {
                 // BEGIN IMMEDIATE 使校验与消耗跨独立连接互斥；后续写入失败仍会回滚次数。
-                tx.execute("UPDATE invite_tokens SET use_count=use_count+1 WHERE id=?1", [invite_id])?;
+                tx.execute(
+                    "UPDATE invite_tokens SET use_count=use_count+1 WHERE id=?1",
+                    [invite_id],
+                )?;
             }
             tx.execute("INSERT INTO agents(id,name,description,capabilities_json,api_key_hash,api_key_prefix,subscribe_all_projects,invite_token_id,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?9)",params![id,name,input.description,json!(input.capabilities).to_string(),digest(&api_key),prefix(&api_key),all,invite_id,timestamp])?;
-            tx.execute("UPDATE agents SET webhook_url=?2,webhook_secret=?3 WHERE id=?1", params![id,webhook_url,webhook_secret])?;
+            tx.execute(
+                "UPDATE agents SET webhook_url=?2,webhook_secret=?3 WHERE id=?1",
+                params![id, webhook_url, webhook_secret],
+            )?;
             replace_subscriptions(tx, &id, &projects, &timestamp)?;
-            self.agent_summary(tx, &id)
-        })?;
+            self.agent_summary(tx, &id)?
+        };
         Ok(RegisteredAgent {
             agent,
             api_key,
@@ -172,27 +201,18 @@ impl Repository {
     /// 函数职责：按密钥摘要认证并更新最近活动时间；停用和吊销分别返回 403 与 401。
     pub fn authenticate_agent(&self, api_key: &str) -> Result<AgentSummary> {
         self.write(|tx| {
-            let id: Option<String> = tx
-                .query_row(
-                    "SELECT id FROM agents WHERE api_key_hash=?1",
-                    [digest(api_key)],
-                    |r| r.get(0),
-                )
-                .optional()?;
-            let id = id.ok_or_else(|| {
-                ApiError::new(
-                    StatusCode::UNAUTHORIZED,
-                    "UNAUTHORIZED",
-                    "需要有效的 Agent Bearer api_key",
-                )
-            })?;
-            active_agent(tx, &id)?;
-            tx.execute(
-                "UPDATE agents SET last_seen_at=?2 WHERE id=?1",
-                params![id, now()],
-            )?;
-            self.agent_summary(tx, &id)
+            let id = agent_id_for_key(tx, api_key)?;
+            self.agent_seen(tx, &id)
         })
+    }
+
+    pub(super) fn agent_seen(&self, tx: &Transaction<'_>, id: &str) -> Result<AgentSummary> {
+        active_agent(tx, id)?;
+        tx.execute(
+            "UPDATE agents SET last_seen_at=?2 WHERE id=?1",
+            params![id, now()],
+        )?;
+        self.agent_summary(tx, id)
     }
 
     pub fn list_agents(&self, filter: AgentFilter) -> Result<Vec<AgentSummary>> {
@@ -452,6 +472,22 @@ pub(super) fn find_agent(conn: &Connection, id: &str) -> Result<AgentSummary> {
     agent.active_lease_count = conn.query_row("SELECT COUNT(*) FROM bounties WHERE lease_agent_id=?1 AND ((status='IN_PROGRESS' AND lease_expires_at>?2) OR status IN ('WAITING_INFO','PENDING_ARBITRATION'))", params![id,now()], |r| r.get(0))?;
     Ok(agent)
 }
+pub(super) fn agent_id_for_key(conn: &Connection, api_key: &str) -> Result<String> {
+    conn.query_row(
+        "SELECT id FROM agents WHERE api_key_hash=?1",
+        [digest(api_key)],
+        |row| row.get(0),
+    )
+    .optional()?
+    .ok_or_else(|| {
+        ApiError::new(
+            StatusCode::UNAUTHORIZED,
+            "UNAUTHORIZED",
+            "需要有效的 Agent Bearer api_key",
+        )
+    })
+}
+
 pub(super) fn active_agent(conn: &Connection, id: &str) -> Result<AgentSummary> {
     let agent = find_agent(conn, id)?;
     match agent.status {

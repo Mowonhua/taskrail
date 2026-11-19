@@ -1629,10 +1629,10 @@ async fn http_contracts_auth_draft_isolation_validation_and_skill_documentation(
         .await
         .unwrap();
     for text in [
-        "GET /api/v1/agent/bounties/{id}",
-        "POST /api/v1/agent/bounties/{id}/comments",
-        "PATCH /api/v1/agent/bounties/{id}",
-        "POST /api/v1/agent/bounties/{id}/split",
+        "taskrail_get_task",
+        "taskrail_add_comment",
+        "taskrail_update_draft",
+        "taskrail_split_draft",
         "draft.invited",
         "comment.added",
         "blocked_by",

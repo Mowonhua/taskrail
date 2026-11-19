@@ -26,8 +26,10 @@ use tower_http::cors::{Any, CorsLayer};
 
 mod agents;
 mod events;
+mod mcp;
 
 pub(super) fn router(state: AppState) -> Router {
+    let mcp = mcp::router(state.clone());
     Router::new()
         .merge(agents::router())
         .merge(events::router())
@@ -102,6 +104,7 @@ pub(super) fn router(state: AppState) -> Router {
                 ]),
         )
         .with_state(state)
+        .merge(mcp)
 }
 
 async fn authorize(State(state): State<AppState>, request: Request, next: Next) -> Response {

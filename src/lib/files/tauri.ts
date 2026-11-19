@@ -3,10 +3,10 @@
  * 定义范围：仅调用保留的原生命令（load_config / save_config / export_theme_file / export_markdown_file / open_external_link / open_local_document）与插件对话框。
  */
 import { invoke } from '@tauri-apps/api/core';
-import { save } from '@tauri-apps/plugin-dialog';
+import { open, save } from '@tauri-apps/plugin-dialog';
 import { clonePersistableConfig } from '../config-defaults';
 import { validateAppConfig } from '../config-validation';
-import type { AppConfig, FilePort } from '../contracts';
+import type { AppConfig, FilePort, SkillInstallRequest } from '../contracts';
 import { translate } from '../i18n';
 
 const patterns: readonly { match: RegExp; key: string; names: readonly string[] }[] = [
@@ -90,6 +90,15 @@ export class TauriFilePort implements FilePort {
 
   async openExternalLink(url: string): Promise<void> {
     await call('open_external_link', { url });
+  }
+
+  async pickSkillDirectory(): Promise<string | null> {
+    const target = await open({ directory: true });
+    return typeof target === 'string' ? target : null;
+  }
+
+  async installAgentSkill(request: SkillInstallRequest): Promise<string[]> {
+    return call('install_agent_skill', { request });
   }
 
   async openLocalDocument(path: string): Promise<void> {

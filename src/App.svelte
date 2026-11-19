@@ -9,6 +9,7 @@
   import { invoke } from '@tauri-apps/api/core';
   import { listen } from '@tauri-apps/api/event';
   import { getCurrentWindow } from '@tauri-apps/api/window';
+  import { lightDismiss } from './lib/dialog-light-dismiss';
   import {
     createMemoryBountyClient,
     fetchEmbeddedServerInfo,
@@ -1743,14 +1744,18 @@
       await api.deleteBounty(id);
     } catch (error) {
       if (!isCurrentService()) return;
-      bountyDeleteError = formatServiceError(error);
+      let message = formatServiceError(error);
       if (error instanceof ServiceApiError && error.code === 'BOUNTY_HAS_DEPENDENTS') {
+        bountyDeleteError = message;
         const detail = await api.getBountyDetail(id).catch(() => null);
         const titles = detail?.blocks?.map(bounty => bounty.title);
-        if (isCurrentService() && titles?.length) {
-          bountyDeleteError = $t('该任务仍是以下任务的前置任务：{tasks}', { tasks: titles.join(' / ') });
+        if (titles?.length) {
+          message = $t('该任务仍是以下任务的前置任务：{tasks}', { tasks: titles.join(' / ') });
         }
       }
+      if (!isCurrentService()) return;
+      if (bountyDeleteDialog?.open) bountyDeleteError = message;
+      else showToast(message);
       return;
     } finally {
       deletingBounty = false;
@@ -2964,7 +2969,12 @@
               onRevokeInviteToken={handleRevokeInviteToken}
               onDeleteInviteToken={handleDeleteInviteToken}
               onLoadSkillMarkdown={loadSkillMarkdown}
-              onExportSkillMarkdown={handleExportSkillMarkdown}
+              onPickSkillDirectory={!files.isMobile && files.pickSkillDirectory
+                ? () => files.pickSkillDirectory!()
+                : undefined}
+              onInstallSkill={!files.isMobile && files.installAgentSkill
+                ? request => files.installAgentSkill!(request)
+                : undefined}
               onNotify={showToast}
             />
           </div>
@@ -3001,7 +3011,8 @@
     aria-labelledby="bounty-delete-title"
     data-dialog="delete-bounty"
     bind:this={bountyDeleteDialog}
-    oncancel={event => { if (deletingBounty) event.preventDefault(); }}
+    use:lightDismiss
+    closedby="any"
     onclose={() => {
       if (bountyDeleteDialog?.open) return;
       bountyDeleteTarget = null;
@@ -3019,7 +3030,7 @@
       {/if}
       <div class="modal-actions">
         <!-- svelte-ignore a11y_autofocus (删除确认框打开时焦点落在安全操作) -->
-        <button type="button" autofocus disabled={deletingBounty} onclick={() => bountyDeleteDialog?.close()}>
+        <button type="button" autofocus onclick={() => bountyDeleteDialog?.close()}>
           {$t('取消')}
         </button>
         <button

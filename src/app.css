@@ -3500,6 +3500,7 @@ dialog.created-token-dialog[open]:not(:modal) {
 
 .invite-token-row {
   min-height: 46px;
+  position: relative;
   padding-block: 8px;
   font-size: 12.5px;
   transition: background 0.12s ease;
@@ -3512,6 +3513,36 @@ dialog.created-token-dialog[open]:not(:modal) {
 
 .invite-token-row:hover {
   background: var(--hover);
+}
+
+.invite-token-row.is-selected {
+  background: var(--hover);
+  box-shadow: inset 2px 0 var(--accent);
+}
+
+.invite-token-select {
+  position: absolute;
+  inset: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  backdrop-filter: none;
+  box-shadow: none;
+  border-radius: inherit;
+  cursor: pointer;
+}
+
+/* 行负责绘制高亮，透明按钮只接收与整行范围相同的点击和焦点。 */
+button.invite-token-select:is(:hover, :active) {
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  transform: none;
+}
+
+.invite-token-select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 
 .invite-token-row + .invite-token-row {
@@ -3587,6 +3618,7 @@ dialog.created-token-dialog[open]:not(:modal) {
 }
 
 .invite-token-actions {
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: flex-end;
@@ -3813,19 +3845,6 @@ dialog.created-token-dialog[open]:not(:modal) {
   flex-wrap: wrap;
 }
 
-.skill-md-options {
-  display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: 12px;
-  flex-wrap: wrap;
-}
-
-.skill-url-field {
-  flex: 1;
-  min-width: 200px;
-}
-
 .skill-md-preview {
   margin: 0;
   max-height: 280px;
@@ -3840,6 +3859,227 @@ dialog.created-token-dialog[open]:not(:modal) {
   overflow: auto;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.skill-preview-dialog {
+  width: min(760px, calc(100% - 32px));
+  max-height: min(85dvh, 820px);
+  margin: auto;
+  color: var(--ink);
+}
+
+.skill-install-dialog {
+  width: min(620px, calc(100% - 32px));
+  max-height: min(calc(100dvh - 32px), 760px);
+  margin: auto;
+  color: var(--ink);
+}
+
+.skill-install-dialog[open],
+.skill-install-form {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.skill-install-form {
+  min-height: 0;
+}
+
+.skill-install-content {
+  display: grid;
+  gap: 16px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 0 3px 3px;
+  margin-inline: -3px;
+}
+
+.skill-install-group {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.skill-install-group legend {
+  margin-bottom: 7px;
+  padding: 0;
+}
+
+.skill-install-methods {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.skill-install-method,
+.skill-install-choices .skill-install-choice {
+  border: 1px solid var(--field-border, var(--line));
+  border-radius: var(--field-radius, 8px);
+  background: var(--field-background, var(--surface));
+}
+
+.skill-install-method,
+.skill-install-choice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.skill-install-method {
+  align-items: flex-start;
+  padding: 10px 11px;
+}
+
+.skill-install-method input,
+.skill-install-choice input {
+  flex-shrink: 0;
+  margin: 2px 0 0;
+  accent-color: var(--accent);
+}
+
+.skill-install-method-label {
+  display: grid;
+  gap: 3px;
+  line-height: 1.35;
+}
+
+.skill-install-method-label > span,
+.skill-install-token-label {
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.skill-install-method:has(:checked),
+.skill-install-choices .skill-install-choice:has(:checked) {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.skill-install-method:has(:focus-visible),
+.skill-install-choice:has(:focus-visible) {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.skill-install-method:has(:disabled),
+.skill-install-choice:has(:disabled) {
+  cursor: default;
+  opacity: 0.65;
+}
+
+.skill-install-target {
+  display: grid;
+  gap: 12px;
+  padding-block: 14px;
+  border-block: 1px solid var(--line);
+}
+
+.skill-install-choices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.skill-install-hosts {
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  padding: 3px 3px 5px;
+  margin-inline: -3px;
+  scrollbar-width: thin;
+}
+
+.skill-install-hosts .skill-install-choice {
+  flex: none;
+  white-space: nowrap;
+}
+
+.skill-install-choices .skill-install-choice {
+  position: relative;
+  min-height: 32px;
+  padding: 5px 11px;
+}
+
+.skill-install-choices input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  clip-path: inset(50%);
+}
+
+.skill-install-connection {
+  display: grid;
+  gap: 8px;
+}
+
+.skill-install-connection.has-agent-name {
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+}
+
+.skill-install-connection input {
+  min-width: 0;
+}
+
+.skill-install-directory {
+  display: flex;
+  gap: 8px;
+}
+
+.skill-install-directory input {
+  flex: 1;
+  min-width: 0;
+}
+
+.skill-install-directory button {
+  flex-shrink: 0;
+}
+
+.skill-install-actions {
+  padding-top: 12px;
+}
+
+@media (max-width: 479px) {
+  .skill-install-methods,
+  .skill-install-connection.has-agent-name {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .skill-install-method-label {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 8px;
+  }
+}
+
+@media (max-height: 640px) {
+  .skill-install-actions {
+    border-top: 1px solid var(--line);
+  }
+}
+
+.skill-preview-dialog[open] {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.skill-preview-body {
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  overflow-wrap: anywhere;
+}
+
+.skill-preview-body img {
+  max-width: 100%;
+  height: auto;
+}
+
+.skill-preview-dialog .modal-actions {
+  padding-top: 12px;
 }
 
 /* Agents 视图与接入指南弹窗（AgentDirectory） */

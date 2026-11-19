@@ -8,9 +8,20 @@ import { createMemoryBountyClient } from '../api/bounty-client';
 import { formatTimestamp } from '../bounty/helpers';
 import { clipboard } from '../clipboard';
 import { emptyAppConfig } from '../config-defaults';
-import type { AppConfig, FilePort } from '../contracts';
+import type { AppConfig, FilePort, SkillInstallRequest } from '../contracts';
 import { setLocalePreference } from '../i18n';
 import { bootThemeKey, builtInThemes, paletteKeys } from '../themes';
+
+function dispatchDialogPointer(dialog: HTMLDialogElement, type: string, clientX: number): void {
+  const event = new MouseEvent(type, { bubbles: true, clientX });
+  Object.defineProperty(event, 'pointerId', { value: 1 });
+  dialog.dispatchEvent(event);
+}
+
+function clickDialogBackdrop(dialog: HTMLDialogElement): void {
+  dispatchDialogPointer(dialog, 'pointerdown', -1);
+  dispatchDialogPointer(dialog, 'pointerup', -1);
+}
 
 async function flush(): Promise<void> {
   for (let i = 0; i < 6; i += 1) {
@@ -1096,8 +1107,7 @@ describe('任务板工作台外壳集成测试', () => {
     const confirm = () => dialog.querySelector<HTMLButtonElement>('[data-action="confirm-delete-bounty"]')!.click();
     const drawer = await openDelete(removable.id);
     expect(dialog.textContent).toContain(removable.title);
-    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-    dialog.close();
+    clickDialogBackdrop(dialog);
     await flush();
     expect(target.querySelector('[data-dialog="bounty-detail"]')).toBe(drawer);
     expect((await bountyApi.getBountyDetail(removable.id)).bounty.id).toBe(removable.id);
@@ -1669,11 +1679,14 @@ describe('任务板工作台外壳集成测试', () => {
     expect(emptyDescCard.querySelector('[data-slot="bounty-card-preview"]')).toBeNull();
   });
 
-  it('支持设置页 Agent 准入与协议（局域网免审开关关闭/开启、邀请令牌生成/复制/作废、附带令牌开关与 SKILL.md 预览导出）', async () => {
+  it('支持设置页 Agent 准入与协议（局域网免审开关关闭/开启、邀请令牌生成/复制/作废、SKILL.md 预览与选中令牌安装）', async () => {
     const copySpy = vi.spyOn(clipboard, 'writeText').mockResolvedValue(undefined);
-    const { port, exported } = createMemoryPort({
+    const { port } = createMemoryPort({
       preferences: { ...emptyAppConfig().preferences, workspaceSection: 'settings' },
     });
+    const installed = vi.fn(async (_request: SkillInstallRequest) => ['D:/demo/.agents/skills/taskrail-agent']);
+    port.installAgentSkill = installed;
+    port.pickSkillDirectory = async () => 'D:/demo';
     const bountyApi = createMemoryBountyClient();
 
     instance = mount(App, { target, props: { files: port, bountyApi } });
@@ -1705,12 +1718,32 @@ describe('任务板工作台外壳集成测试', () => {
     expect(lanHelpPopover.hidden).toBe(true);
 
     // 免审关闭状态下预览 SKILL.md，确认包含令牌占位符且要求邀请令牌
-    onboardingSection.querySelector<HTMLButtonElement>('[data-action="preview-skill-md"]')!.click();
+    const previewDialog = onboardingSection.querySelector<HTMLDialogElement>('[data-dialog="skill-preview"]')!;
+    expect(previewDialog.open).toBe(false);
+    previewDialog.showModal = () => { previewDialog.open = true; };
+    previewDialog.close = () => {
+      previewDialog.open = false;
+      previewDialog.dispatchEvent(new Event('close'));
+    };
+    const openPreview = onboardingSection.querySelector<HTMLButtonElement>('[data-action="preview-skill-md"]')!;
+    const closePreview = previewDialog.querySelector<HTMLButtonElement>('[data-action="close-skill-preview"]')!;
+    openPreview.click();
     await flush();
-    const initialPreview = onboardingSection.querySelector<HTMLElement>('[data-slot="skill-md-preview"]')!;
-    expect(initialPreview).not.toBeNull();
+    expect(previewDialog.open).toBe(true);
+    const initialPreview = previewDialog.querySelector<HTMLElement>('[data-slot="skill-md-preview"]')!;
+    expect(initialPreview.querySelector('h1')?.textContent).toBe('Taskrail Agent');
+    expect(initialPreview.querySelector('pre code')).not.toBeNull();
+    expect(initialPreview.querySelector('table')).not.toBeNull();
     expect(initialPreview.textContent).toContain('<INVITE_TOKEN>');
     expect(initialPreview.textContent).toContain('需要有效邀请令牌');
+    // 从面板内部拖到遮罩上时应保留预览。
+    dispatchDialogPointer(previewDialog, 'pointerdown', 0);
+    dispatchDialogPointer(previewDialog, 'pointerup', -1);
+    expect(previewDialog.open).toBe(true);
+    clickDialogBackdrop(previewDialog);
+    await flush();
+    expect(previewDialog.open).toBe(false);
+    expect(onboardingSection.querySelector('[data-slot="skill-md-preview"]')).toBeNull();
 
     // 切换局域网免审注册开关：关闭 -> 开启
     const lanSwitch = onboardingSection.querySelector<HTMLInputElement>(
@@ -1736,7 +1769,7 @@ describe('任务板工作台外壳集成测试', () => {
     onboardingSection.querySelector<HTMLButtonElement>('[data-action="create-invite-token"]')!.click();
     await flush();
 
-    const rawDialog = onboardingSection.querySelector<HTMLElement>('[data-slot="created-invite-raw-token"]');
+    const rawDialog = onboardingSection.querySelector<HTMLDialogElement>('[data-slot="created-invite-raw-token"]');
     expect(rawDialog).not.toBeNull();
     expect(rawDialog!.querySelector('[data-action="preview-skill-with-token"]')).toBeNull();
     const rawTokenText = rawDialog!.querySelector('code')?.textContent?.trim() ?? '';
@@ -1751,7 +1784,7 @@ describe('任务板工作台外壳集成测试', () => {
     );
     expect(onboardingSection.querySelector('[data-status="onboarding-feedback"]')).toBeNull();
     expect(target.querySelector('.toast-bar')).toBeNull();
-    rawDialog!.querySelector<HTMLButtonElement>('[data-action="dismiss-created-invite-dialog"]')!.click();
+    clickDialogBackdrop(rawDialog!);
     await flush();
     expect(onboardingSection.querySelector('[data-slot="created-invite-raw-token"]')).toBeNull();
 
@@ -1760,37 +1793,48 @@ describe('任务板工作台外壳集成测试', () => {
     expect(tokenList.textContent).toContain('本地 Codex 接入');
     expect(tokenList.textContent).toContain('有效');
 
-    // 自动开启「附带邀请令牌」后预览 SKILL.md（免审已开启 + 内嵌真实令牌）
-    onboardingSection.querySelector<HTMLButtonElement>('[data-action="preview-skill-md"]')!.click();
+    // 选中令牌只影响安装配置，预览和复制均保留占位符。
+    const selectToken = tokenList.querySelector<HTMLButtonElement>('[data-action="select-invite-token"]')!;
+    selectToken.click();
+    await flush();
+    expect(selectToken.getAttribute('aria-pressed')).toBe('true');
+    expect(onboardingSection.querySelector('[data-action="copy-skill-md"]')).toBeNull();
+    openPreview.click();
     await flush();
     const skillPreview = onboardingSection.querySelector<HTMLElement>('[data-slot="skill-md-preview"]')!;
     expect(skillPreview).not.toBeNull();
-    expect(skillPreview.textContent).toContain(rawTokenText);
+    expect(skillPreview.textContent).not.toContain(rawTokenText);
     expect(skillPreview.textContent).toContain('已开启局域网免审注册');
-
-    // 复制与导出 SKILL.md
-    onboardingSection.querySelector<HTMLButtonElement>('[data-action="copy-skill-md"]')!.click();
+    previewDialog.querySelector<HTMLButtonElement>('[data-action="copy-skill-md"]')!.click();
     await flush();
-    expect(copySpy).toHaveBeenLastCalledWith(skillPreview.textContent ?? '');
-
-    onboardingSection.querySelector<HTMLButtonElement>('[data-action="export-skill-md"]')!.click();
+    expect(copySpy.mock.lastCall?.[0]).toContain('# Taskrail Agent');
+    expect(copySpy.mock.lastCall?.[0]).not.toContain(rawTokenText);
+    expect(previewDialog.querySelector('[data-action="copy-skill-md"]')?.getAttribute('aria-label')).toBe('复制 SKILL.md');
+    expect(previewDialog.querySelector('[role="status"]')?.textContent).toBe('SKILL.md 已复制');
+    closePreview.click();
     await flush();
-    expect(exported.at(-1)?.filename).toBe('SKILL.md');
-    expect(exported.at(-1)?.text).toContain(rawTokenText);
 
-    // 关闭「附带邀请令牌」开关后重新预览，恢复 <INVITE_TOKEN> 占位符
-    const attachSwitch = onboardingSection.querySelector<HTMLInputElement>('#attach-invite-token-switch')!;
-    expect(attachSwitch.checked).toBe(true);
-    attachSwitch.click();
+    onboardingSection.querySelector<HTMLButtonElement>('[data-action="install-skill"]')!.click();
     await flush();
-    expect(attachSwitch.checked).toBe(false);
-    onboardingSection.querySelector<HTMLButtonElement>('[data-action="preview-skill-md"]')!.click();
+    const installDialog = onboardingSection.querySelector<HTMLDialogElement>('[data-dialog="skill-install"]')!;
+    expect(installDialog).not.toBeNull();
+    expect(installDialog.querySelector('input[type="password"]')).toBeNull();
+    expect(installed).not.toHaveBeenCalled();
+    installDialog.querySelector<HTMLButtonElement>('button.secondary-action')!.click();
     await flush();
-    expect(onboardingSection.querySelector('[data-slot="skill-md-preview"]')?.textContent).toContain(
-      '<INVITE_TOKEN>',
-    );
+    expect(installed).not.toHaveBeenCalled();
+    installDialog.querySelector<HTMLButtonElement>('[data-action="confirm-install-skill"]')!.click();
+    await flush();
+    expect(installed).toHaveBeenCalledWith({
+      agent: 'codex',
+      scope: 'project',
+      directory: 'D:/demo',
+      baseUrl: 'http://127.0.0.1:8420',
+      inviteToken: rawTokenText,
+    });
+    expect(onboardingSection.querySelector('[data-dialog="skill-install"]')).toBeNull();
 
-    // 打开「更多操作」菜单后作废邀请令牌，状态变为已作废，且隐藏「用此令牌预览」与附带开关
+    // 作废后令牌行不能再用于安装。
     const menuTrigger = tokenList.querySelector<HTMLButtonElement>('[data-action="toggle-invite-token-menu"]')!;
     expect(menuTrigger.getAttribute('aria-expanded')).toBe('false');
     menuTrigger.click();
@@ -1807,13 +1851,128 @@ describe('任务板工作台外壳集成测试', () => {
     await flush();
     expect(menuTrigger.getAttribute('aria-expanded')).toBe('false');
     expect(onboardingSection.querySelector('[data-action="preview-skill-with-token"]')).toBeNull();
-    expect(onboardingSection.querySelector('#attach-invite-token-switch')).toBeNull();
+    expect(tokenList.querySelector('[data-action="select-invite-token"]')).toBeNull();
 
     // 切换局域网免审注册开关：开启 -> 关闭
     lanSwitch.click();
     await flush();
     expect(lanSwitch.checked).toBe(false);
     expect((await bountyApi.getOnboardingSettings()).lan_open_registration).toBe(false);
+  });
+
+  it('安装历史邀请令牌时要求粘贴原值并使用选定的全局目标', async () => {
+    const { port } = createMemoryPort({
+      preferences: { ...emptyAppConfig().preferences, workspaceSection: 'settings' },
+    });
+    const install = vi.fn(async (_request: SkillInstallRequest) => ['D:/demo/.claude/skills/taskrail-agent']);
+    port.installAgentSkill = install;
+    port.pickSkillDirectory = async () => null;
+    const bountyApi = createMemoryBountyClient();
+    const token = await bountyApi.createInviteToken({ label: '历史令牌' });
+    instance = mount(App, { target, props: { files: port, bountyApi } });
+    await flush();
+
+    target.querySelector<HTMLButtonElement>('[data-action="select-invite-token"]')!.click();
+    await flush();
+    target.querySelector<HTMLButtonElement>('[data-action="install-skill"]')!.click();
+    await flush();
+    const dialog = target.querySelector<HTMLDialogElement>('[data-dialog="skill-install"]')!;
+    const setValue = (id: string, value: string) => {
+      const field = dialog.querySelector<HTMLInputElement>(id)!;
+      field.value = value;
+      field.dispatchEvent(new Event('input', { bubbles: true }));
+    };
+    setValue('#skill-install-url', 'https://board.example.test');
+    dialog.querySelector<HTMLInputElement>('[name="skill-install-scope"][value="global"]')!.click();
+    await flush();
+    const confirm = dialog.querySelector<HTMLButtonElement>('[data-action="confirm-install-skill"]')!;
+    dialog.querySelector<HTMLInputElement>('[name="skill-install-agent"][value="codex"]')!.click();
+    await flush();
+    expect(confirm.disabled).toBe(true);
+    dialog.querySelector<HTMLInputElement>('[name="skill-install-agent"][value="claude-code"]')!.click();
+    await flush();
+    setValue('#skill-install-token', 'wrong');
+    confirm.click();
+    await flush();
+    expect(install).not.toHaveBeenCalled();
+    expect(dialog.querySelector('[role="alert"]')?.textContent).toContain('原始值');
+    setValue('#skill-install-token', token.raw_token);
+    confirm.click();
+    await flush();
+    expect(install).toHaveBeenCalledOnce();
+    expect(install).toHaveBeenCalledWith({
+      agent: 'claude-code', scope: 'global', baseUrl: 'https://board.example.test',
+      inviteToken: token.raw_token,
+    });
+  });
+
+  it('可以单独配置 OAuth MCP 并选择是否附带简短 Skill', async () => {
+    const { port } = createMemoryPort({
+      preferences: { ...emptyAppConfig().preferences, workspaceSection: 'settings' },
+    });
+    const install = vi.fn(async (_request: SkillInstallRequest) => [
+      'D:/demo/.codex/config.toml',
+      'D:/demo/.zcode/cli/config.json',
+    ]);
+    port.installAgentSkill = install;
+    port.pickSkillDirectory = async () => 'D:/demo';
+    const bountyApi = createMemoryBountyClient({ lan_open_registration: false });
+    instance = mount(App, { target, props: { files: port, bountyApi } });
+    await flush();
+
+    const openInstall = target.querySelector<HTMLButtonElement>('[data-action="install-skill"]')!;
+    openInstall.click();
+    await flush();
+    const getDialog = () => target.querySelector<HTMLDialogElement>('[data-dialog="skill-install"]');
+    clickDialogBackdrop(getDialog()!);
+    await flush();
+    expect(getDialog()).toBeNull();
+    expect(install).not.toHaveBeenCalled();
+    openInstall.click();
+    await flush();
+    const dialog = getDialog()!;
+    const method = (value: string) => dialog.querySelector<HTMLInputElement>(`[name="skill-install-method"][value="${value}"]`)!;
+    const host = (value: string) => dialog.querySelector<HTMLInputElement>(`[name="skill-install-agent"][value="${value}"]`);
+    const global = () => dialog.querySelector<HTMLInputElement>('[name="skill-install-scope"][value="global"]')!;
+    expect(method('skill').checked).toBe(true);
+    host('shared')!.click();
+    await flush();
+    expect(global().checked).toBe(true);
+    expect(dialog.querySelector('#skill-install-directory')).toBeNull();
+    host('shared')!.click();
+    dialog.querySelector<HTMLInputElement>('[name="skill-install-scope"][value="custom"]')!.click();
+    await flush();
+    method('mcp-stdio').click();
+    await flush();
+    expect(dialog.querySelector('#skill-install-agent-name')).not.toBeNull();
+    expect(dialog.querySelector<HTMLInputElement>('[name="skill-install-scope"][value="project"]')!.checked).toBe(true);
+    expect(dialog.querySelector('[name="skill-install-scope"][value="custom"]')).toBeNull();
+    expect(host('shared')).toBeNull();
+    host('dsh')!.click();
+    await flush();
+    expect(global().checked).toBe(true);
+    expect(dialog.querySelector('#skill-install-directory')).toBeNull();
+    method('mcp-http').click();
+    await flush();
+    expect(host('dsh')).toBeNull();
+    for (const agent of ['devin', 'antigravity', 'grok-build', 'zcode']) {
+      expect(host(agent)).not.toBeNull();
+    }
+    host('zcode')!.click();
+    global().click();
+    const address = dialog.querySelector<HTMLInputElement>('#skill-install-url')!;
+    address.value = 'https://rail.example.test';
+    address.dispatchEvent(new Event('input', { bubbles: true }));
+    await flush();
+    expect(dialog.querySelector('#skill-install-agent-name')).toBeNull();
+    expect(dialog.querySelector<HTMLInputElement>('[name="skill-install-include-guide"]')!.checked).toBe(false);
+    dialog.querySelector<HTMLButtonElement>('[data-action="confirm-install-skill"]')!.click();
+    await flush();
+    expect(install).toHaveBeenCalledWith({
+      mode: 'mcp-http', agent: 'codex', additionalAgents: ['zcode'], scope: 'global',
+      baseUrl: 'https://rail.example.test', includeGuide: false,
+    });
+    expect(target.querySelector('.toast-bar')?.textContent).toContain('已配置 2 处 MCP');
   });
 
   it('邀请令牌需二次确认后删除，取消不删除且刷新失败仍清理本地明文与缓存', async () => {
@@ -2088,7 +2247,7 @@ describe('任务板工作台外壳集成测试', () => {
     expect(target.querySelector('.toast-banner')).toBeNull();
   });
 
-  it('支持免审开关失败回滚、服务连接切换清理旧令牌与 SKILL.md 预览，以及浏览器 Blob 导出回退', async () => {
+  it('支持免审开关失败回滚、服务连接切换清理旧令牌与 SKILL.md 预览，以及浏览器禁用本地安装', async () => {
     const baseApi = createMemoryBountyClient();
     const { port: desktopPort } = createMemoryPort({
       preferences: { ...emptyAppConfig().preferences, workspaceSection: 'settings' },
@@ -2158,161 +2317,60 @@ describe('任务板工作台外壳集成测试', () => {
     instance = null;
     vi.unstubAllGlobals();
 
-    // 验证浏览器无 exportText 端口时，导出 SKILL.md 走 Blob 下载回退路径
-    const { port: basePort } = createMemoryPort({
+    const { port: browserPort } = createMemoryPort({
       preferences: { ...emptyAppConfig().preferences, workspaceSection: 'settings' },
-    });
-    const browserFallbackPort: FilePort = {
-      isBrowser: true,
-      loadConfig: basePort.loadConfig,
-      saveConfig: basePort.saveConfig,
-      openExternalLink: basePort.openExternalLink,
-    };
-    const createObjectUrlSpy = vi.fn(() => 'blob:mock-skill-url');
-    const revokeObjectUrlSpy = vi.fn();
-    Object.defineProperty(URL, 'createObjectURL', {
-      value: createObjectUrlSpy,
-      configurable: true,
-      writable: true,
-    });
-    Object.defineProperty(URL, 'revokeObjectURL', {
-      value: revokeObjectUrlSpy,
-      configurable: true,
-      writable: true,
-    });
-    const anchorClickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
-
+    }, true);
     instance = mount(App, {
       target,
-      props: { files: browserFallbackPort, bountyApi: createMemoryBountyClient() },
+      props: { files: browserPort, bountyApi: createMemoryBountyClient() },
     });
     await flush();
-
-    target
-      .querySelector<HTMLElement>('[data-section="agent-onboarding"]')!
-      .querySelector<HTMLButtonElement>('[data-action="export-skill-md"]')!
-      .click();
-    await flush();
-
-    expect(createObjectUrlSpy).toHaveBeenCalledTimes(1);
-    expect(anchorClickSpy).toHaveBeenCalledTimes(1);
-    expect(revokeObjectUrlSpy).toHaveBeenCalledWith('blob:mock-skill-url');
-    expect(
-      target.querySelector('[data-section="agent-onboarding"] [data-status="onboarding-feedback"]'),
-    ).toBeNull();
-    expect(target.querySelector('.toast-bar')?.textContent).toContain('SKILL.md 已导出');
+    expect(target.querySelector<HTMLButtonElement>('[data-action="install-skill"]')?.disabled).toBe(true);
   });
 
-  it('修改服务地址覆盖、关闭附带令牌或作废令牌后复制/导出 SKILL.md 必重新拉取最新参数且失败时不误报成功', async () => {
+  it('预览弹窗复制当前 SKILL.md，免审策略变更后重新加载', async () => {
     const copySpy = vi.spyOn(clipboard, 'writeText').mockResolvedValue(undefined);
-    const { port, exported } = createMemoryPort({
+    const { port } = createMemoryPort({
       preferences: { ...emptyAppConfig().preferences, workspaceSection: 'settings' },
     });
-    const bountyApi = createMemoryBountyClient();
-    const getSkillSpy = vi.spyOn(bountyApi, 'getSkillMarkdown');
-
+    const bountyApi = createMemoryBountyClient({ lan_open_registration: false });
+    const getSkill = vi.spyOn(bountyApi, 'getSkillMarkdown');
     instance = mount(App, { target, props: { files: port, bountyApi } });
     await flush();
 
-    const onboardingSection = target.querySelector<HTMLElement>('[data-section="agent-onboarding"]')!;
+    const onboarding = target.querySelector<HTMLElement>('[data-section="agent-onboarding"]')!;
+    const preview = onboarding.querySelector<HTMLDialogElement>('[data-dialog="skill-preview"]')!;
+    const open = onboarding.querySelector<HTMLButtonElement>('[data-action="preview-skill-md"]')!;
+    const copy = () => preview.querySelector<HTMLButtonElement>('[data-action="copy-skill-md"]')!;
+    expect(onboarding.querySelector('#skill-base-url-input')).toBeNull();
+    expect(copy()).toBeNull();
+    open.click();
+    await flush();
+    expect(getSkill).toHaveBeenLastCalledWith({});
+    const callsAfterPreview = getSkill.mock.calls.length;
+    copy().click();
+    await flush();
+    expect(getSkill).toHaveBeenCalledTimes(callsAfterPreview);
+    expect(copySpy.mock.lastCall?.[0]).toContain('<INVITE_TOKEN>');
+    expect(copySpy.mock.lastCall?.[0]).toContain('http://127.0.0.1:8420');
+    preview.querySelector<HTMLButtonElement>('[data-action="close-skill-preview"]')!.click();
+    await flush();
 
-    // 生成令牌并预览 SKILL.md
-    onboardingSection.querySelector<HTMLButtonElement>('[data-action="create-invite-token"]')!.click();
+    onboarding.querySelector<HTMLInputElement>('[data-action="toggle-lan-registration"]')!.click();
     await flush();
-    const rawToken = onboardingSection
-      .querySelector<HTMLElement>('[data-slot="created-invite-raw-token"] code')
-      ?.textContent?.trim()!;
-    expect(rawToken.startsWith('tr_inv_')).toBe(true);
+    getSkill.mockRejectedValueOnce(new Error('SKILL_LOAD_FAILED'));
+    open.click();
+    await flush();
+    expect(copy()).toBeNull();
+    expect(copySpy).toHaveBeenCalledOnce();
+    expect(onboarding.querySelector('[data-status="onboarding-error"]')?.textContent).toContain('SKILL_LOAD_FAILED');
 
-    onboardingSection
-      .querySelector<HTMLButtonElement>('[data-action="dismiss-created-invite-dialog"]')!
-      .click();
+    open.click();
     await flush();
-    onboardingSection
-      .querySelector<HTMLButtonElement>('[data-action="preview-skill-md"]')!
-      .click();
+    expect(preview.querySelector('[data-slot="skill-md-preview"]')?.textContent).toContain('已开启局域网免审注册');
+    copy().click();
     await flush();
-    expect(onboardingSection.querySelector('[data-slot="skill-md-preview"]')?.textContent).toContain(
-      rawToken,
-    );
-    const callsAfterPreview = getSkillSpy.mock.calls.length;
-
-    // 修改服务地址覆盖后，旧预览立即失效，但不盲目在输入时发请求；直接点击「复制 SKILL.md」时按新地址重新生成
-    const baseUrlInput = onboardingSection.querySelector<HTMLInputElement>('#skill-base-url-input')!;
-    baseUrlInput.value = 'http://192.168.10.20:9000';
-    baseUrlInput.dispatchEvent(new Event('input', { bubbles: true }));
-    await flush();
-    expect(onboardingSection.querySelector('[data-slot="skill-md-preview"]')).toBeNull();
-    expect(getSkillSpy).toHaveBeenCalledTimes(callsAfterPreview);
-
-    onboardingSection.querySelector<HTMLButtonElement>('[data-action="copy-skill-md"]')!.click();
-    await flush();
-    expect(getSkillSpy).toHaveBeenCalledTimes(callsAfterPreview + 1);
-    expect(getSkillSpy).toHaveBeenLastCalledWith({
-      baseUrl: 'http://192.168.10.20:9000',
-      inviteToken: rawToken,
-    });
-    expect(copySpy.mock.calls.at(-1)?.[0]).toContain('http://192.168.10.20:9000');
-    expect(copySpy.mock.calls.at(-1)?.[0]).toContain(rawToken);
-
-    // 关闭「附带邀请令牌」开关后旧预览清除，直接点击「导出 SKILL.md」不携带旧令牌
-    const attachSwitch = onboardingSection.querySelector<HTMLInputElement>('#attach-invite-token-switch')!;
-    attachSwitch.click();
-    await flush();
-    expect(onboardingSection.querySelector('[data-slot="skill-md-preview"]')).toBeNull();
-
-    onboardingSection.querySelector<HTMLButtonElement>('[data-action="export-skill-md"]')!.click();
-    await flush();
-    expect(getSkillSpy).toHaveBeenLastCalledWith({
-      baseUrl: 'http://192.168.10.20:9000',
-    });
-    expect(exported.at(-1)?.text).toContain('http://192.168.10.20:9000');
-    expect(exported.at(-1)?.text).toContain('<INVITE_TOKEN>');
-    expect(exported.at(-1)?.text).not.toContain(rawToken);
-
-    // 重新开启附带令牌并预览，然后作废令牌，直接点击「复制 SKILL.md」不得携带已作废令牌
-    attachSwitch.click();
-    await flush();
-    onboardingSection.querySelector<HTMLButtonElement>('[data-action="preview-skill-md"]')!.click();
-    await flush();
-    expect(onboardingSection.querySelector('[data-slot="skill-md-preview"]')?.textContent).toContain(
-      rawToken,
-    );
-
-    onboardingSection
-      .querySelector<HTMLButtonElement>('[data-action="toggle-invite-token-menu"]')!
-      .click();
-    await flush();
-    onboardingSection
-      .querySelector<HTMLButtonElement>('[data-action="revoke-invite-token"]')!
-      .click();
-    await flush();
-    expect(onboardingSection.querySelector('[data-slot="skill-md-preview"]')).toBeNull();
-
-    baseUrlInput.value = 'http://127.0.0.1:8420';
-    baseUrlInput.dispatchEvent(new Event('input', { bubbles: true }));
-    await flush();
-    onboardingSection.querySelector<HTMLButtonElement>('[data-action="copy-skill-md"]')!.click();
-    await flush();
-    expect(copySpy.mock.calls.at(-1)?.[0]).toContain('http://127.0.0.1:8420');
-    expect(copySpy.mock.calls.at(-1)?.[0]).not.toContain(rawToken);
-
-    // 切换免审开关使预览失效后，若重新加载失败则中止复制且不提示成功
-    onboardingSection
-      .querySelector<HTMLInputElement>('[data-action="toggle-lan-registration"]')!
-      .click();
-    await flush();
-    expect(onboardingSection.querySelector('[data-slot="skill-md-preview"]')).toBeNull();
-
-    const copyCallsBeforeFail = copySpy.mock.calls.length;
-    getSkillSpy.mockRejectedValueOnce(new Error('SKILL_LOAD_FAILED'));
-    onboardingSection.querySelector<HTMLButtonElement>('[data-action="copy-skill-md"]')!.click();
-    await flush();
-    expect(copySpy).toHaveBeenCalledTimes(copyCallsBeforeFail);
-    expect(onboardingSection.querySelector('[data-status="onboarding-error"]')?.textContent).toContain(
-      'SKILL_LOAD_FAILED',
-    );
-    expect(onboardingSection.querySelector('[data-status="onboarding-feedback"]')).toBeNull();
+    expect(copySpy.mock.lastCall?.[0]).toContain('已开启局域网免审注册');
   });
 
   it('服务 A 延迟返回 createInviteToken 期间切换到服务 B 后，旧响应不会写入明文令牌或开启附带开关', async () => {
@@ -2388,7 +2446,7 @@ describe('任务板工作台外壳集成测试', () => {
     await flush();
 
     expect(onboardingSection.querySelector('[data-slot="created-invite-raw-token"]')).toBeNull();
-    expect(onboardingSection.querySelector('#attach-invite-token-switch')).toBeNull();
+    expect(onboardingSection.querySelector('[data-action="select-invite-token"]')).toBeNull();
     expect(onboardingSection.textContent).not.toContain(createdFromA.raw_token);
     expect(onboardingSection.querySelector('[data-status="onboarding-error"]')).toBeNull();
   });
@@ -2479,11 +2537,13 @@ describe('任务板工作台外壳集成测试', () => {
     expect(tags).toEqual(['rust']);
   });
 
-  it('作废令牌后即使后续准入刷新返回 503，仍保持作废状态且不复用含旧令牌的 SKILL.md 缓存', async () => {
+  it('作废后刷新准入返回 503 时仍禁止选中该令牌安装', async () => {
     const copySpy = vi.spyOn(clipboard, 'writeText').mockResolvedValue(undefined);
-    const { port, exported } = createMemoryPort({
+    const { port } = createMemoryPort({
       preferences: { ...emptyAppConfig().preferences, workspaceSection: 'settings' },
     });
+    port.installAgentSkill = vi.fn(async () => ['D:/unused']);
+    port.pickSkillDirectory = async () => 'D:/unused';
     const bountyApi = createMemoryBountyClient();
     const originalGetOnboarding = bountyApi.getOnboardingSettings.bind(bountyApi);
     const getSkillSpy = vi.spyOn(bountyApi, 'getSkillMarkdown');
@@ -2493,7 +2553,7 @@ describe('任务板工作台外壳集成测试', () => {
 
     const onboardingSection = target.querySelector<HTMLElement>('[data-section="agent-onboarding"]')!;
 
-    // 生成令牌并预览含明文令牌的 SKILL.md
+    // 生成令牌并预览 SKILL.md
     onboardingSection.querySelector<HTMLButtonElement>('[data-action="create-invite-token"]')!.click();
     await flush();
     const rawToken = onboardingSection
@@ -2509,9 +2569,12 @@ describe('任务板工作台外壳集成测试', () => {
       .querySelector<HTMLButtonElement>('[data-action="preview-skill-md"]')!
       .click();
     await flush();
-    expect(onboardingSection.querySelector('[data-slot="skill-md-preview"]')?.textContent).toContain(
+    expect(onboardingSection.querySelector('[data-slot="skill-md-preview"]')?.textContent).not.toContain(
       rawToken,
     );
+
+    onboardingSection.querySelector<HTMLButtonElement>('[data-action="select-invite-token"]')!.click();
+    await flush();
 
     // 令作废后的 getOnboardingSettings 刷新返回 503
     vi.spyOn(bountyApi, 'getOnboardingSettings')
@@ -2539,23 +2602,29 @@ describe('任务板工作台外壳集成测试', () => {
       onboardingSection.querySelector<HTMLElement>('[data-invite-token-status]')?.dataset
         .inviteTokenStatus,
     ).toBe('revoked');
-    expect(onboardingSection.querySelector('#attach-invite-token-switch')).toBeNull();
+    expect(onboardingSection.querySelector('[data-action="select-invite-token"]')).toBeNull();
     expect(onboardingSection.querySelector('[data-slot="created-invite-raw-token"]')).toBeNull();
     expect(onboardingSection.querySelector('[data-slot="skill-md-preview"]')).toBeNull();
 
-    // 点击复制 SKILL.md 必须重新拉取不含已作废令牌的新文档
+    // 重新打开预览时加载不含已作废令牌的新文档。
+    onboardingSection.querySelector<HTMLButtonElement>('[data-action="preview-skill-md"]')!.click();
+    await flush();
     onboardingSection.querySelector<HTMLButtonElement>('[data-action="copy-skill-md"]')!.click();
     await flush();
     expect(getSkillSpy).toHaveBeenCalledTimes(callsBeforeRevoke + 1);
     expect(getSkillSpy.mock.calls.at(-1)?.[0]).not.toHaveProperty('inviteToken');
     expect(copySpy.mock.calls.at(-1)?.[0]).not.toContain(rawToken);
     expect(copySpy.mock.calls.at(-1)?.[0]).toContain('<INVITE_TOKEN>');
-
-    // 点击导出 SKILL.md 同样不得包含已作废令牌
-    onboardingSection.querySelector<HTMLButtonElement>('[data-action="export-skill-md"]')!.click();
+    onboardingSection.querySelector<HTMLButtonElement>('[data-action="close-skill-preview"]')!.click();
     await flush();
-    expect(exported.at(-1)?.text).not.toContain(rawToken);
-    expect(exported.at(-1)?.text).toContain('<INVITE_TOKEN>');
+
+    onboardingSection.querySelector<HTMLButtonElement>('[data-action="install-skill"]')!.click();
+    await flush();
+    const dialog = onboardingSection.querySelector<HTMLDialogElement>('[data-dialog="skill-install"]')!;
+    dialog.querySelector<HTMLButtonElement>('[data-action="confirm-install-skill"]')!.click();
+    await flush();
+    expect(port.installAgentSkill).not.toHaveBeenCalled();
+    expect(dialog.querySelector('[role="alert"]')?.textContent).toContain('选中有效的邀请令牌');
   });
 
   it('准入设置或 Agent 名录重试加载与业务操作并发时互不取消，按钮不锁死且一次性明文令牌不丢失', async () => {
@@ -2709,6 +2778,8 @@ describe('任务板工作台外壳集成测试', () => {
         .click();
       await flush();
 
+      onboardingSection.querySelector<HTMLButtonElement>('[data-action="preview-skill-md"]')!.click();
+      await flush();
       onboardingSection
         .querySelector<HTMLButtonElement>('[data-action="copy-skill-md"]')!
         .click();

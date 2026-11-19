@@ -55,13 +55,13 @@
 
 ## 连接
 
-桌面启动时监听 `127.0.0.1:0`，数据库为 `app_data_dir()/taskrail.db`。调用 Tauri 命令 `get_embedded_server_info` 获取：
+桌面在 `127.0.0.1` 监听，按安装路径复用上次的端口。数据库为 `app_data_dir()/taskrail.db`。通过 Tauri 命令 `get_embedded_server_info` 读取实际地址。
 
 ```json
 {"base_url":"http://127.0.0.1:49152","admin_token":"64位十六进制会话密钥","db_path":"数据库绝对路径"}
 ```
 
-端口由系统分配。密钥每次启动重新生成，不落盘。Android 不启动内嵌服务，也不注册此命令。
+首次启动或上次端口已占用时，由系统分配新端口。CLI 和 STDIO 随内嵌服务切换到新地址。使用旧地址的 HTTP MCP 宿主需要更新 URL 并重新授权。管理员会话密钥每次启动重新生成，只保存在内存中。Android 不启动内嵌服务，也不注册此命令。
 
 独立服务启动方式：
 
@@ -72,6 +72,15 @@ cargo run --manifest-path src-tauri/Cargo.toml --bin taskrail-server -- --bind 1
 参数可分别使用 `TASKRAIL_BIND`、`TASKRAIL_DB`、`TASKRAIL_ADMIN_TOKEN` 环境变量；命令行覆盖对应环境变量。支持 `--key value` 与 `--key=value`。默认监听 `127.0.0.1:8420`，默认数据库为当前目录的 `taskrail.db`，管理员密钥必填。`--help` 显示用法。Ctrl+C 触发关闭；Unix 也接受 SIGTERM。关闭时停止接入并等待在途请求。
 
 健康检查、Agent 注册和公开接入文档可匿名访问。管理接口携带 `Authorization: Bearer <admin_token>`；`/api/v1/agent/*` 携带 `Authorization: Bearer <agent_api_key>`。两类凭证不互通。允许跨域 GET、POST、PUT、PATCH、DELETE、OPTIONS 和 Authorization、Content-Type 请求头，不使用 Cookie。JSON 字段名全部为 `snake_case`。
+
+## Agent CLI 与 MCP
+
+在桌面设置的「Agent 准入与协议」中选择「安装 Skill」或「配置 MCP」。两项可独立使用。Skill 通过桌面包中的 `taskrail-agent` 执行命令。独立部署时，可用 `cargo build --release --locked --bin taskrail-agent` 构建 Agent 所在平台的程序。运行 `taskrail-agent commands` 查看命令。
+
+- **STDIO**：宿主运行 `taskrail-agent --config FILE mcp AGENT_NAME`。首次启动时，程序使用配置中的邀请令牌注册。注册成功后，程序用 Agent 密钥替换邀请令牌。已注册的配置可省略 `AGENT_NAME`。
+- **Streamable HTTP**：宿主连接 `/mcp` 并打开 OAuth 授权页。用邀请令牌创建 Agent，或用现有 Agent 密钥授权。Codex 可运行 `codex mcp login taskrail` 启动授权。服务支持动态注册客户端、S256 PKCE 和刷新令牌轮换，OAuth 令牌只用于当前 MCP 地址。停用或吊销 Agent 会拒绝后续 MCP 请求。
+
+本机回环地址可以直接使用 HTTP。供其他机器接入时，在 HTTPS 反向代理后运行独立服务，并将 `TASKRAIL_MCP_PUBLIC_URL` 设为对外的 HTTPS 根地址，例如 `https://rail.example.com`。代理转发 `/mcp`、`/oauth/*` 和 `/.well-known/oauth-*`，保留对外 `Host`。宿主填写 `https://rail.example.com/mcp`，在该地址完成授权。
 
 ## 路由
 
@@ -284,7 +293,7 @@ Agent 任务列表和详情仅显示已发布（`status != DRAFT` 且 `published
 
 ## 动态接入文档
 
-`/skill.md` 和 `/api/v1/skill.md` 返回 `text/markdown; charset=utf-8`，无需凭证。显式提供邀请时，接受 `?invite_token=...`、`?token=...` 或 Bearer 头，并校验邀请有效性。查询优先级为 `invite_token`、`token`、Bearer。有效邀请会写入注册示例，不消耗使用次数；未提供邀请时使用 `<INVITE_TOKEN>` 占位符。管理员导出接口仅从查询参数接受邀请，管理员鉴权头不会写入文档。
+`/skill.md` 和 `/api/v1/skill.md` 返回 `text/markdown; charset=utf-8`，无需凭证。显式提供邀请时，接受 `?invite_token=...`、`?token=...` 或 Bearer 头，并校验邀请有效性。查询优先级为 `invite_token`、`token`、Bearer。提供邀请时仅验证有效性，不消耗使用次数。注册示例始终使用 `<INVITE_TOKEN>` 占位符。管理员导出接口仅从查询参数接受邀请，管理员鉴权头不会写入文档。
 
 文档地址优先采用 `X-Forwarded-Host`，其次为 `Host`。协议采用 `X-Forwarded-Proto`，缺省为 `http`。代理头有多个值时使用首个值。没有 Host 时使用实际监听地址；直接调用 `server::router` 构造路由时回退至 `http://127.0.0.1:8420`。管理员可用 `base_url` 覆盖文档地址；地址须为不带用户信息、路径、查询或片段的 HTTP(S) 根地址。
 

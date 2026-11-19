@@ -1,6 +1,14 @@
 //! 文件职责：连接桌面外壳命令与配置存储。
 //! 定义范围：Tauri 启动入口和平台命令适配。
 #[cfg(not(target_os = "android"))]
+pub mod agent_cli;
+#[cfg(not(target_os = "android"))]
+mod agent_mcp_install;
+#[cfg(not(target_os = "android"))]
+mod agent_skill;
+#[cfg(not(target_os = "android"))]
+mod agent_tools;
+#[cfg(not(target_os = "android"))]
 mod desktop_update;
 mod external_link;
 #[cfg(not(target_os = "android"))]
@@ -32,6 +40,7 @@ struct FileState {
 struct EmbeddedServerState {
     info: server::models::EmbeddedServerInfo,
     handle: Mutex<Option<server::RunningServer>>,
+    address_file: PathBuf,
 }
 
 #[cfg(not(target_os = "android"))]
@@ -137,6 +146,85 @@ async fn export_markdown_file(
     .await
 }
 
+/// 安装请求仅能写入固定名称的 Skill 包；凭证单独写入本地配置。
+#[cfg(not(target_os = "android"))]
+#[tauri::command]
+async fn install_agent_skill(
+    request: agent_skill::InstallRequest,
+    app: tauri::AppHandle,
+    state: State<'_, FileState>,
+) -> Result<Vec<PathBuf>, FileError> {
+    let home = app
+        .path()
+        .home_dir()
+        .map_err(|_| FileError::new("SKILL_INSTALL_INPUT", "无法确定用户目录。"))?;
+    let data = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| FileError::new("SKILL_INSTALL_INPUT", "无法确定 Taskrail 数据目录。"))?;
+    let executable = std::env::current_exe()
+        .map_err(FileError::io)?
+        .with_file_name(if cfg!(windows) {
+            "taskrail-agent.exe"
+        } else {
+            "taskrail-agent"
+        });
+    let embedded = app
+        .try_state::<EmbeddedServerState>()
+        .map(|state| (state.info.base_url.clone(), state.address_file.clone()));
+    disk(state.gate.clone(), move || {
+        let embedded = embedded
+            .as_ref()
+            .map(|(url, path)| (url.as_str(), path.as_path()));
+        agent_skill::install(request, &home, &data, &executable, embedded)
+    })
+    .await
+}
+
+/// 优先复用上次的回环端口，使宿主保存的 HTTP MCP 地址在正常重启后有效。
+/// 如果端口已被占用，CLI 和 STDIO 通过独立的活动地址文件读取新端口。
+#[cfg(not(target_os = "android"))]
+async fn start_embedded(
+    data: &Path,
+    address_file: &Path,
+) -> Result<server::RunningServer, Box<dyn std::error::Error>> {
+    let last_port = address_file.with_extension("port.json");
+    let port = std::fs::read(&last_port)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<u16>(&bytes).ok())
+        .unwrap_or(0);
+    let config = |port| -> Result<_, server::error::ApiError> {
+        Ok(server::ServerConfig {
+            bind: (std::net::Ipv4Addr::LOCALHOST, port).into(),
+            db_path: data.join("taskrail.db"),
+            admin_token: server::random_admin_token()?,
+            mode: server::ServerMode::Embedded,
+        })
+    };
+    let handle = match server::start(config(port)?).await {
+        Err(_) if port != 0 => server::start(config(0)?).await?,
+        result => result?,
+    };
+    let bind = url::Url::parse(&handle.info.base_url)?;
+    storage::save_json(&last_port, &serde_json::json!(bind.port().unwrap_or(80)))
+        .map_err(|error| error.message)?;
+    storage::staged_file(address_file, handle.info.base_url.as_bytes())
+        .map_err(|error| error.message)?
+        .persist(address_file)?;
+    Ok(handle)
+}
+
+/// 与桌面实例仲裁使用相同的程序路径身份，允许不同安装同时维护各自的连接地址。
+#[cfg(not(target_os = "android"))]
+fn embedded_address_file(data: &Path, executable: &Path) -> Result<PathBuf, FileError> {
+    let path = storage::canonical_path(executable, false)?;
+    let identity = storage::file_identity(&path);
+    Ok(data.join(format!(
+        "embedded-{}",
+        storage::fingerprint(identity.as_bytes())
+    )))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[cfg(target_os = "windows")]
@@ -165,16 +253,14 @@ pub fn run() {
     let builder = tauri::Builder::default().setup(move |app| {
         #[cfg(not(target_os = "android"))]
         {
-            let config = server::ServerConfig {
-                bind: "127.0.0.1:0".parse()?,
-                db_path: app.path().app_data_dir()?.join("taskrail.db"),
-                admin_token: server::random_admin_token()?,
-                mode: server::ServerMode::Embedded,
-            };
-            let handle = tauri::async_runtime::block_on(server::start(config))?;
+            let data = app.path().app_data_dir()?;
+            let address_file = embedded_address_file(&data, &std::env::current_exe()?)
+                .map_err(|error| error.message)?;
+            let handle = tauri::async_runtime::block_on(start_embedded(&data, &address_file))?;
             app.manage(EmbeddedServerState {
                 info: handle.info.clone(),
                 handle: Mutex::new(Some(handle)),
+                address_file,
             });
         }
         #[cfg(target_os = "windows")]
@@ -205,6 +291,8 @@ pub fn run() {
             export_theme_file,
             export_markdown_file,
             #[cfg(not(target_os = "android"))]
+            install_agent_skill,
+            #[cfg(not(target_os = "android"))]
             get_embedded_server_info,
             #[cfg(not(target_os = "android"))]
             desktop_update::desktop_update_check,
@@ -223,6 +311,7 @@ pub fn run() {
             #[cfg(not(target_os = "android"))]
             if matches!(event, tauri::RunEvent::Exit) {
                 let state = app.state::<EmbeddedServerState>();
+                let _ = std::fs::remove_file(&state.address_file);
                 let handle = state.handle.lock().expect("服务状态锁不可用").take();
                 if let Some(handle) = handle {
                     if let Err(error) = tauri::async_runtime::block_on(handle.shutdown()) {
@@ -238,6 +327,31 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(not(target_os = "android"))]
+    #[tokio::test]
+    async fn embedded_mcp_addresses_are_isolated_by_installation_and_reused() {
+        let directory = tempfile::tempdir().unwrap();
+        let first = directory.path().join("first.exe");
+        let second = directory.path().join("second.exe");
+        std::fs::write(&first, []).unwrap();
+        std::fs::write(&second, []).unwrap();
+        let data = directory.path().join("same-app-data");
+        let first = embedded_address_file(&data, &first).unwrap();
+        let second = embedded_address_file(&data, &second).unwrap();
+        assert_ne!(first, second);
+        let a = start_embedded(&data, &first).await.unwrap();
+        let b = start_embedded(&data, &second).await.unwrap();
+        let address = a.info.base_url.clone();
+        assert_eq!(std::fs::read_to_string(&first).unwrap(), address);
+        assert_eq!(std::fs::read_to_string(&second).unwrap(), b.info.base_url);
+        a.shutdown().await.unwrap();
+        let a = start_embedded(&data, &first).await.unwrap();
+        assert_eq!(a.info.base_url, address);
+        assert_eq!(std::fs::read_to_string(&second).unwrap(), b.info.base_url);
+        a.shutdown().await.unwrap();
+        b.shutdown().await.unwrap();
+    }
 
     #[cfg(not(target_os = "android"))]
     #[test]

@@ -208,3 +208,31 @@ CREATE TABLE IF NOT EXISTS bounty_dependencies (
     CHECK (bounty_id <> depends_on_bounty_id)
 );
 CREATE INDEX IF NOT EXISTS bounty_dependencies_reverse ON bounty_dependencies(depends_on_bounty_id, bounty_id);
+
+CREATE TABLE IF NOT EXISTS mcp_clients (
+    id TEXT PRIMARY KEY,
+    redirects TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS mcp_flows (
+    hash TEXT PRIMARY KEY,
+    grant_json TEXT NOT NULL,
+    expires INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS mcp_codes (
+    hash TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+    client_id TEXT NOT NULL REFERENCES mcp_clients(id) ON DELETE CASCADE,
+    redirect_uri TEXT NOT NULL,
+    resource TEXT NOT NULL,
+    challenge TEXT NOT NULL,
+    expires INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS mcp_tokens (
+    access_hash TEXT PRIMARY KEY,
+    refresh_hash TEXT NOT NULL UNIQUE,
+    client_id TEXT NOT NULL REFERENCES mcp_clients(id) ON DELETE CASCADE,
+    agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+    resource TEXT NOT NULL,
+    access_expires INTEGER NOT NULL,
+    refresh_expires INTEGER NOT NULL
+);

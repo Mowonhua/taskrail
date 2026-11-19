@@ -274,8 +274,7 @@ async fn publishing_authentication_and_validation_boundaries() {
         .await
         .unwrap();
     for text in [
-        "POST",
-        "/api/v1/agent/bounties",
+        "taskrail_create_task",
         "agent_draft_policy",
         "created_by_agent_id",
         "DRAFT",

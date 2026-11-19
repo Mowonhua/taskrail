@@ -11,8 +11,9 @@ fn main() {
         // 因此所有 Windows 链接目标都需要 Common Controls v6 的激活清单。
         println!("cargo:rustc-link-arg=/MANIFEST:EMBED");
         println!("cargo:rustc-link-arg=/MANIFESTDEPENDENCY:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'");
-        // 两个二进制均链接 Tauri 应用资源中的清单；禁止重复生成 MANIFEST 资源。
+        // Cargo 二进制已链接 Tauri 应用资源中的清单，链接器只为测试目标生成清单。
         println!("cargo:rustc-link-arg-bin=taskrail=/MANIFEST:NO");
         println!("cargo:rustc-link-arg-bin=taskrail-server=/MANIFEST:NO");
+        println!("cargo:rustc-link-arg-bin=taskrail-agent=/MANIFEST:NO");
     }
 }

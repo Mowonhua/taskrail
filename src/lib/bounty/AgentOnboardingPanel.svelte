@@ -1,7 +1,6 @@
 <script lang="ts">
   /**
-   * 文件职责：在设置页面集中管理外部 Agent 准入与协议（局域网免审注册开关、邀请令牌生成、作废与删除、SKILL.md 在线预览与导出）。
-   * 定义范围：免审状态切换、一次性明文令牌横幅展示、邀请令牌状态徽章及动态 SKILL.md 预览复制下载。
+   * 在设置中管理 Agent 准入、邀请令牌和接入安装。
    */
   import { tick } from 'svelte';
   import type {
@@ -13,11 +12,15 @@
   } from '../api/types';
   import { observeAnchoredPopover, positionAnchoredPopover } from '../anchored-popover';
   import { clipboard } from '../clipboard';
+  import type { SkillInstallRequest } from '../contracts';
+  import { lightDismiss } from '../dialog-light-dismiss';
+  import SkillInstallDialog from './SkillInstallDialog.svelte';
   import { locale, t } from '../i18n';
   import {
     formatInviteTokenStatus,
     formatServiceError,
     formatTimestamp,
+    renderMarkdownAction,
   } from './helpers';
 
   interface Props {
@@ -36,7 +39,8 @@
       baseUrl?: string;
       inviteToken?: string;
     }) => Promise<SkillDocument>;
-    onExportSkillMarkdown?: (doc: SkillDocument) => Promise<boolean>;
+    onPickSkillDirectory?: () => Promise<string | null>;
+    onInstallSkill?: (request: SkillInstallRequest) => Promise<string[]>;
     onNotify?: (message: string) => void;
   }
 
@@ -53,7 +57,8 @@
     onRevokeInviteToken,
     onDeleteInviteToken,
     onLoadSkillMarkdown,
-    onExportSkillMarkdown,
+    onPickSkillDirectory,
+    onInstallSkill,
     onNotify,
   }: Props = $props();
 
@@ -64,14 +69,21 @@
   let labelDraft = $state('');
   let maxUsesDraft = $state('');
   let expiresHoursDraft = $state('');
-  let baseUrlDraft = $state('');
-  let attachLatestToken = $state(false);
+  let selectedTokenId = $state<string | null>(null);
+  let installOpen = $state(false);
+  let installPending = $state(false);
+  // 服务端只保存摘要。明文在当前连接的设置会话内保留，供本地安装使用。
+  const sessionInviteTokens = new Map<string, string>();
   let latestCreatedToken = $state<CreatedInviteToken | null>(null);
   let createdTokenDialog = $state<HTMLDialogElement | undefined>(undefined);
   let createdTokenDialogOpen = $state(false);
   let createdTokenCopied = $state(false);
-  let createdDialogPressedOutside = false;
   let loadedSkill = $state<{ doc: SkillDocument; contextKey: string } | null>(null);
+  let skillPreviewDialog: HTMLDialogElement;
+  let skillPreviewOpen = $state(false);
+  let skillPreviewError = $state('');
+  let skillPreviewCopied = $state(false);
+  let skillPreviewCopying = $state(false);
 
   let busy = $state(false);
   let creatingToken = $state(false);
@@ -191,29 +203,6 @@
     }
   }
 
-  function isOutsideDialog(event: PointerEvent, dialog: HTMLDialogElement): boolean {
-    const r = dialog.getBoundingClientRect();
-    return (
-      event.clientX < r.left ||
-      event.clientX > r.right ||
-      event.clientY < r.top ||
-      event.clientY > r.bottom
-    );
-  }
-
-  function handleCreatedDialogPointerDown(event: PointerEvent): void {
-    if (!createdTokenDialog || 'closedBy' in HTMLDialogElement.prototype) return;
-    createdDialogPressedOutside = isOutsideDialog(event, createdTokenDialog);
-  }
-
-  function handleCreatedDialogPointerUp(event: PointerEvent): void {
-    if (!createdTokenDialog || 'closedBy' in HTMLDialogElement.prototype) return;
-    if (createdDialogPressedOutside && isOutsideDialog(event, createdTokenDialog)) {
-      closeCreatedTokenDialog();
-    }
-    createdDialogPressedOutside = false;
-  }
-
   $effect(() => {
     const dialog = createdTokenDialog;
     if (!createdTokenDialogOpen || !dialog) return;
@@ -322,12 +311,13 @@
       creatingToken = false;
       loadingSkill = false;
       retryingOnboarding = false;
-      baseUrlDraft = serviceUrl;
       labelDraft = '';
       maxUsesDraft = '';
       expiresHoursDraft = '';
       latestCreatedToken = null;
-      attachLatestToken = false;
+      selectedTokenId = null;
+      sessionInviteTokens.clear();
+      installOpen = false;
       revokedTokenIds = new Set();
       confirmingDeleteTokenId = null;
       loadedSkill = null;
@@ -339,41 +329,20 @@
     Array.isArray(onboarding?.invite_tokens) ? onboarding.invite_tokens : [],
   );
 
-  const latestTokenStillValid = $derived.by(() => {
-    const _lang = $locale;
-    if (!latestCreatedToken) return false;
-    if (revokedTokenIds.has(latestCreatedToken.token.id)) return false;
-    if (latestCreatedToken.token.revoked_at != null) return false;
-    const found = inviteTokens.find(item => item.id === latestCreatedToken!.token.id);
-    if (found?.revoked_at != null) return false;
-    const target = found ?? latestCreatedToken.token;
-    return formatInviteTokenStatus(target).kind === 'active';
+  const selectedInstallToken = $derived(
+    inviteTokens.find(token => token.id === selectedTokenId &&
+      !revokedTokenIds.has(token.id) && formatInviteTokenStatus(token).kind === 'active') ?? null,
+  );
+
+  $effect(() => {
+    if (selectedTokenId && !selectedInstallToken) {
+      selectedTokenId = null;
+      installOpen = false;
+    }
   });
 
-  function buildSkillContextKey(
-    epoch: number,
-    connKey: string,
-    baseUrl: string,
-    inviteToken: string,
-    lanOpen: boolean,
-  ): string {
-    return JSON.stringify([epoch, connKey, baseUrl, inviteToken, lanOpen]);
-  }
-
-  const effectiveBaseUrl = $derived(baseUrlDraft.trim() || serviceUrl.trim());
-  const effectiveToken = $derived(
-    attachLatestToken && latestCreatedToken && latestTokenStillValid
-      ? latestCreatedToken.raw_token
-      : '',
-  );
   const currentSkillContext = $derived(
-    buildSkillContextKey(
-      serviceEpoch,
-      syncedConnectionKey ?? '',
-      effectiveBaseUrl,
-      effectiveToken,
-      Boolean(onboarding?.lan_open_registration),
-    ),
+    JSON.stringify([serviceEpoch, serviceUrl, onboarding.lan_open_registration]),
   );
   const freshSkillDoc = $derived(
     loadedSkill && loadedSkill.contextKey === currentSkillContext ? loadedSkill.doc : null,
@@ -382,6 +351,9 @@
   $effect(() => {
     if (loadedSkill && loadedSkill.contextKey !== currentSkillContext) {
       loadedSkill = null;
+    }
+    if (skillPreviewOpen && !freshSkillDoc) {
+      closeSkillPreview();
     }
   });
 
@@ -395,17 +367,6 @@
 
   async function copyToClipboard(text: string): Promise<void> {
     await clipboard.writeText(text);
-  }
-
-  function triggerBlobDownload(content: string, filename: string): void {
-    if (typeof URL === 'undefined' || typeof URL.createObjectURL !== 'function') return;
-    const blob = new Blob([content], { type: 'text/markdown;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = filename || 'SKILL.md';
-    link.click();
-    URL.revokeObjectURL(url);
   }
 
   async function handleRetryLoadOnboarding(): Promise<void> {
@@ -498,7 +459,7 @@
       createdTokenCopied = false;
       createdTokenDialogOpen = true;
       confirmingDeleteTokenId = null;
-      attachLatestToken = true;
+      sessionInviteTokens.set(created.token.id, created.raw_token);
       labelDraft = '';
       maxUsesDraft = '';
       expiresHoursDraft = '';
@@ -525,6 +486,7 @@
       const revoked = await onRevokeInviteToken(id);
       if (!isSameConnection(epoch, connKey)) return;
       revokedTokenIds = new Set([...revokedTokenIds, id]);
+      sessionInviteTokens.delete(id);
       closeTokenMenu();
       loadedSkill = null;
       skillLoadSeq += 1;
@@ -535,7 +497,6 @@
           token: revoked,
         };
         createdTokenDialogOpen = false;
-        attachLatestToken = false;
       }
       if (seq === opSeq) {
         showFeedback($t('已作废邀请令牌'));
@@ -561,6 +522,8 @@
     try {
       await onDeleteInviteToken(id);
       if (!isSameConnection(epoch, connKey)) return;
+      sessionInviteTokens.delete(id);
+      if (selectedTokenId === id) selectedTokenId = null;
       closeTokenMenu();
       loadedSkill = null;
       skillLoadSeq += 1;
@@ -569,7 +532,6 @@
         latestCreatedToken = null;
         createdTokenDialogOpen = false;
         createdTokenCopied = false;
-        attachLatestToken = false;
       }
       if (seq === opSeq) {
         showFeedback($t('已删除邀请令牌'));
@@ -601,31 +563,17 @@
     }
   }
 
-  async function resolveSkillDoc(explicitRawToken?: string): Promise<SkillDocument | null> {
+  async function resolveSkillDoc(): Promise<SkillDocument | null> {
     const epoch = serviceEpoch;
     const connKey = syncedConnectionKey;
     const seq = ++skillLoadSeq;
-    const requestBaseUrl = baseUrlDraft.trim() || serviceUrl.trim();
-    const requestToken =
-      explicitRawToken !== undefined
-        ? explicitRawToken
-        : attachLatestToken && latestCreatedToken && latestTokenStillValid
-          ? latestCreatedToken.raw_token
-          : '';
-    const requestLanOpen = Boolean(onboarding?.lan_open_registration);
-    const requestContextKey = buildSkillContextKey(
-      epoch,
-      connKey ?? '',
-      requestBaseUrl,
-      requestToken,
-      requestLanOpen,
-    );
+    const requestBaseUrl = serviceUrl.trim();
+    const requestContextKey = currentSkillContext;
     panelError = '';
     loadingSkill = true;
     try {
       const doc = await onLoadSkillMarkdown({
         ...(requestBaseUrl ? { baseUrl: requestBaseUrl } : {}),
-        ...(requestToken ? { inviteToken: requestToken } : {}),
       });
       if (
         !isSameConnection(epoch, connKey) ||
@@ -649,52 +597,65 @@
   }
 
   async function handlePreviewSkill(): Promise<void> {
-    await resolveSkillDoc();
+    if (loadingSkill || skillPreviewOpen) return;
+    closeLanHelp();
+    const doc = await resolveSkillDoc();
+    if (!doc || !freshSkillDoc || !skillPreviewDialog?.isConnected) return;
+    skillPreviewError = '';
+    skillPreviewCopied = false;
+    skillPreviewCopying = false;
+    if (typeof skillPreviewDialog.showModal === 'function') skillPreviewDialog.showModal();
+    else skillPreviewDialog.open = true;
+    skillPreviewOpen = true;
+  }
+
+  function closeSkillPreview(): void {
+    skillPreviewOpen = false;
+    if (skillPreviewDialog?.open) {
+      if (typeof skillPreviewDialog.close === 'function') skillPreviewDialog.close();
+      else skillPreviewDialog.open = false;
+    }
   }
 
   async function handleCopySkill(): Promise<void> {
-    const epoch = serviceEpoch;
-    const connKey = syncedConnectionKey;
-    const targetContextKey = currentSkillContext;
-    panelError = '';
-    const doc = freshSkillDoc ?? (await resolveSkillDoc());
-    if (!doc || !isSameConnection(epoch, connKey) || targetContextKey !== currentSkillContext) {
-      return;
-    }
+    const doc = freshSkillDoc;
+    if (!doc || !skillPreviewOpen || skillPreviewCopying) return;
+    const isCurrentPreview = () => skillPreviewOpen && skillPreviewDialog.open && doc === freshSkillDoc;
+    skillPreviewCopying = true;
+    skillPreviewError = '';
+    skillPreviewCopied = false;
     try {
       await copyToClipboard(doc.content);
-      if (!isSameConnection(epoch, connKey)) return;
-      showFeedback($t('SKILL.md 已复制'));
+      if (isCurrentPreview()) skillPreviewCopied = true;
     } catch (error) {
-      if (!isSameConnection(epoch, connKey)) return;
-      panelError = formatServiceError(error);
+      if (isCurrentPreview()) skillPreviewError = formatServiceError(error);
+    } finally {
+      if (isCurrentPreview()) skillPreviewCopying = false;
     }
   }
 
-  async function handleExportSkill(): Promise<void> {
+  async function handleInstallSkill(request: SkillInstallRequest): Promise<void> {
+    if (request.inviteToken && (
+      !selectedInstallToken || formatInviteTokenStatus(selectedInstallToken).kind !== 'active'
+    )) {
+      throw new Error($t('请先在列表中选中有效的邀请令牌。'));
+    }
     const epoch = serviceEpoch;
     const connKey = syncedConnectionKey;
-    const targetContextKey = currentSkillContext;
-    panelError = '';
-    const doc = freshSkillDoc ?? (await resolveSkillDoc());
-    if (!doc || !isSameConnection(epoch, connKey) || targetContextKey !== currentSkillContext) {
-      return;
-    }
+    installPending = true;
     try {
-      if (onExportSkillMarkdown) {
-        const exported = await onExportSkillMarkdown(doc);
-        if (!isSameConnection(epoch, connKey)) return;
-        if (exported) {
-          showFeedback($t('SKILL.md 已导出'));
-        }
-      } else {
-        triggerBlobDownload(doc.content, doc.filename || 'SKILL.md');
-        if (!isSameConnection(epoch, connKey)) return;
-        showFeedback($t('SKILL.md 已导出'));
+      const paths = await onInstallSkill!(request);
+      if (isSameConnection(epoch, connKey)) {
+        const mcp = request.mode?.startsWith('mcp-');
+        showFeedback(paths.length === 1
+          ? $t(mcp ? 'MCP 已配置到 {path}' : 'Skill 已安装到 {path}', { path: paths[0] })
+          : $t(mcp ? '已配置 {count} 处 MCP' : '已安装 {count} 处 Skill', { count: paths.length }));
       }
     } catch (error) {
-      if (!isSameConnection(epoch, connKey)) return;
-      panelError = formatServiceError(error);
+      if (!installOpen && isSameConnection(epoch, connKey)) showFeedback(formatServiceError(error));
+      throw error;
+    } finally {
+      installPending = false;
     }
   }
 </script>
@@ -897,6 +858,7 @@
               class="invite-token-row"
               data-invite-token-id={token.id}
               data-invite-token-status={statusInfo.kind}
+              class:is-selected={selectedTokenId === token.id}
             >
               <div class="invite-token-identity">
                 {#if token.label}
@@ -926,6 +888,16 @@
                   ? $t('过期于 {time}', { time: formatTimestamp(token.expires_at) })
                   : $t('永不过期')}
               </span>
+              {#if statusInfo.kind === 'active' && onInstallSkill}
+                <button
+                  type="button"
+                  class="invite-token-select"
+                  aria-pressed={selectedTokenId === token.id}
+                  aria-label={`${$t('选中邀请令牌')} ${token.label || token.token_prefix}`}
+                  data-action="select-invite-token"
+                  onclick={() => { selectedTokenId = selectedTokenId === token.id ? null : token.id; }}
+                ></button>
+              {/if}
               <div class="invite-token-actions">
                 <button
                   type="button"
@@ -1022,7 +994,7 @@
   <div class="onboarding-block" data-slot="skill-md-section">
     <div class="skill-md-header">
       <div class="settings-extension-copy">
-        <span class="project-form-title">{$t('接入文档 (SKILL.md)')}</span>
+        <span class="project-form-title">{$t('接入')}</span>
         {#if serviceUrl || freshSkillDoc?.base_url}
           <span class="service-url-text">
             {freshSkillDoc?.base_url || serviceUrl}
@@ -1035,85 +1007,115 @@
           type="button"
           class="secondary-action"
           data-action="preview-skill-md"
-          disabled={loadingSkill}
+          aria-haspopup="dialog"
+          aria-disabled={loadingSkill}
           onclick={() => void handlePreviewSkill()}
         >
           {$t('预览 SKILL.md')}
         </button>
         <button
           type="button"
-          class="secondary-action"
-          data-action="copy-skill-md"
-          disabled={loadingSkill}
-          onclick={() => void handleCopySkill()}
+          class="primary secondary-action"
+          data-action="install-skill"
+          aria-haspopup="dialog"
+          disabled={!onInstallSkill || !onPickSkillDirectory || installPending}
+          onclick={() => {
+            closeLanHelp();
+            installOpen = true;
+          }}
         >
-          {$t('复制 SKILL.md')}
+          {$t('安装')}
         </button>
+      </div>
+    </div>
+  </div>
+
+  {#if installOpen && onInstallSkill && onPickSkillDirectory}
+    <SkillInstallDialog
+      baseUrl={serviceUrl.trim() || freshSkillDoc?.base_url || ''}
+      token={selectedInstallToken}
+      rawToken={selectedInstallToken ? sessionInviteTokens.get(selectedInstallToken.id) : undefined}
+      lanOpen={onboarding.lan_open_registration}
+      pickDirectory={onPickSkillDirectory}
+      install={handleInstallSkill}
+      onClose={() => { installOpen = false; }}
+    />
+  {/if}
+
+  <dialog
+    bind:this={skillPreviewDialog}
+    use:lightDismiss
+    class="modal-dialog skill-preview-dialog"
+    aria-labelledby="skill-preview-title"
+    closedby="any"
+    data-dialog="skill-preview"
+    onclose={() => {
+      if (!skillPreviewDialog.open) skillPreviewOpen = false;
+    }}
+  >
+    <div class="modal-header">
+      <h2 id="skill-preview-title" class="modal-title">{$t('接入文档 (SKILL.md)')}</h2>
+      <button
+        type="button"
+        class="icon-button"
+        aria-label={$t('关闭对话框')}
+        data-action="close-skill-preview"
+        onclick={closeSkillPreview}
+      >
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+          stroke-width="1.6" stroke-linecap="round" aria-hidden="true">
+          <path d="M4 4l8 8M12 4l-8 8" />
+        </svg>
+      </button>
+    </div>
+    {#if skillPreviewOpen && freshSkillDoc}
+      <!-- YAML 头用于识别 Skill，复制时保留完整原文。 -->
+      <div
+        class="bounty-markdown-preview skill-preview-body"
+        data-slot="skill-md-preview"
+        use:renderMarkdownAction={freshSkillDoc.content.replace(/^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/, '')}
+      ></div>
+      {#if skillPreviewError}
+        <p class="dialog-error" role="alert" data-status="onboarding-error">{skillPreviewError}</p>
+      {/if}
+      <footer class="modal-actions">
+        <span class="visually-hidden" role="status">{skillPreviewCopied ? $t('SKILL.md 已复制') : ''}</span>
         <button
           type="button"
-          class="primary secondary-action"
-          data-action="export-skill-md"
-          disabled={loadingSkill}
-          onclick={() => void handleExportSkill()}
+          class="icon-button"
+          data-action="copy-skill-md"
+          aria-label={$t('复制 SKILL.md')}
+          title={$t(skillPreviewCopied ? 'SKILL.md 已复制' : '复制 SKILL.md')}
+          aria-disabled={skillPreviewCopying}
+          onclick={() => void handleCopySkill()}
         >
-          {$t('导出 SKILL.md')}
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            {#if skillPreviewCopied}
+              <path d="m5 12 4 4L19 6" />
+            {:else}
+              <rect x="8" y="8" width="13" height="13" rx="2" />
+              <path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3" />
+            {/if}
+          </svg>
         </button>
-      </div>
-    </div>
-
-    <div class="skill-md-options">
-      <div class="project-form-field skill-url-field">
-        <label class="composer-label" for="skill-base-url-input">{$t('服务地址覆盖')}</label>
-        <input
-          id="skill-base-url-input"
-          type="url"
-          class="settings-text-input"
-          aria-label={$t('服务地址覆盖')}
-          placeholder={serviceUrl || 'http://127.0.0.1:8420'}
-          bind:value={baseUrlDraft}
-        />
-      </div>
-
-      {#if latestCreatedToken && latestTokenStillValid}
-        <label class="archive-switch-label" for="attach-invite-token-switch">
-          <span>{$t('附带邀请令牌')} ({latestCreatedToken.token.token_prefix}…)</span>
-          <span class="settings-switch">
-            <input
-              id="attach-invite-token-switch"
-              type="checkbox"
-              role="switch"
-              aria-label={$t('附带邀请令牌')}
-              bind:checked={attachLatestToken}
-            />
-            <span class="settings-switch-track" aria-hidden="true">
-              <span class="settings-switch-thumb"></span>
-            </span>
-          </span>
-        </label>
-      {/if}
-    </div>
-
-    {#if freshSkillDoc}
-      <pre class="skill-md-preview" data-slot="skill-md-preview"><code>{freshSkillDoc.content}</code></pre>
+      </footer>
     {/if}
-  </div>
+  </dialog>
 
   {#if createdTokenDialogOpen && latestCreatedToken}
     <dialog
       bind:this={createdTokenDialog}
+      use:lightDismiss
       class="modal-dialog created-token-dialog"
       aria-labelledby="created-invite-dialog-title"
       closedby="any"
       data-slot="created-invite-raw-token"
-      onpointerdown={handleCreatedDialogPointerDown}
-      onpointerup={handleCreatedDialogPointerUp}
       oncancel={event => {
         event.preventDefault();
         closeCreatedTokenDialog();
       }}
-      onclose={() => {
-        createdTokenDialogOpen = false;
-      }}
+      onclose={closeCreatedTokenDialog}
     >
       <div class="modal-header created-token-header">
         <h2 id="created-invite-dialog-title" class="modal-title">{$t('邀请令牌已生成')}</h2>

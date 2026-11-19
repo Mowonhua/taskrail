@@ -77,6 +77,23 @@ export interface FilePort {
   loadConfig(): Promise<AppConfig | null>;
   saveConfig(config: AppConfig): Promise<void>;
   exportText?(text: string, filename: string): Promise<boolean>;
+  pickSkillDirectory?(): Promise<string | null>;
+  installAgentSkill?(request: SkillInstallRequest): Promise<string[]>;
   openExternalLink?(url: string): Promise<void>;
   openLocalDocument?(path: string): Promise<void>;
+}
+
+/** 安装到全局目录、项目根目录下的代理路径，或用户选定的 Skills 目录。 */
+export type SkillInstallAgent = 'codex' | 'claude-code' | 'cursor' | 'shared' | 'dsh' | 'devin' | 'antigravity' | 'grok-build' | 'zcode';
+
+export interface SkillInstallRequest {
+  mode?: 'skill' | 'mcp-stdio' | 'mcp-http';
+  agent: SkillInstallAgent;
+  additionalAgents?: SkillInstallAgent[];
+  scope: 'global' | 'project' | 'custom';
+  directory?: string;
+  baseUrl: string;
+  inviteToken?: string;
+  agentName?: string;
+  includeGuide?: boolean;
 }

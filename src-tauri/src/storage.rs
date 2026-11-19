@@ -93,7 +93,7 @@ pub fn read_optional_bytes(path: &Path) -> Result<Option<Vec<u8>>, FileError> {
 }
 
 /// 临时文件必须与目标同目录，写完先刷新内容再替换，避免跨卷重命名和部分正文可见。
-fn staged_file(path: &Path, bytes: &[u8]) -> Result<tempfile::NamedTempFile, FileError> {
+pub(crate) fn staged_file(path: &Path, bytes: &[u8]) -> Result<tempfile::NamedTempFile, FileError> {
     let parent = path
         .parent()
         .filter(|value| !value.as_os_str().is_empty())

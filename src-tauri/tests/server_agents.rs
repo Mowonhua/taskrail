@@ -714,13 +714,12 @@ async fn skill_documents_follow_request_address_and_never_export_admin_credentia
         assert!(!content.contains(raw));
         assert!(!content.contains(admin_token));
         for endpoint in [
-            "POST",
-            "/api/v1/agents/register",
-            "/api/v1/agent/me",
-            "/api/v1/agent/me/subscriptions",
-            "/api/v1/agent/projects",
-            "/api/v1/agent/bounties",
-            "/api/v1/agent/bounties/{id}",
+            "taskrail-agent register",
+            "taskrail_me",
+            "taskrail_set_subscriptions",
+            "taskrail_list_projects",
+            "taskrail_list_tasks",
+            "taskrail_get_task",
             "Unranked",
             "DRAFT",
         ] {
@@ -757,9 +756,9 @@ async fn skill_documents_follow_request_address_and_never_export_admin_credentia
             .text()
             .await
             .unwrap();
-        assert!(content.contains(raw));
+        assert!(!content.contains(raw));
     }
-    assert!(client
+    assert!(!client
         .get(format!("{base}/skill.md"))
         .bearer_auth(raw)
         .send()
@@ -781,7 +780,7 @@ async fn skill_documents_follow_request_address_and_never_export_admin_credentia
     assert_eq!(status, StatusCode::OK);
     assert_eq!(exported["base_url"], "https://export.example");
     assert_eq!(exported["filename"], "SKILL.md");
-    assert!(exported["content"].as_str().unwrap().contains(raw));
+    assert!(!exported["content"].as_str().unwrap().contains(raw));
     assert!(!exported.to_string().contains(admin_token));
     assert_eq!(
         request(

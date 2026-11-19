@@ -823,8 +823,8 @@ async fn http_contracts_auth_validation_details_and_draft_privacy() {
         .await
         .unwrap();
     for required in [
-        "/comments",
-        "/request-info",
+        "taskrail_list_comments",
+        "taskrail_request_info",
         "comment.replied",
         "task.resumed",
         "active_duration_ms",

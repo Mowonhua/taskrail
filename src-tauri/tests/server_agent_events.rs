@@ -339,10 +339,9 @@ async fn inbox_http_isolation_validation_and_webhook_configuration() {
         .await
         .unwrap();
     for expected in [
-        "/agent/me/webhook",
-        "/agent/events/ack",
-        "/agent/stream",
-        "/agent/ws",
+        "taskrail_set_webhook",
+        "taskrail_ack_events",
+        "taskrail_list_events",
         "HMAC-SHA256",
         "Unranked",
     ] {
