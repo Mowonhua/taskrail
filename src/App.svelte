@@ -3586,11 +3586,16 @@
     <BountyDetailModal
       detail={activeDetail}
       project={bountyProjectsById.get(activeDetail.bounty.project_id)}
+      projects={allBountyProjects}
       agents={allAgents}
       allBounties={allBountiesForDeps}
       currentUser={userProfile}
+      desktop={capabilities.desktop}
+      mobile={Boolean(files.isMobile)}
       onClose={closeBountyDetail}
       onEditDraft={openEditDraftComposer}
+      onCreateProject={handleCreateBountyProject}
+      onUpdateDraft={handleUpdateDraft}
       onPublish={handlePublishFromDrawer}
       onWithdraw={handleWithdrawFromDrawer}
       onCancel={handleCancelFromDrawer}

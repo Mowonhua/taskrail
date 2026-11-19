@@ -843,6 +843,13 @@ export const appMessages: Readonly<Record<string, string>> = {
   "租约": "Lease",
   "耗时": "Active time",
   "更新": "Updated",
-  "状态流转": "Timeline"
+  "状态流转": "Timeline",
+  "输入任务标题…": "Enter task title…",
+  "详细描述任务背景、目标与约束…": "Describe the task background, goals, and constraints…",
+  "列出明确的测试命令与验收标准…": "List explicit test commands and acceptance criteria…",
+  "指定": "Specific",
+  "添加前置任务": "Add prerequisite",
+  "搜索前置任务": "Search prerequisite tasks",
+  "搜索任务标题或编号…": "Search task title or ID…"
 };
 

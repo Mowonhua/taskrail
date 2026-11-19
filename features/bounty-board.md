@@ -66,7 +66,8 @@
 |---|---|
 | 主入口 | src/App.svelte::<module> |
 | 主入口 | src/lib/bounty/BountyComposerModal.svelte::<module> |
-| 主入口 | src/lib/bounty/BountyDetailDrawer.svelte::<module> |
+| 主入口 | src/lib/bounty/BountyEditorForm.svelte::<module> |
+| 主入口 | src/lib/bounty/BountyDetailModal.svelte::<module> |
 | 主入口 | src/lib/bounty/BountyCard.svelte::<module> |
 | 关键实现 | src/lib/bounty/helpers.ts::formatBountyStatus |
 | 关键实现 | src/lib/bounty/helpers.ts::formatAssigneeConstraint |
@@ -141,7 +142,7 @@
 | 关键实现 | src-tauri/src/server/db.rs::Repository::agent_create_bounty |
 | 关键实现 | src-tauri/src/server/routes/agents.rs::skill_content |
 | 关键实现 | src/lib/bounty/BountyCard.svelte::<module> |
-| 关键实现 | src/lib/bounty/BountyDetailDrawer.svelte::<module> |
+| 关键实现 | src/lib/bounty/BountyDetailModal.svelte::<module> |
 | 关键实现 | src/lib/bounty/helpers.ts::formatAgentDraftPolicy |
 | 关键实现 | src/lib/bounty/helpers.ts::formatBountyPublisher |
 | 关键实现 | src/lib/bounty/helpers.ts::formatEventActor |
@@ -200,7 +201,7 @@
 | 关键实现 | src/lib/bounty/helpers.ts::formatLeaseCountdown |
 | 关键实现 | src/lib/bounty/helpers.ts::formatCompletionCost |
 | 关键实现 | src/lib/bounty/BountyCard.svelte::<module> |
-| 关键实现 | src/lib/bounty/BountyDetailDrawer.svelte::<module> |
+| 关键实现 | src/lib/bounty/BountyDetailModal.svelte::<module> |
 | 关键实现 | src/lib/bounty/AgentDirectory.svelte::<module> |
 | 关键实现 | src/App.svelte::<module> |
 
@@ -237,6 +238,9 @@
 |---|---|
 | 主入口 | src-tauri/src/server/routes.rs::bounty_comments |
 | 主入口 | src-tauri/src/server/routes.rs::create_bounty_comment |
+| 主入口 | src-tauri/src/server/routes.rs::toggle_bounty_comment_like |
+| 主入口 | src-tauri/src/server/routes.rs::update_bounty_comment |
+| 主入口 | src-tauri/src/server/routes.rs::delete_bounty_comment |
 | 主入口 | src-tauri/src/server/routes/agents.rs::comments |
 | 主入口 | src-tauri/src/server/routes/agents.rs::create_comment |
 | 主入口 | src-tauri/src/server/routes/agents.rs::request_info |
@@ -245,16 +249,21 @@
 | 关键实现 | src-tauri/src/server/db/comments.rs::Repository::agent_bounty_comments |
 | 关键实现 | src-tauri/src/server/db/comments.rs::Repository::create_bounty_comment |
 | 关键实现 | src-tauri/src/server/db/comments.rs::Repository::agent_create_comment |
+| 关键实现 | src-tauri/src/server/db/comments.rs::Repository::toggle_bounty_comment_like |
+| 关键实现 | src-tauri/src/server/db/comments.rs::Repository::update_bounty_comment |
+| 关键实现 | src-tauri/src/server/db/comments.rs::Repository::delete_bounty_comment |
 | 关键实现 | src-tauri/src/server/db/comments.rs::Repository::agent_request_info |
 | 关键实现 | src/lib/api/bounty-client.ts::HttpBountyClient |
 | 关键实现 | src/lib/api/bounty-client.ts::HttpAgentClient |
 | 关键实现 | src/lib/api/bounty-client.ts::createMemoryBountyClient |
 | 关键实现 | src/lib/bounty/helpers.ts::computeActiveDurationMs |
+| 关键实现 | src/lib/bounty/helpers.ts::formatAcceptanceCriteriaMarkdown |
 | 关键实现 | src/lib/bounty/helpers.ts::formatActiveDuration |
+| 关键实现 | src/lib/bounty/helpers.ts::formatCompactTimestamp |
 | 关键实现 | src/lib/bounty/helpers.ts::formatCommentKind |
 | 关键实现 | src/lib/bounty/helpers.ts::formatCommentAuthorRole |
 | 关键实现 | src/lib/bounty/BountyCard.svelte::<module> |
-| 关键实现 | src/lib/bounty/BountyDetailDrawer.svelte::<module> |
+| 关键实现 | src/lib/bounty/BountyDetailModal.svelte::<module> |
 | 关键实现 | src/App.svelte::<module> |
 
 ### 行为场景
@@ -266,6 +275,7 @@
 | S-03 | 并发 | 多个回复并发提交时仅一次完成状态恢复与双通知唤醒并完整保留全部评论；评论、状态、事件与通知写入任一步失败均同一事务原子回滚 | src-tauri/tests/server_agent_comments.rs::concurrent_replies_resume_once_and_preserve_all_comments, src-tauri/tests/server_agent_comments.rs::comment_history_and_notifications_fail_as_one_transaction, src/lib/api/bounty-client.test.ts::Issue 07 评论区、提问挂起与回复唤醒 > MemoryBountyClient 严格遵循 fencing、租约冻结、T_active 分段剔除等待、唤醒推送与取消/隔离规则 |
 | S-04 | 正常 | 任务卡片显示评论数与冻结状态（无过期告警），左侧「待处理」自动实时聚合 `WAITING_INFO` 并同步未处理角标；详情抽屉高亮渲染 Markdown+KaTeX 待回答提问、分段 `T_active`、评论流并在后台 2 秒刷新时保留未提交草稿，支持人工回复唤醒与 `WAITING_INFO` 取消 | src/lib/session/app-integration.test.ts::任务板工作台外壳集成测试 > 支持任务评论区、Agent 提问挂起冻结租约与有效耗时、待处理实时聚合、人工回复唤醒与挂起取消, src/lib/api/bounty-client.test.ts::Issue 07 评论区、提问挂起与回复唤醒 > helpers 正确计算与格式化 T_active、评论类型/角色与新流转事件（含双语且无中点） |
 | S-05 | 约束 | `request-info` 严格遵循租约防脑裂错误顺序（非持有人 `403 LEASE_OWNER_MISMATCH`、过期或旧令牌 `409 STALE_LEASE`、空白问题 `400 VALIDATION_ERROR`）；`CANCELLED` 任务拒绝评论（`409 INVALID_TRANSITION`），草稿评论严格对 Agent 隔离且已停用/吊销参与者不收通知；在 `WAITING_INFO` 取消保留 `lease_id`、`lease_agent_id` 与已累计 `active_duration_ms` 并推送 `task.cancelled` | src-tauri/tests/server_agent_comments.rs::fencing_order_and_invalid_questions_leave_all_writes_unchanged, src-tauri/tests/server_agent_comments.rs::cancellation_preserves_fencing_and_active_total_but_clears_deadline, src-tauri/tests/server_agent_comments.rs::http_contracts_auth_validation_details_and_draft_privacy, src-tauri/tests/server_agent_comments.rs::failed_second_wakeup_or_publisher_notification_rolls_back_every_write, src/lib/api/bounty-client.test.ts::Issue 07 评论区、提问挂起与回复唤醒 > HttpBountyClient 与 HttpAgentClient 透传空白正文和有限整数令牌并保持与内存客户端错误优先级一致, src/lib/api/bounty-client.test.ts::Issue 07 评论区、提问挂起与回复唤醒 > MemoryBountyClient 严格遵循 fencing、租约冻结、T_active 分段剔除等待、唤醒推送与取消/隔离规则 |
+| S-06 | 正常 | 任务详情以固定顶栏与左右双栏居中弹窗呈现（左栏无边框 Markdown 阅读与置顶可展开评论区，右栏静态状态胶囊、属性信息与过滤评论事件的竖向流转时间轴；草稿支持在原弹窗内原地切换双栏编辑，发布与编辑复用共享双栏骨架、分段最低段位与可搜索前置依赖下拉选择器）；评论支持两级楼中楼回复（超过 3 条默认折叠并支持展开）、点赞、就地回复、悬停编辑与级联删除（已取消任务禁止编辑与删除） | src-tauri/tests/server_agent_comments.rs::threaded_replies_like_edit_and_delete_follow_two_level_and_cancelled_rules, src/lib/api/bounty-client.test.ts::Issue 07 评论区、提问挂起与回复唤醒 > MemoryBountyClient 支持两级楼中楼回复、点赞、编辑与级联删除评论, src/lib/session/app-integration.test.ts::任务板工作台外壳集成测试 > 任务详情弹窗支持双栏布局、右栏状态切换、过滤评论时间轴及 Bilibili 式两级楼中楼交互 |
 
 ## F-BNT-006 仲裁顺位配置、裁判回避与仲裁验收闭环
 
@@ -315,7 +325,7 @@
 | 关键实现 | src/lib/SettingsPanel.svelte::<module> |
 | 关键实现 | src/lib/bounty/ProjectManagementPanel.svelte::<module> |
 | 关键实现 | src/lib/bounty/BountyCard.svelte::<module> |
-| 关键实现 | src/lib/bounty/BountyDetailDrawer.svelte::<module> |
+| 关键实现 | src/lib/bounty/BountyDetailModal.svelte::<module> |
 | 关键实现 | src/App.svelte::<module> |
 
 ### 行为场景
@@ -433,8 +443,9 @@
 | 关键实现 | src/lib/bounty/helpers.ts::formatEventLabel |
 | 关键实现 | src/lib/bounty/helpers.ts::formatServiceError |
 | 关键实现 | src/lib/bounty/BountyCard.svelte::<module> |
-| 关键实现 | src/lib/bounty/BountyDetailDrawer.svelte::<module> |
+| 关键实现 | src/lib/bounty/BountyDetailModal.svelte::<module> |
 | 关键实现 | src/lib/bounty/BountyComposerModal.svelte::<module> |
+| 关键实现 | src/lib/bounty/BountyEditorForm.svelte::<module> |
 | 关键实现 | src/App.svelte::<module> |
 
 ### 行为场景

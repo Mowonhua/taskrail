@@ -13,14 +13,17 @@
     BountyEvent,
     BountyProject,
     BountyTask,
+    CreateProjectInput,
     QualityGrade,
     RejectArbitrationInput,
+    UpdateBountyInput,
     UserProfile,
   } from '../api/types';
   import { observeAnchoredPopover, positionAnchoredPopover } from '../anchored-popover';
   import { locale, t } from '../i18n';
   import ProjectIcon from '../ProjectIcon.svelte';
   import UserAvatar from '../auth/UserAvatar.svelte';
+  import BountyEditorForm from './BountyEditorForm.svelte';
   import {
     computeActiveDurationMs,
     formatAcceptanceCriteriaMarkdown,
@@ -45,11 +48,16 @@
   interface Props {
     detail: BountyDetail;
     project?: BountyProject;
+    projects?: BountyProject[];
     agents?: AgentSummary[];
     allBounties?: BountyTask[];
     currentUser?: UserProfile | null;
+    desktop?: boolean;
+    mobile?: boolean;
     onClose: () => void;
-    onEditDraft: (bounty: BountyTask) => void;
+    onEditDraft?: (bounty: BountyTask) => void;
+    onCreateProject?: (input: CreateProjectInput) => Promise<BountyProject>;
+    onUpdateDraft?: (id: string, input: UpdateBountyInput, publishAfter: boolean) => Promise<BountyTask>;
     onPublish: (bountyId: string) => Promise<void>;
     onWithdraw: (bountyId: string) => Promise<void>;
     onCancel: (bountyId: string) => Promise<void>;
@@ -82,21 +90,19 @@
     authorName: string;
   }
 
-  interface StatusTransitionOption {
-    key: string;
-    label: string;
-    danger?: boolean;
-    action: () => Promise<void>;
-  }
-
   let {
     detail,
     project,
+    projects = [],
     agents = [],
     allBounties = [],
     currentUser = null,
+    desktop = false,
+    mobile = false,
     onClose,
     onEditDraft,
+    onCreateProject,
+    onUpdateDraft,
     onPublish,
     onWithdraw,
     onCancel,
@@ -152,12 +158,12 @@
   let lastCollaboratorKey = '';
 
   let modalEl = $state<HTMLDivElement | null>(null);
+  let editDraftButton = $state<HTMLButtonElement | undefined>(undefined);
+  let editorForm = $state<ReturnType<typeof BountyEditorForm> | undefined>(undefined);
+  let isEditingDraft = $state(false);
   let moreMenuButton = $state<HTMLButtonElement | undefined>(undefined);
   let moreMenuEl = $state<HTMLDivElement | undefined>(undefined);
   let moreMenuOpen = $state(false);
-  let statusMenuButton = $state<HTMLButtonElement | undefined>(undefined);
-  let statusMenuEl = $state<HTMLDivElement | undefined>(undefined);
-  let statusMenuOpen = $state(false);
   let collaboratorHelpButton = $state<HTMLButtonElement | undefined>(undefined);
   let collaboratorHelpBubble = $state<HTMLDivElement | undefined>(undefined);
   let collaboratorHelpOpen = $state(false);
@@ -309,7 +315,7 @@
       editingError = '';
       expandedThreads = {};
       moreMenuOpen = false;
-      statusMenuOpen = false;
+      isEditingDraft = false;
     }
     const collabKey = `${bounty.id}:${bounty.draft_collaborator_agent_id ?? ''}`;
     if (collabKey !== lastCollaboratorKey) {
@@ -342,6 +348,7 @@
   $effect(() => {
     if (bounty.status !== 'DRAFT') {
       closeCollaboratorHelp();
+      isEditingDraft = false;
     }
     if (bounty.status === 'CANCELLED') {
       replyTarget = null;
@@ -372,7 +379,7 @@
   });
 
   $effect(() => {
-    if (!moreMenuOpen && !statusMenuOpen) return;
+    if (!moreMenuOpen) return;
     const handlePointerDown = (event: PointerEvent) => {
       const target = event.target as Node | null;
       if (
@@ -382,14 +389,6 @@
         !moreMenuButton?.contains(target)
       ) {
         moreMenuOpen = false;
-      }
-      if (
-        statusMenuOpen &&
-        target &&
-        !statusMenuEl?.contains(target) &&
-        !statusMenuButton?.contains(target)
-      ) {
-        statusMenuOpen = false;
       }
     };
     document.addEventListener('pointerdown', handlePointerDown, true);
@@ -538,89 +537,21 @@
       canReleaseLease,
   );
 
-  const statusTransitionOptions = $derived.by<StatusTransitionOption[]>(() => {
-    const _lang = $locale;
-    switch (bounty.status) {
-      case 'DRAFT':
-        return [
-          {
-            key: 'publish',
-            label: $t('发布为待接取'),
-            action: () => onPublish(bounty.id),
-          },
-          {
-            key: 'cancel',
-            label: $t('丢弃草稿'),
-            danger: true,
-            action: () => onCancel(bounty.id),
-          },
-        ];
-      case 'OPEN':
-        return [
-          {
-            key: 'withdraw',
-            label: $t('撤回为草稿'),
-            action: () => onWithdraw(bounty.id),
-          },
-          {
-            key: 'cancel',
-            label: $t('取消任务'),
-            danger: true,
-            action: () => onCancel(bounty.id),
-          },
-        ];
-      case 'IN_PROGRESS':
-        return [
-          {
-            key: 'release',
-            label: $t('强制释放租约'),
-            danger: true,
-            action: () => onReleaseLease(bounty.id),
-          },
-        ];
-      case 'WAITING_INFO':
-        return [
-          ...(canReleaseLease
-            ? [
-                {
-                  key: 'release',
-                  label: $t('强制释放租约'),
-                  danger: true,
-                  action: () => onReleaseLease(bounty.id),
-                },
-              ]
-            : []),
-          {
-            key: 'cancel',
-            label: $t('取消任务'),
-            danger: true,
-            action: () => onCancel(bounty.id),
-          },
-        ];
-      case 'PENDING_ARBITRATION':
-        return canReleaseLease
-          ? [
-              {
-                key: 'release',
-                label: $t('强制释放租约'),
-                danger: true,
-                action: () => onReleaseLease(bounty.id),
-              },
-            ]
-          : [];
-      case 'CANCELLED':
-        return [
-          {
-            key: 'restore',
-            label: $t('转为草稿'),
-            action: () => onRestoreDraft(bounty.id),
-          },
-        ];
-      case 'COMPLETED':
-      default:
-        return [];
+  function enterDraftEdit(): void {
+    if (bounty.status !== 'DRAFT') return;
+    if (onUpdateDraft && onCreateProject) {
+      moreMenuOpen = false;
+      isEditingDraft = true;
+      return;
     }
-  });
+    onEditDraft?.(bounty);
+  }
+
+  async function exitDraftEdit(): Promise<void> {
+    isEditingDraft = false;
+    await tick();
+    editDraftButton?.focus();
+  }
 
   function displayCommentAuthor(comment: BountyComment): string {
     if (comment.author_type === 'human' && comment.author_name === 'human') {
@@ -654,7 +585,6 @@
     if (busy) return;
     actionError = '';
     moreMenuOpen = false;
-    statusMenuOpen = false;
     busy = true;
     try {
       await fn();
@@ -875,6 +805,13 @@
     if (event.key === 'Escape') {
       event.preventDefault();
       event.stopPropagation();
+      if (isEditingDraft) {
+        if (editorForm?.handleEscapeKey()) {
+          return;
+        }
+        void exitDraftEdit();
+        return;
+      }
       if (collaboratorHelpOpen) {
         closeCollaboratorHelp();
         return;
@@ -882,11 +819,6 @@
       if (moreMenuOpen) {
         moreMenuOpen = false;
         moreMenuButton?.focus();
-        return;
-      }
-      if (statusMenuOpen) {
-        statusMenuOpen = false;
-        statusMenuButton?.focus();
         return;
       }
       if (editingCommentId !== null) {
@@ -930,68 +862,71 @@
           <span class="detail-modal-project-name">{project?.name ?? $t('未命名项目')}</span>
         </span>
         <span class="detail-modal-crumb-sep" aria-hidden="true">/</span>
-        <span class="detail-modal-bounty-id" title={bounty.id}>#{bounty.id.slice(0, 8)}</span>
+        <span class="detail-modal-bounty-id" title={bounty.id}>
+          {isEditingDraft ? $t('编辑草稿') : `#${bounty.id.slice(0, 8)}`}
+        </span>
       </div>
 
       <div class="detail-modal-topbar-actions" data-slot="detail-actions">
-        {#if bounty.status === 'DRAFT'}
-          <button
-            type="button"
-            class="detail-topbar-btn"
-            data-action="edit-draft"
-            disabled={busy}
-            onclick={() => onEditDraft(bounty)}
-          >
-            {$t('编辑草稿')}
-          </button>
-          <button
-            type="button"
-            class="primary detail-topbar-btn"
-            data-action="publish-bounty"
-            disabled={busy}
-            onclick={() => void runAction(() => onPublish(bounty.id))}
-          >
-            {$t('立即发布')}
-          </button>
-        {:else if bounty.status === 'OPEN'}
-          <button
-            type="button"
-            class="detail-topbar-btn"
-            data-action="withdraw-bounty"
-            disabled={busy}
-            onclick={() => void runAction(() => onWithdraw(bounty.id))}
-          >
-            {$t('撤回为草稿')}
-          </button>
-        {:else if bounty.status === 'CANCELLED'}
-          <button
-            type="button"
-            class="detail-topbar-btn"
-            data-action="restore-draft"
-            disabled={busy}
-            onclick={() => void runAction(() => onRestoreDraft(bounty.id))}
-          >
-            {$t('转为草稿')}
-          </button>
-        {/if}
-
-        {#if hasMoreMenuActions}
-          <div class="detail-more-wrap">
+        {#if !isEditingDraft}
+          {#if bounty.status === 'DRAFT'}
             <button
-              bind:this={moreMenuButton}
+              bind:this={editDraftButton}
               type="button"
-              class="icon-button detail-more-btn"
-              data-action="toggle-detail-more"
-              aria-label={$t('更多操作')}
-              aria-haspopup="menu"
-              aria-expanded={moreMenuOpen}
-              aria-controls="detail-more-menu"
+              class="detail-topbar-btn"
+              data-action="edit-draft"
               disabled={busy}
-              onclick={() => {
-                statusMenuOpen = false;
-                moreMenuOpen = !moreMenuOpen;
-              }}
+              onclick={enterDraftEdit}
             >
+              {$t('编辑草稿')}
+            </button>
+            <button
+              type="button"
+              class="primary detail-topbar-btn"
+              data-action="publish-bounty"
+              disabled={busy}
+              onclick={() => void runAction(() => onPublish(bounty.id))}
+            >
+              {$t('立即发布')}
+            </button>
+          {:else if bounty.status === 'OPEN'}
+            <button
+              type="button"
+              class="detail-topbar-btn"
+              data-action="withdraw-bounty"
+              disabled={busy}
+              onclick={() => void runAction(() => onWithdraw(bounty.id))}
+            >
+              {$t('撤回为草稿')}
+            </button>
+          {:else if bounty.status === 'CANCELLED'}
+            <button
+              type="button"
+              class="detail-topbar-btn"
+              data-action="restore-draft"
+              disabled={busy}
+              onclick={() => void runAction(() => onRestoreDraft(bounty.id))}
+            >
+              {$t('转为草稿')}
+            </button>
+          {/if}
+
+          {#if hasMoreMenuActions}
+            <div class="detail-more-wrap">
+              <button
+                bind:this={moreMenuButton}
+                type="button"
+                class="icon-button detail-more-btn"
+                data-action="toggle-detail-more"
+                aria-label={$t('更多操作')}
+                aria-haspopup="menu"
+                aria-expanded={moreMenuOpen}
+                aria-controls="detail-more-menu"
+                disabled={busy}
+                onclick={() => {
+                  moreMenuOpen = !moreMenuOpen;
+                }}
+              >
               <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
                 <circle cx="3.2" cy="8" r="1.25" />
                 <circle cx="8" cy="8" r="1.25" />
@@ -1070,6 +1005,7 @@
             </div>
           </div>
         {/if}
+        {/if}
 
         <button
           type="button"
@@ -1082,6 +1018,20 @@
       </div>
     </header>
 
+    {#if isEditingDraft && onCreateProject && onUpdateDraft}
+      <BountyEditorForm
+        bind:this={editorForm}
+        {projects}
+        availableDependencies={allBounties}
+        editingBounty={bounty}
+        {desktop}
+        {mobile}
+        onCancel={() => void exitDraftEdit()}
+        onSaved={() => void exitDraftEdit()}
+        {onCreateProject}
+        {onUpdateDraft}
+      />
+    {:else}
     <div class="detail-modal-columns">
       <div class="detail-modal-main">
         {#if actionError}
@@ -2047,50 +1997,8 @@
         <div class="detail-attr-grid" data-slot="detail-attributes">
           <div class="detail-attr-row">
             <span class="detail-attr-label">{$t('状态')}</span>
-            <div class="detail-attr-value detail-status-switcher" data-slot="detail-status-control">
-              {#if statusTransitionOptions.length > 0}
-                <button
-                  bind:this={statusMenuButton}
-                  type="button"
-                  class="status-pill is-interactive"
-                  data-status={bounty.status}
-                  data-action="toggle-status-menu"
-                  aria-haspopup="menu"
-                  aria-expanded={statusMenuOpen}
-                  disabled={busy}
-                  onclick={() => {
-                    moreMenuOpen = false;
-                    statusMenuOpen = !statusMenuOpen;
-                  }}
-                >
-                  <span>{statusLabel}</span>
-                  <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                    <path d="m3 4.5 3 3 3-3" />
-                  </svg>
-                </button>
-                <div
-                  bind:this={statusMenuEl}
-                  class="detail-status-menu"
-                  role="menu"
-                  hidden={!statusMenuOpen}
-                >
-                  {#each statusTransitionOptions as opt (opt.key)}
-                    <button
-                      type="button"
-                      role="menuitem"
-                      class="detail-menu-item"
-                      class:danger-text={opt.danger}
-                      data-status-transition={opt.key}
-                      disabled={busy}
-                      onclick={() => void runAction(opt.action)}
-                    >
-                      {opt.label}
-                    </button>
-                  {/each}
-                </div>
-              {:else}
-                <span class="status-pill" data-status={bounty.status}>{statusLabel}</span>
-              {/if}
+            <div class="detail-attr-value" data-slot="detail-status-control">
+              <span class="status-pill" data-status={bounty.status}>{statusLabel}</span>
             </div>
           </div>
 
@@ -2344,5 +2252,6 @@
         </section>
       </aside>
     </div>
+    {/if}
   </div>
 </div>

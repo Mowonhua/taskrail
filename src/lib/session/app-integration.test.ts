@@ -522,17 +522,20 @@ describe('任务板工作台外壳集成测试', () => {
 
     // 内联卡片收起，新项目被立即选中，且已填标题与描述完好保留
     expect(composer!.querySelector('[data-slot="inline-project-creator"]')).toBeNull();
-    const projectSelect = composer!.querySelector<HTMLSelectElement>('#bounty-project-select')!;
+    const projectSelect = composer!.querySelector<HTMLButtonElement>('#bounty-project-select')!;
     const createdProjects = await bountyApi.listProjects();
     const newProject = createdProjects.find(p => p.name === '随手新建项目')!;
     expect(newProject).toBeDefined();
-    expect(projectSelect.value).toBe(newProject.id);
+    expect(projectSelect.dataset.value).toBe(newProject.id);
     expect(titleInput.value).toBe('实现同构服务并发租约校验');
     expect(descInput.value).toBe('确保并发抢单下 $\\Delta R$ 与租约令牌严格单调递增。');
 
     // 切回预设项目时，因验收条件尚未被人工修改，自动恢复为预设项目的默认验收规范
-    projectSelect.value = seededProject.id;
-    projectSelect.dispatchEvent(new Event('change', { bubbles: true }));
+    projectSelect.click();
+    await flush();
+    composer!
+      .querySelector<HTMLButtonElement>(`#bounty-project-listbox [data-value="${seededProject.id}"]`)!
+      .click();
     await flush();
     expect(criteriaInput.value).toBe('- [ ] 默认规范：$O(1)$ 校验通过');
 
@@ -547,9 +550,7 @@ describe('任务板工作台外壳集成测试', () => {
     composer!.querySelector<HTMLButtonElement>('[data-difficulty="A"]')!.click();
     composer!.querySelector<HTMLButtonElement>('[data-assignee-mode="min_tier"]')!.click();
     await flush();
-    const minTierSelect = composer!.querySelector<HTMLSelectElement>('#bounty-min-tier-select')!;
-    minTierSelect.value = 'B';
-    minTierSelect.dispatchEvent(new Event('change', { bubbles: true }));
+    composer!.querySelector<HTMLButtonElement>('[data-min-tier="B"]')!.click();
     composer!.querySelector<HTMLInputElement>('#bounty-require-arbitration')!.click();
     await flush();
 
@@ -611,14 +612,14 @@ describe('任务板工作台外壳集成测试', () => {
     expect(drawer).not.toBeNull();
     expect(drawer!.querySelector('[data-slot="detail-description"] .katex')).not.toBeNull();
 
-    // 点击「编辑草稿」，修改标题并直接点击「发布任务」
+    // 点击「编辑草稿」直接在原详情弹窗内原地编辑，不额外弹出第二个窗口
     drawer!.querySelector<HTMLButtonElement>('[data-action="edit-draft"]')!.click();
     await flush();
-    const composer = target.querySelector<HTMLElement>('[data-dialog="bounty-composer"]')!;
-    const titleInput = composer.querySelector<HTMLInputElement>('#bounty-title-input')!;
+    expect(target.querySelector('[data-dialog="bounty-composer"]')).toBeNull();
+    const titleInput = drawer!.querySelector<HTMLInputElement>('#bounty-title-input')!;
     titleInput.value = '优化 SQLite WAL 事务吞吐（已定稿）';
     titleInput.dispatchEvent(new Event('input', { bubbles: true }));
-    composer.querySelector<HTMLButtonElement>('[data-action="publish-now"]')!.click();
+    drawer!.querySelector<HTMLButtonElement>('[data-action="publish-now"]')!.click();
     await flush();
 
     // 切回未结束筛选，验证已转为 OPEN
@@ -1205,7 +1206,7 @@ describe('任务板工作台外壳集成测试', () => {
     instance = mount(App, { target, props: { files: port, bountyApi } });
     await flush();
 
-    // 打开详情抽屉并点击「编辑草稿」
+    // 打开详情弹窗并原地点击「编辑草稿」（不另弹新窗口）
     target
       .querySelector<HTMLButtonElement>(`[data-bounty-id="${draft.id}"] .bounty-card-button`)!
       .click();
@@ -1213,34 +1214,38 @@ describe('任务板工作台外壳集成测试', () => {
     target.querySelector<HTMLButtonElement>('[data-action="edit-draft"]')!.click();
     await flush();
 
-    const composer = target.querySelector<HTMLElement>('[data-dialog="bounty-composer"]')!;
-    const projectSelect = composer.querySelector<HTMLSelectElement>('#bounty-project-select')!;
-    expect(projectSelect.value).toBe(archivedProj.id);
-    expect(projectSelect.selectedOptions[0]?.textContent).toContain('已归档旧项目');
-    expect(projectSelect.selectedOptions[0]?.textContent).toContain('已归档');
-    expect(composer.querySelector('[data-status="archived-project-warning"]')).not.toBeNull();
-    expect(composer.querySelector('[data-slot="inline-project-creator"]')).toBeNull();
+    expect(target.querySelector('[data-dialog="bounty-composer"]')).toBeNull();
+    const detailEditor = target.querySelector<HTMLElement>('[data-dialog="bounty-detail"]')!;
+    const projectSelect = detailEditor.querySelector<HTMLButtonElement>('#bounty-project-select')!;
+    expect(projectSelect.dataset.value).toBe(archivedProj.id);
+    expect(projectSelect.textContent).toContain('已归档旧项目');
+    expect(projectSelect.textContent).toContain('已归档');
+    expect(detailEditor.querySelector('[data-status="archived-project-warning"]')).not.toBeNull();
+    expect(detailEditor.querySelector('[data-slot="inline-project-creator"]')).toBeNull();
 
     // 直接保存草稿或发布必须被阻止，且原 project_id 未被静默改写
-    composer.querySelector<HTMLButtonElement>('[data-action="save-draft"]')!.click();
+    detailEditor.querySelector<HTMLButtonElement>('[data-action="save-draft"]')!.click();
     await flush();
-    expect(composer.querySelector('[data-status="composer-error"]')?.textContent).toContain('已归档');
+    expect(detailEditor.querySelector('[data-status="composer-error"]')?.textContent).toContain('已归档');
     expect((await bountyApi.getBountyDetail(draft.id)).bounty.project_id).toBe(archivedProj.id);
 
-    composer.querySelector<HTMLButtonElement>('[data-action="publish-now"]')!.click();
+    detailEditor.querySelector<HTMLButtonElement>('[data-action="publish-now"]')!.click();
     await flush();
-    expect(composer.querySelector('[data-status="composer-error"]')?.textContent).toContain('已归档');
+    expect(detailEditor.querySelector('[data-status="composer-error"]')?.textContent).toContain('已归档');
     expect((await bountyApi.getBountyDetail(draft.id)).bounty.status).toBe('DRAFT');
 
     // 用户主动切换至活跃项目后可正常保存并发布
-    projectSelect.value = activeProj.id;
-    projectSelect.dispatchEvent(new Event('change', { bubbles: true }));
+    projectSelect.click();
     await flush();
-    expect(composer.querySelector('[data-status="archived-project-warning"]')).toBeNull();
+    detailEditor
+      .querySelector<HTMLButtonElement>(`#bounty-project-listbox [data-value="${activeProj.id}"]`)!
+      .click();
+    await flush();
+    expect(detailEditor.querySelector('[data-status="archived-project-warning"]')).toBeNull();
 
-    composer.querySelector<HTMLButtonElement>('[data-action="publish-now"]')!.click();
+    detailEditor.querySelector<HTMLButtonElement>('[data-action="publish-now"]')!.click();
     await flush();
-    expect(target.querySelector('[data-dialog="bounty-composer"]')).toBeNull();
+    expect(detailEditor.dataset.bountyStatus).toBe('OPEN');
     const updated = (await bountyApi.getBountyDetail(draft.id)).bounty;
     expect(updated.project_id).toBe(activeProj.id);
     expect(updated.status).toBe('OPEN');
@@ -3176,18 +3181,20 @@ describe('任务板工作台外壳集成测试', () => {
       target.querySelector<HTMLButtonElement>('[data-action="open-composer"]')!.click();
       await flush();
       const composer = target.querySelector<HTMLElement>('[data-dialog="bounty-composer"]')!;
-      const projectSelect = composer.querySelector<HTMLSelectElement>('#bounty-project-select')!;
-      projectSelect.value = projAlpha.id;
-      projectSelect.dispatchEvent(new Event('change', { bubbles: true }));
+      const projectSelect = composer.querySelector<HTMLButtonElement>('#bounty-project-select')!;
+      projectSelect.click();
+      await flush();
+      composer
+        .querySelector<HTMLButtonElement>(`#bounty-project-listbox [data-value="${projAlpha.id}"]`)!
+        .click();
+      await flush();
       const titleInput = composer.querySelector<HTMLInputElement>('#bounty-title-input')!;
       titleInput.value = options.title;
       titleInput.dispatchEvent(new Event('input', { bubbles: true }));
       composer.querySelector<HTMLButtonElement>(`[data-assignee-mode="${options.mode}"]`)!.click();
       await flush();
       if (options.mode === 'min_tier' && options.minTier) {
-        const minTierSelect = composer.querySelector<HTMLSelectElement>('#bounty-min-tier-select')!;
-        minTierSelect.value = options.minTier;
-        minTierSelect.dispatchEvent(new Event('change', { bubbles: true }));
+        composer.querySelector<HTMLButtonElement>(`[data-min-tier="${options.minTier}"]`)!.click();
       } else if (options.mode === 'specific' && options.assigneeAgentId) {
         const agentInput = composer.querySelector<HTMLInputElement>('#bounty-assignee-agent-input')!;
         agentInput.value = options.assigneeAgentId;
@@ -3562,11 +3569,11 @@ describe('任务板工作台外壳集成测试', () => {
     detail1.querySelector<HTMLButtonElement>('[data-action="edit-draft"]')!.click();
     await flush();
 
-    const editComposer = target.querySelector<HTMLElement>('[data-dialog="bounty-composer"]')!;
-    const editTitleInput = editComposer.querySelector<HTMLInputElement>('#bounty-title-input')!;
+    expect(target.querySelector('[data-dialog="bounty-composer"]')).toBeNull();
+    const editTitleInput = detail1.querySelector<HTMLInputElement>('#bounty-title-input')!;
     editTitleInput.value = '人工核验转正任务';
     editTitleInput.dispatchEvent(new Event('input', { bubbles: true }));
-    editComposer.querySelector<HTMLButtonElement>('[data-action="publish-now"]')!.click();
+    detail1.querySelector<HTMLButtonElement>('[data-action="publish-now"]')!.click();
     await flush();
 
     const publishedDetail1 = await bountyApi.getBountyDetail(draftEditPublish.id);
@@ -4992,10 +4999,12 @@ describe('任务板工作台外壳集成测试', () => {
     const rootCommentEl = modal.querySelector<HTMLElement>('[data-comment-id]')!;
     expect(rootCommentEl.querySelector('.detail-comment-kind')).toBeNull();
 
-    // 右栏状态胶囊直接切换为 OPEN，再测试回复与楼中楼折叠
-    modal.querySelector<HTMLButtonElement>('[data-action="toggle-status-menu"]')!.click();
-    await flush();
-    modal.querySelector<HTMLButtonElement>('[data-status-transition="publish"]')!.click();
+    // 右栏状态展示为静态胶囊（不与顶栏操作重复下拉），通过顶栏发布为 OPEN 并原地编辑校验
+    expect(modal.querySelector('[data-action="toggle-status-menu"]')).toBeNull();
+    expect(modal.querySelector('[data-slot="detail-status-control"] .status-pill')?.textContent?.trim()).toBe(
+      '[草稿]',
+    );
+    modal.querySelector<HTMLButtonElement>('[data-action="publish-bounty"]')!.click();
     await flush();
     expect(modal.dataset.bountyStatus).toBe('OPEN');
     expect(modal.querySelector('.detail-timeline-item[data-event-type="published"]')).not.toBeNull();
@@ -5102,12 +5111,19 @@ describe('Issue 10 UI 集成测试：草稿共创拆单、前置依赖选择器�
 
     const depSection = target.querySelector<HTMLElement>('[data-slot="composer-blocked-by"]')!;
     expect(depSection).not.toBeNull();
+    depSection.querySelector<HTMLButtonElement>('[data-action="toggle-dep-picker"]')!.click();
+    await flush();
+    const depSearch = depSection.querySelector<HTMLInputElement>('[data-slot="dep-search-input"]')!;
+    depSearch.value = 'Prerequisite Task A';
+    depSearch.dispatchEvent(new Event('input', { bubbles: true }));
+    await flush();
     const depCheckbox = depSection.querySelector<HTMLInputElement>(
       `[data-dependency-id="${preA.id}"] input[type="checkbox"]`,
     )!;
     expect(depCheckbox).not.toBeNull();
     depCheckbox.click();
     await flush();
+    expect(depSection.querySelector(`[data-selected-dependency-id="${preA.id}"]`)).not.toBeNull();
 
     target.querySelector<HTMLButtonElement>('[data-action="publish-now"]')!.click();
     await flush();
@@ -5189,6 +5205,8 @@ describe('Issue 10 UI 集成测试：草稿共创拆单、前置依赖选择器�
     target.querySelector<HTMLButtonElement>('[data-action="edit-draft"]')!.click();
     await flush();
 
+    target.querySelector<HTMLButtonElement>('[data-action="toggle-dep-picker"]')!.click();
+    await flush();
     const cycleDepBox = target.querySelector<HTMLInputElement>(
       `[data-slot="composer-blocked-by"] [data-dependency-id="${draft2.id}"] input[type="checkbox"]`,
     )!;
@@ -5414,21 +5432,25 @@ describe('Issue 10 UI 集成测试：草稿共创拆单、前置依赖选择器�
     const depSection = target.querySelector<HTMLElement>('[data-slot="composer-blocked-by"]')!;
     expect(depSection.textContent).toContain('已选 1 项');
 
-    // 已勾选的已取消前置 P 仍展示在列表中并带 CANCELLED 徽章与 is-cancelled 样式；未勾选的 P2 不出现
-    const cancelledCandidate = depSection.querySelector<HTMLElement>(
-      `[data-dependency-id="${prereqSelected.id}"]`,
+    // 已勾选的已取消前置 P 在已选列表中显示并带 CANCELLED 徽章与 is-cancelled 样式；未勾选的 P2 不出现
+    const cancelledSelected = depSection.querySelector<HTMLElement>(
+      `[data-selected-dependency-id="${prereqSelected.id}"]`,
     )!;
-    expect(cancelledCandidate).not.toBeNull();
-    expect(cancelledCandidate.classList.contains('is-cancelled')).toBe(true);
-    expect(cancelledCandidate.dataset.dependencyStatus).toBe('CANCELLED');
-    expect(cancelledCandidate.querySelector('[data-status="CANCELLED"]')).not.toBeNull();
-    const cancelledCheckbox = cancelledCandidate.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
-    expect(cancelledCheckbox.checked).toBe(true);
+    expect(cancelledSelected).not.toBeNull();
+    expect(cancelledSelected.classList.contains('is-cancelled')).toBe(true);
+    expect(cancelledSelected.dataset.dependencyStatus).toBe('CANCELLED');
+    expect(cancelledSelected.querySelector('[data-status="CANCELLED"]')).not.toBeNull();
 
+    depSection.querySelector<HTMLButtonElement>('[data-action="toggle-dep-picker"]')!.click();
+    await flush();
+    const cancelledCheckbox = depSection.querySelector<HTMLInputElement>(
+      `[data-dependency-id="${prereqSelected.id}"] input[type="checkbox"]`,
+    )!;
+    expect(cancelledCheckbox.checked).toBe(true);
     expect(depSection.querySelector(`[data-dependency-id="${prereqUnselected.id}"]`)).toBeNull();
 
-    // 取消勾选 P 后保存草稿应成功并清空 blocked_by
-    cancelledCheckbox.click();
+    // 通过已选列表移除按钮取消 P 后保存草稿应成功并清空 blocked_by
+    cancelledSelected.querySelector<HTMLButtonElement>('[data-action="remove-dependency"]')!.click();
     await flush();
     expect(depSection.textContent).not.toContain('已选 1 项');
 
@@ -5527,9 +5549,9 @@ describe('Issue 10 UI 集成测试：草稿共创拆单、前置依赖选择器�
     expect(collabHelpPopover.hidden).toBe(true);
     expect(target.querySelector('[data-dialog="bounty-detail"]')).not.toBeNull();
 
-    // Tab / Shift+Tab 焦点陷阱闭环（从首控件 Shift+Tab 回到末控件，再 Tab 回到首控件）
+    // Tab / Shift+Tab 焦点陷阱闭环（从首控件 Shift+Tab 回到末控件评论输入框，再 Tab 回到首控件）
     const firstFocusable = drawer.querySelector<HTMLButtonElement>('[data-action="edit-draft"]')!;
-    const lastFocusable = drawer.querySelector<HTMLButtonElement>('[data-action="toggle-status-menu"]')!;
+    const lastFocusable = drawer.querySelector<HTMLTextAreaElement>('[data-slot="comment-input"]')!;
     firstFocusable.focus();
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, bubbles: true }));
     expect(document.activeElement).toBe(lastFocusable);
@@ -5550,21 +5572,21 @@ describe('Issue 10 UI 集成测试：草稿共创拆单、前置依赖选择器�
     expect(target.querySelector('.detail-drawer-title')?.textContent).toContain('Child Focus Draft');
     expect(drawer.contains(document.activeElement)).toBe(true);
 
-    // 从抽屉中打开编辑草稿弹窗时，上层模态正常接收输入/Escape 而不被下层抽屉抢夺；关闭后焦点回到抽屉内编辑按钮
+    // 在详情弹窗内点击编辑草稿进入原地编辑（不额外弹出第二个窗口）；按 Escape 退回详情视图并恢复焦点到编辑按钮
     const editDraftBtn = drawer.querySelector<HTMLButtonElement>('[data-action="edit-draft"]')!;
     editDraftBtn.focus();
     editDraftBtn.click();
     await flush();
-    expect(target.querySelector('[data-dialog="bounty-composer"]')).not.toBeNull();
-    const composerTitle = target.querySelector<HTMLInputElement>('#bounty-title-input')!;
+    expect(target.querySelector('[data-dialog="bounty-composer"]')).toBeNull();
+    const composerTitle = drawer.querySelector<HTMLInputElement>('#bounty-title-input')!;
     composerTitle.focus();
     expect(document.activeElement).toBe(composerTitle);
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
     await flush();
-    expect(target.querySelector('[data-dialog="bounty-composer"]')).toBeNull();
+    expect(drawer.querySelector('#bounty-title-input')).toBeNull();
     expect(target.querySelector('[data-dialog="bounty-detail"]')).not.toBeNull();
     expect(drawer.contains(document.activeElement)).toBe(true);
-    expect(document.activeElement).toBe(editDraftBtn);
+    expect(document.activeElement).toBe(drawer.querySelector('[data-action="edit-draft"]'));
 
     // 最终按 Escape 关闭详情抽屉并恢复焦点到打开它的卡片按钮
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
