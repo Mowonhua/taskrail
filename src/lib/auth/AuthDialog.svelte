@@ -1,9 +1,10 @@
 <script lang="ts">
   /**
-   * 文件职责：承载用户账号注册与登录弹窗，支持可选系统预制或上传头像。
+   * 文件职责：承载用户账号登录与注册弹窗，支持可选莫兰迪系统预制头像或上传头像。
    * 约束条件：用户注册不依赖 Agent 邀请令牌；严格校验名称（1–64）与密码（12–128）规则。
    */
   import { untrack } from 'svelte';
+  import appIcon from '../../../src-tauri/icons/icon.png';
   import type {
     AuthAvatarPreset,
     LoginUserInput,
@@ -13,12 +14,11 @@
   import { formatAuthError } from '../bounty/helpers';
   import { lightDismiss } from '../dialog-light-dismiss';
   import { t } from '../i18n';
-  import UserAvatar from './UserAvatar.svelte';
+  import UserAvatarEditor from './UserAvatarEditor.svelte';
   import {
     AUTH_NAME_MAX_LENGTH,
     AUTH_PASSWORD_MAX_LENGTH,
-    DEFAULT_AUTH_AVATAR_PRESETS,
-    fileToUploadAvatar,
+    AUTH_PASSWORD_MIN_LENGTH,
     validateUserNameError,
     validateUserPasswordError,
   } from './avatars';
@@ -26,6 +26,7 @@
   interface Props {
     initialMode?: 'login' | 'register';
     presets: AuthAvatarPreset[];
+    presetsError?: string;
     onLoadAvatars?: () => Promise<void>;
     onLogin: (input: LoginUserInput) => Promise<void>;
     onRegister: (input: RegisterUserInput) => Promise<void>;
@@ -35,6 +36,7 @@
   let {
     initialMode = 'login',
     presets,
+    presetsError = '',
     onLoadAvatars,
     onLogin,
     onRegister,
@@ -45,13 +47,18 @@
   let mode = $state<'login' | 'register'>(untrack(() => initialMode));
   let name = $state('');
   let password = $state('');
+  let showPassword = $state(false);
+  let passwordTouched = $state(false);
   let selectedAvatar = $state<UserAvatarValue | null>(null);
   let submitting = $state(false);
   let error = $state('');
-  let fileInput = $state<HTMLInputElement>();
 
-  const resolvedPresets = $derived(
-    presets.length > 0 ? presets : [...DEFAULT_AUTH_AVATAR_PRESETS],
+  const showPasswordHint = $derived(
+    !error &&
+      mode === 'register' &&
+      passwordTouched &&
+      password.length > 0 &&
+      Array.from(password).length < AUTH_PASSWORD_MIN_LENGTH,
   );
 
   $effect(() => {
@@ -91,20 +98,9 @@
   function switchMode(nextMode: 'login' | 'register'): void {
     if (submitting || mode === nextMode) return;
     mode = nextMode;
+    showPassword = false;
+    passwordTouched = false;
     error = '';
-  }
-
-  async function handleFileChange(event: Event): Promise<void> {
-    const input = event.currentTarget as HTMLInputElement;
-    const file = input.files?.[0];
-    input.value = '';
-    if (!file || submitting) return;
-    error = '';
-    try {
-      selectedAvatar = await fileToUploadAvatar(file);
-    } catch (cause) {
-      error = formatAuthError(cause, 'register');
-    }
   }
 
   async function submit(event: SubmitEvent): Promise<void> {
@@ -166,9 +162,12 @@
   onclose={onClose}
 >
   <header class="modal-header auth-dialog-header">
-    <h2 id="auth-dialog-title" class="modal-title">
-      {$t(mode === 'login' ? '登录账号' : '注册账号')}
-    </h2>
+    <div class="auth-dialog-brand">
+      <img src={appIcon} width="22" height="22" alt="" draggable={false} />
+      <h2 id="auth-dialog-title" class="modal-title">
+        {$t(mode === 'login' ? '登录 Taskrail' : '创建账号')}
+      </h2>
+    </div>
     <button
       type="button"
       class="icon-button"
@@ -179,145 +178,108 @@
     </button>
   </header>
 
-  <div class="segmented-group auth-mode-tabs" role="tablist" aria-label={$t('账号操作')}>
-    <button
-      type="button"
-      role="tab"
-      class="segmented-button"
-      class:active={mode === 'login'}
-      aria-selected={mode === 'login'}
-      data-auth-tab="login"
-      disabled={submitting}
-      onclick={() => switchMode('login')}
-    >
-      {$t('登录')}
-    </button>
-    <button
-      type="button"
-      role="tab"
-      class="segmented-button"
-      class:active={mode === 'register'}
-      aria-selected={mode === 'register'}
-      data-auth-tab="register"
-      disabled={submitting}
-      onclick={() => switchMode('register')}
-    >
-      {$t('注册')}
-    </button>
-  </div>
-
   <form class="auth-dialog-form" onsubmit={submit}>
+    {#if mode === 'register'}
+      <UserAvatarEditor
+        name={name.trim()}
+        avatar={selectedAvatar}
+        {presets}
+        {presetsError}
+        disabled={submitting}
+        errorContext="register"
+        editorSlot="auth-register-avatar"
+        previewSlot="auth-avatar-preview"
+        uploadInputSlot="auth-avatar-upload-input"
+        uploadAction="auth-upload-avatar"
+        warningSlot="auth-presets-warning"
+        onChange={next => {
+          selectedAvatar = next;
+        }}
+        onError={message => {
+          error = message;
+        }}
+      />
+    {/if}
+
     <div class="project-form-field">
       <label class="composer-label" for="auth-name-input">{$t('用户名')}</label>
+      <!-- svelte-ignore a11y_autofocus -->
       <input
         id="auth-name-input"
+        name="username"
         class="settings-text-input"
         bind:value={name}
         maxlength={AUTH_NAME_MAX_LENGTH}
         autocomplete="username"
+        autocorrect="off"
+        autocapitalize="none"
+        spellcheck={false}
+        enterkeyhint="next"
+        autofocus
         disabled={submitting}
-        placeholder={$t('1 至 64 个字符')}
+        placeholder={$t('输入用户名')}
       />
     </div>
 
     <div class="project-form-field">
       <label class="composer-label" for="auth-password-input">{$t('密码')}</label>
-      <input
-        id="auth-password-input"
-        type="password"
-        class="settings-text-input"
-        bind:value={password}
-        maxlength={AUTH_PASSWORD_MAX_LENGTH}
-        autocomplete={mode === 'login' ? 'current-password' : 'new-password'}
-        disabled={submitting}
-        placeholder={mode === 'register' ? $t('12 至 128 个字符') : ''}
-      />
-    </div>
-
-    {#if mode === 'register'}
-      <div class="auth-avatar-section" data-slot="auth-register-avatar">
-        <div class="auth-avatar-preview-row">
-          <UserAvatar name={name || '?'} avatar={selectedAvatar} size="md" />
-          <div class="auth-avatar-preview-copy">
-            <span class="composer-label">{$t('头像（可选）')}</span>
-            <span class="composer-hint">{$t('可选择预设颜色，或上传不超过 256 KiB 的 PNG/JPEG/WebP。')}</span>
-          </div>
-        </div>
-
-        <div class="avatar-preset-grid" role="group" aria-label={$t('系统预制头像')}>
-          {#each resolvedPresets as preset (preset.id)}
-            {@const active = selectedAvatar?.kind === 'preset' && selectedAvatar.id === preset.id}
-            <button
-              type="button"
-              class="avatar-preset-option"
-              class:active
-              aria-pressed={active}
-              data-avatar-preset-option={preset.id}
-              disabled={submitting}
-              onclick={() => {
-                selectedAvatar = { kind: 'preset', id: preset.id };
-                error = '';
-              }}
-            >
-              <UserAvatar name={name || preset.label} avatar={{ kind: 'preset', id: preset.id }} size="sm" />
-              <span>{$t(preset.label)}</span>
-            </button>
-          {/each}
-        </div>
-
-        <div class="avatar-upload-actions">
-          <input
-            bind:this={fileInput}
-            type="file"
-            class="visually-hidden"
-            accept="image/png,image/jpeg,image/webp"
-            data-slot="auth-avatar-upload-input"
-            onchange={handleFileChange}
-          />
-          <button
-            type="button"
-            class="secondary-action"
-            data-action="auth-upload-avatar"
-            disabled={submitting}
-            onclick={() => fileInput?.click()}
-          >
-            {$t('上传头像')}
-          </button>
-          {#if selectedAvatar !== null}
-            <button
-              type="button"
-              class="secondary-action"
-              data-action="auth-clear-avatar"
-              disabled={submitting}
-              onclick={() => {
-                selectedAvatar = null;
-                error = '';
-              }}
-            >
-              {$t('清除头像')}
-            </button>
+      <div class="auth-password-wrap">
+        <input
+          id="auth-password-input"
+          name="password"
+          type={showPassword ? 'text' : 'password'}
+          class="settings-text-input auth-password-input"
+          bind:value={password}
+          maxlength={AUTH_PASSWORD_MAX_LENGTH}
+          autocomplete={mode === 'login' ? 'current-password' : 'new-password'}
+          enterkeyhint="done"
+          disabled={submitting}
+          placeholder={mode === 'register' ? $t('输入密码（至少 12 位）') : $t('输入密码')}
+          onblur={() => {
+            if (password.length > 0) passwordTouched = true;
+          }}
+        />
+        <button
+          type="button"
+          class="icon-button auth-password-toggle"
+          aria-pressed={showPassword}
+          aria-label={$t(showPassword ? '隐藏密码' : '显示密码')}
+          title={$t(showPassword ? '隐藏密码' : '显示密码')}
+          disabled={submitting}
+          onclick={() => {
+            showPassword = !showPassword;
+          }}
+        >
+          {#if showPassword}
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M10.733 5.076a10.744 10.744 0 0 1 11.205 6.575 1 1 0 0 1 0 .696 10.747 10.747 0 0 1-1.444 2.49" />
+              <path d="M14.084 14.158a3 3 0 0 1-4.242-4.242" />
+              <path d="M17.479 17.499a10.75 10.75 0 0 1-15.417-5.151 1 1 0 0 1 0-.696 10.75 10.75 0 0 1 4.446-5.143" />
+              <path d="m2 2 20 20" />
+            </svg>
+          {:else}
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0" />
+              <circle cx="12" cy="12" r="3" />
+            </svg>
           {/if}
-        </div>
+        </button>
       </div>
-    {/if}
+      {#if showPasswordHint}
+        <p class="auth-field-hint" data-slot="auth-password-hint">
+          {$t('密码至少需要 12 个字符')}
+        </p>
+      {/if}
+    </div>
 
     {#if error}
       <p class="dialog-error" role="alert" data-slot="auth-error">{error}</p>
     {/if}
 
-    <footer class="modal-actions auth-dialog-actions">
-      <button
-        type="button"
-        class="secondary-action"
-        data-action="cancel-auth"
-        disabled={submitting}
-        onclick={close}
-      >
-        {$t('取消')}
-      </button>
+    <div class="auth-submit-block">
       <button
         type="submit"
-        class="primary"
+        class="primary auth-submit-btn"
         data-action="confirm-auth"
         disabled={submitting}
       >
@@ -325,12 +287,25 @@
           submitting
             ? mode === 'login'
               ? '正在登录…'
-              : '正在注册…'
+              : '正在创建…'
             : mode === 'login'
               ? '登录'
-              : '注册',
+              : '创建账号',
         )}
       </button>
-    </footer>
+
+      <p class="auth-mode-footer">
+        <span>{$t(mode === 'login' ? '还没有账号？' : '已有账号？')}</span>
+        <button
+          type="button"
+          class="auth-mode-switch-link"
+          data-auth-tab={mode === 'login' ? 'register' : 'login'}
+          disabled={submitting}
+          onclick={() => switchMode(mode === 'login' ? 'register' : 'login')}
+        >
+          {$t(mode === 'login' ? '去注册' : '去登录')}
+        </button>
+      </p>
+    </div>
   </form>
 </dialog>

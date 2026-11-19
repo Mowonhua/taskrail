@@ -67,6 +67,7 @@
 | 主入口 | src/App.svelte::<module> |
 | 主入口 | src/lib/auth/AuthDialog.svelte::<module> |
 | 主入口 | src/lib/auth/UserProfileDialog.svelte::<module> |
+| 关键实现 | src/lib/auth/UserAvatarEditor.svelte::<module> |
 | 关键实现 | src/lib/api/bounty-client.ts::HttpBountyClient |
 | 关键实现 | src-tauri/src/server/db/accounts.rs::Repository::register_account |
 | 关键实现 | src-tauri/src/server/db/accounts.rs::Repository::login_account |

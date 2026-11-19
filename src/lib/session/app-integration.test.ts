@@ -5756,12 +5756,27 @@ describe('用户账号注册、登录、个人设置与服务隔离集成测试'
     expect(target.querySelector('[data-slot="sidebar-user-name"]')?.textContent?.trim()).toBe('Alice Wang');
     expect(trigger.querySelector('img')?.getAttribute('src')).toContain('data:image/png;base64,');
 
-    // 重新打开个人设置并清除头像 -> 传 avatar: null 并回退首字母渲染
+    // 重新打开个人设置并选择预制颜色替换上传头像，再取消选中清除头像 -> 传 avatar: null 并回退首字母渲染
     trigger.click();
     await flush();
     target.querySelector<HTMLButtonElement>('[data-action="open-user-profile"]')!.click();
     await flush();
-    profileDialog()!.querySelector<HTMLButtonElement>('[data-action="clear-avatar"]')!.click();
+    profileDialog()!.querySelector<HTMLButtonElement>('[data-avatar-preset-option="slate"]')!.click();
+    await flush();
+    profileDialog()!.querySelector<HTMLFormElement>('form')!.dispatchEvent(
+      new Event('submit', { bubbles: true, cancelable: true }),
+    );
+    await flush();
+    expect(updateMeSpy).toHaveBeenLastCalledWith(expect.any(String), {
+      avatar: { kind: 'preset', id: 'slate' },
+    });
+    expect(trigger.querySelector('[data-avatar-kind="preset"][data-avatar-preset="slate"]')).not.toBeNull();
+
+    trigger.click();
+    await flush();
+    target.querySelector<HTMLButtonElement>('[data-action="open-user-profile"]')!.click();
+    await flush();
+    profileDialog()!.querySelector<HTMLButtonElement>('[data-avatar-preset-option="slate"]')!.click();
     await flush();
     profileDialog()!.querySelector<HTMLFormElement>('form')!.dispatchEvent(
       new Event('submit', { bubbles: true, cancelable: true }),

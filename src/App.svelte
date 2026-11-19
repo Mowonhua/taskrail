@@ -3752,6 +3752,7 @@
     <AuthDialog
       initialMode={authDialogMode}
       presets={avatarPresets}
+      presetsError={avatarPresetsError}
       onLoadAvatars={loadAuthAvatars}
       onLogin={handleLoginUser}
       onRegister={handleRegisterUser}
