@@ -101,6 +101,7 @@ html[data-corners="square"] {
   --field-radius: 0px;
   --floating-radius: 0px;
   --scrollbar-radius: 0px;
+  --ticket-card-radius: 0px;
 }
 
 ::selection {
@@ -2146,13 +2147,24 @@ button.ghost-action:hover:not(:disabled) {
   position: relative;
   display: flex;
   flex-direction: column;
+  height: 100%;
   min-width: 0;
+  --ticket-rank-ink: var(--accent);
+  --ticket-stub-bg: transparent;
+  --ticket-divider: var(--line);
+  --ticket-meta-divider: var(--divider-color, var(--line));
+  --ticket-notch-border: var(--floating-border, var(--field-border, var(--line)));
+  filter: drop-shadow(0 1px 2px rgba(28, 32, 29, 0.045))
+    drop-shadow(0 3px 8px rgba(28, 32, 29, 0.05));
+  transition:
+    transform 0.16s cubic-bezier(0.22, 1, 0.36, 1),
+    filter 0.16s ease;
 }
 
 .bounty-card-select {
   position: absolute;
-  top: 14px;
-  right: 14px;
+  top: 12px;
+  left: 14px;
   z-index: 2;
   display: inline-flex;
   align-items: center;
@@ -2175,23 +2187,70 @@ button.ghost-action:hover:not(:disabled) {
   cursor: pointer;
 }
 
+/* 任务卡片“委托单 + 等级票根”印泥色变量（浅色 / 深色 / 双色分别适配）。 */
+:root:not([data-monochrome="true"]) .bounty-card {
+  --ticket-divider: color-mix(in oklab, var(--ink) 13%, transparent);
+  --ticket-meta-divider: color-mix(in oklab, var(--ink) 9%, transparent);
+}
+
+:root:not([data-monochrome="true"]) .bounty-card[data-bounty-difficulty="S"] {
+  --ticket-rank-ink: #9e3b33;
+  --ticket-stub-bg: color-mix(in oklab, #9e3b33 5.5%, transparent);
+}
+
+:root:not([data-monochrome="true"]) .bounty-card[data-bounty-difficulty="A"] {
+  --ticket-rank-ink: #9a6b26;
+  --ticket-stub-bg: color-mix(in oklab, #9a6b26 6%, transparent);
+}
+
+:root:not([data-monochrome="true"]) .bounty-card[data-bounty-difficulty="B"] {
+  --ticket-rank-ink: #3b5944;
+  --ticket-stub-bg: color-mix(in oklab, #3b5944 5.5%, transparent);
+}
+
+:root:not([data-monochrome="true"]) .bounty-card[data-bounty-difficulty="C"] {
+  --ticket-rank-ink: #646b66;
+  --ticket-stub-bg: color-mix(in oklab, #646b66 5.5%, transparent);
+}
+
+:root[data-theme="dark"]:not([data-monochrome="true"]) .bounty-card[data-bounty-difficulty="S"] {
+  --ticket-rank-ink: #dc7e75;
+  --ticket-stub-bg: color-mix(in oklab, #dc7e75 8%, transparent);
+}
+
+:root[data-theme="dark"]:not([data-monochrome="true"]) .bounty-card[data-bounty-difficulty="A"] {
+  --ticket-rank-ink: #d5ab64;
+  --ticket-stub-bg: color-mix(in oklab, #d5ab64 8%, transparent);
+}
+
+:root[data-theme="dark"]:not([data-monochrome="true"]) .bounty-card[data-bounty-difficulty="B"] {
+  --ticket-rank-ink: #94b89d;
+  --ticket-stub-bg: color-mix(in oklab, #94b89d 8%, transparent);
+}
+
+:root[data-theme="dark"]:not([data-monochrome="true"]) .bounty-card[data-bounty-difficulty="C"] {
+  --ticket-rank-ink: #9fa6a0;
+  --ticket-stub-bg: color-mix(in oklab, #9fa6a0 8%, transparent);
+}
+
 .bounty-card-button {
+  position: relative;
+  overflow: hidden;
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
   align-items: stretch;
   justify-content: flex-start;
   flex: 1;
-  gap: 10px;
+  gap: 0;
   width: 100%;
-  padding: 16px 18px;
+  height: 100%;
+  min-height: 156px;
+  padding: 0;
   border-top: 1px solid var(--floating-border-top, var(--floating-border, var(--field-border, var(--line))));
   border-right: 1px solid var(--floating-border-right, var(--floating-border, var(--field-border, var(--line))));
   border-bottom: 1px solid var(--floating-border-bottom, var(--floating-border, var(--field-border, var(--line))));
   border-left: 1px solid var(--floating-border-left, var(--floating-border, var(--field-border, var(--line))));
-  border-radius: var(--floating-radius-top-left, var(--floating-radius, 14px))
-    var(--floating-radius-top-right, var(--floating-radius, 14px))
-    var(--floating-radius-bottom-right, var(--floating-radius, 14px))
-    var(--floating-radius-bottom-left, var(--floating-radius, 14px));
+  border-radius: var(--ticket-card-radius, 5px);
   background: linear-gradient(
       145deg,
       var(--surface-sheen-start, transparent) 0%,
@@ -2205,18 +2264,135 @@ button.ghost-action:hover:not(:disabled) {
     brightness(var(--surface-brightness, 1));
   box-shadow: var(--control-shadow, none);
   text-align: left;
+  transition:
+    box-shadow 0.16s ease,
+    border-color 0.16s ease;
+}
+
+/* 票据虚线上下半圆撕口：用 mask 真挖空按钮边缘并在缺口内沿补上 1px 弧线，使父级 drop-shadow 沿凹口投射。 */
+:root:not([data-corners="square"]) .bounty-card-button {
+  -webkit-mask-image:
+    radial-gradient(circle 6px at calc(100% - 90.5px) 0, transparent 5.2px, #000 5.9px),
+    radial-gradient(circle 6px at calc(100% - 90.5px) 100%, transparent 5.2px, #000 5.9px);
+  -webkit-mask-composite: source-in;
+  mask-image:
+    radial-gradient(circle 6px at calc(100% - 90.5px) 0, transparent 5.2px, #000 5.9px),
+    radial-gradient(circle 6px at calc(100% - 90.5px) 100%, transparent 5.2px, #000 5.9px);
+  mask-composite: intersect;
+}
+
+.bounty-card-notch {
+  position: absolute;
+  right: 84.5px;
+  width: 12px;
+  height: 12px;
+  border-radius: 999px;
+  background: transparent;
+  border: 1px solid var(--ticket-notch-border);
+  pointer-events: none;
+  z-index: 2;
+  transition: border-color 0.16s ease;
+}
+
+.bounty-card-notch.is-top {
+  top: -6px;
+  clip-path: inset(50% 0 0 0);
+}
+
+.bounty-card-notch.is-bottom {
+  bottom: -6px;
+  clip-path: inset(0 0 50% 0);
+}
+
+:root[data-corners="square"] .bounty-card-notch {
+  display: none;
+}
+
+:root[data-monochrome="true"] .bounty-card-button {
+  box-shadow: none;
+}
+
+.bounty-card[data-bounty-status="DRAFT"] .bounty-card-button {
+  border-style: dashed;
+}
+
+:root:not([data-monochrome="true"]) .bounty-card[data-bounty-status="DRAFT"] {
+  --ticket-notch-border: color-mix(in oklab, var(--muted) 38%, var(--line));
+}
+
+:root:not([data-monochrome="true"]) .bounty-card[data-bounty-status="DRAFT"] .bounty-card-button {
+  border-color: color-mix(in oklab, var(--muted) 38%, var(--line));
+}
+
+.bounty-card:has(.bounty-card-button:hover:not(:disabled)) {
+  --ticket-notch-border: var(--accent);
+}
+
+:root:not([data-monochrome="true"]) .bounty-card:has(.bounty-card-button:hover:not(:disabled)) {
+  --ticket-notch-border: color-mix(in oklab, var(--accent) 44%, var(--line));
+  filter: drop-shadow(0 2px 4px rgba(28, 32, 29, 0.06))
+    drop-shadow(0 8px 14px rgba(28, 32, 29, 0.08));
 }
 
 .bounty-card-button:hover:not(:disabled) {
+  background: linear-gradient(
+      145deg,
+      var(--surface-sheen-start, transparent) 0%,
+      var(--surface-sheen-middle, transparent) 48%,
+      var(--surface-sheen-end, transparent) 100%
+    ),
+    var(--floating-background, var(--surface));
   border-color: var(--accent);
+  box-shadow: var(--control-hover-shadow, var(--control-shadow, none));
+  transform: none;
 }
 
 :root:not([data-monochrome="true"]) .bounty-card-button:hover:not(:disabled) {
-  border-color: color-mix(in oklab, var(--accent) 42%, var(--line));
+  border-color: color-mix(in oklab, var(--accent) 44%, var(--line));
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  :root:not([data-monochrome="true"]) .bounty-card:has(.bounty-card-button:hover:not(:disabled)) {
+    transform: translateY(-2px);
+  }
+
+  :root:not([data-monochrome="true"]) .bounty-card:has(.bounty-card-button:active:not(:disabled)) {
+    transform: translateY(0);
+  }
+}
+
+.bounty-card-button:active:not(:disabled) {
+  box-shadow: var(--control-pressed-shadow, var(--control-shadow, none));
+  transform: none;
+}
+
+:root[data-monochrome="true"] .bounty-card,
+:root[data-monochrome="true"] .bounty-card-button:hover:not(:disabled),
+:root[data-monochrome="true"] .bounty-card-button:active:not(:disabled) {
+  filter: none;
+  box-shadow: none;
+  transform: none;
+}
+
+.bounty-card-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px 16px 12px;
+}
+
+.bounty-card-body {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
 
 .bounty-card-button.is-selectable .bounty-card-header {
-  padding-right: 30px;
+  padding-left: 26px;
 }
 
 .bounty-card-header {
@@ -2225,14 +2401,150 @@ button.ghost-action:hover:not(:disabled) {
   justify-content: space-between;
   gap: 8px;
   width: 100%;
+  min-height: 22px;
+  flex-shrink: 0;
   flex-wrap: wrap;
 }
 
 .bounty-card-badges {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 10px;
   flex-wrap: wrap;
+}
+
+.bounty-card-stub {
+  position: relative;
+  isolation: isolate;
+  flex: 0 0 90px;
+  width: 90px;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: space-between;
+  padding: 11px 8px;
+  border-left: 1px dashed var(--ticket-divider);
+  background-color: var(--ticket-stub-bg);
+  text-align: center;
+}
+
+:root:not([data-monochrome="true"]) .bounty-card-stub {
+  background-image: repeating-linear-gradient(
+    -45deg,
+    color-mix(in oklab, var(--ticket-rank-ink) 3.5%, transparent) 0,
+    color-mix(in oklab, var(--ticket-rank-ink) 3.5%, transparent) 1px,
+    transparent 1px,
+    transparent 6px
+  );
+}
+
+.bounty-card-stub-code {
+  flex: 0 0 14px;
+  min-height: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: 500;
+  line-height: 1;
+  letter-spacing: 0.06em;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+  opacity: 0.62;
+  user-select: none;
+}
+
+.bounty-card-stub-main {
+  position: relative;
+  flex: 1 1 auto;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.bounty-card-stub-frame {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--ticket-rank-ink);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+
+.bounty-card-stub-frame svg {
+  display: block;
+}
+
+.bounty-card-stub-frame[data-difficulty="C"] {
+  opacity: 0.16;
+}
+
+.bounty-card-stub-frame[data-difficulty="B"] {
+  opacity: 0.18;
+}
+
+.bounty-card-stub-frame[data-difficulty="A"] {
+  opacity: 0.21;
+  transform: translate(-50%, -50%) rotate(-3deg);
+}
+
+.bounty-card-stub-frame[data-difficulty="S"] {
+  opacity: 0.22;
+  transform: translate(-50%, -50%) rotate(-5deg);
+}
+
+:root:not([data-theme="dark"]):not([data-monochrome="true"]) .bounty-card[data-bounty-difficulty="S"] .bounty-card-stub-frame,
+:root:not([data-theme="dark"]):not([data-monochrome="true"]) .bounty-card[data-bounty-difficulty="S"] .bounty-card-stub-rank {
+  mix-blend-mode: multiply;
+}
+
+:root:not([data-theme="dark"]):not([data-monochrome="true"]) .bounty-card[data-bounty-difficulty="S"] .bounty-card-stub-frame {
+  opacity: 0.25;
+}
+
+:root[data-monochrome="true"] .bounty-card-stub-frame {
+  display: none;
+}
+
+.bounty-card-stub-rank {
+  position: relative;
+  font-family: "Playfair Display", Georgia, "Times New Roman", "Noto Serif SC", "Source Han Serif SC", serif;
+  font-size: 50px;
+  font-weight: 700;
+  line-height: 0.94;
+  letter-spacing: -0.02em;
+  color: var(--ticket-rank-ink);
+  user-select: none;
+}
+
+.bounty-card-stub-foot {
+  flex: 0 0 18px;
+  min-height: 18px;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.bounty-card-stub-tier {
+  font-size: 10.5px;
+  font-weight: 550;
+  line-height: 1.25;
+  letter-spacing: 0.01em;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.bounty-card-stub-dash {
+  width: 16px;
+  height: 1px;
+  background: var(--ticket-rank-ink);
+  opacity: 0.22;
 }
 
 .difficulty-badge {
@@ -2291,7 +2603,100 @@ button.ghost-action:hover:not(:disabled) {
   background: transparent;
   padding: 2px 4px;
   color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
   font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+}
+
+.status-pill-dot {
+  width: 5.5px;
+  height: 5.5px;
+  border-radius: 999px;
+  background: currentColor;
+  flex-shrink: 0;
+}
+
+.bounty-card .status-pill,
+.bounty-card .draft-review-pill,
+.bounty-card .blocked-pill,
+.bounty-card .derived-draft-pill,
+.bounty-card .rejection-pill,
+.bounty-card .quality-pill {
+  gap: 5px;
+  min-height: 20px;
+  padding: 0;
+  border-color: transparent;
+  background: transparent;
+  font-size: 11.5px;
+  font-weight: 550;
+}
+
+:root:not([data-monochrome="true"]) .bounty-card :is(
+  .status-pill,
+  .draft-review-pill,
+  .blocked-pill,
+  .derived-draft-pill,
+  .rejection-pill,
+  .quality-pill
+) {
+  border-color: transparent;
+  background: transparent;
+}
+
+:root:not([data-monochrome="true"]) .bounty-card .status-pill[data-status="DRAFT"] {
+  color: var(--muted);
+}
+
+:root:not([data-monochrome="true"]) .bounty-card :is(
+  .status-pill[data-status="OPEN"],
+  .status-pill[data-status="IN_PROGRESS"],
+  .status-pill[data-status="COMPLETED"],
+  .derived-draft-pill,
+  .quality-pill[data-quality-grade="perfect"]
+) {
+  color: var(--accent);
+}
+
+:root:not([data-monochrome="true"]) .bounty-card :is(
+  .status-pill[data-status="WAITING_INFO"],
+  .status-pill[data-status="PENDING_ARBITRATION"],
+  .status-pill[data-status="CANCELLED"],
+  .draft-review-pill,
+  .blocked-pill,
+  .rejection-pill,
+  .quality-pill[data-quality-grade="flawed"]
+) {
+  color: var(--danger);
+}
+
+:root[data-monochrome="true"] .bounty-card :is(
+  .status-pill,
+  .draft-review-pill,
+  .blocked-pill,
+  .derived-draft-pill,
+  .rejection-pill,
+  .quality-pill,
+  .arbitration-pill
+) {
+  color: var(--ink);
+}
+
+.bounty-card .arbitration-pill {
+  gap: 3.5px;
+  min-height: 20px;
+  padding: 1px 6px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+:root:not([data-monochrome="true"]) .bounty-card .arbitration-pill {
+  border-color: color-mix(in oklab, var(--accent) 26%, transparent);
+  background: transparent;
+  color: var(--accent);
 }
 
 .bounty-lease-pill,
@@ -2391,7 +2796,14 @@ button.ghost-action:hover:not(:disabled) {
   background: var(--accent-soft);
 }
 
-.bounty-card-time,
+.bounty-card-time {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.03em;
+  color: var(--muted);
+}
+
 .detail-meta-time {
   font-size: 11.5px;
   font-variant-numeric: tabular-nums;
@@ -2493,15 +2905,12 @@ button.ghost-action:hover:not(:disabled) {
   gap: 12px;
   width: 100%;
   margin-top: auto;
-  padding-top: 10px;
-  border-top: 1px solid var(--divider-color, var(--line));
+  flex-shrink: 0;
+  padding-top: 9px;
+  border-top: 1px dashed var(--ticket-meta-divider, var(--divider-color, var(--line)));
   font-size: 12px;
   color: var(--muted);
   flex-wrap: wrap;
-}
-
-:root:not([data-monochrome="true"]) .bounty-card-meta {
-  border-top-color: color-mix(in oklab, var(--divider-color, var(--line)) 65%, transparent);
 }
 
 .bounty-card-meta-end {
@@ -5562,6 +5971,10 @@ button.invite-token-select:is(:hover, :active) {
   cursor: pointer;
 }
 
+.bounty-card.is-selected {
+  --ticket-notch-border: var(--accent);
+}
+
 .bounty-card.is-selected .bounty-card-button {
   border-color: var(--accent);
 }
@@ -5983,6 +6396,34 @@ button.invite-token-select:is(:hover, :active) {
 
   .workspace-body {
     padding: 18px 16px 28px;
+  }
+
+  .bounty-card-stub {
+    flex-basis: 76px;
+    width: 76px;
+    padding: 10px 6px;
+  }
+
+  .bounty-card-notch {
+    right: 70.5px;
+  }
+
+  :root:not([data-corners="square"]) .bounty-card-button {
+    -webkit-mask-image:
+      radial-gradient(circle 6px at calc(100% - 76.5px) 0, transparent 5.2px, #000 5.9px),
+      radial-gradient(circle 6px at calc(100% - 76.5px) 100%, transparent 5.2px, #000 5.9px);
+    mask-image:
+      radial-gradient(circle 6px at calc(100% - 76.5px) 0, transparent 5.2px, #000 5.9px),
+      radial-gradient(circle 6px at calc(100% - 76.5px) 100%, transparent 5.2px, #000 5.9px);
+  }
+
+  .bounty-card-stub-rank {
+    font-size: 42px;
+  }
+
+  .bounty-card-stub-frame svg {
+    width: 54px;
+    height: 54px;
   }
 
   .settings-row {

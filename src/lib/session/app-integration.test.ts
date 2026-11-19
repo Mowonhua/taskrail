@@ -562,9 +562,10 @@ describe('任务板工作台外壳集成测试', () => {
     expect(cards).toHaveLength(1);
     expect(cards[0].dataset.bountyStatus).toBe('DRAFT');
     expect(cards[0].dataset.bountyDifficulty).toBe('A');
-    expect(cards[0].textContent).toContain('[草稿]');
-    expect(cards[0].textContent).toContain('最低 B 级');
-    expect(cards[0].textContent).toContain('仲裁开启');
+    expect(cards[0].querySelector('.status-pill')?.textContent?.trim()).toBe('草稿');
+    expect(cards[0].querySelector('[data-slot="card-rank-stub"]')?.textContent).toContain('A');
+    expect(cards[0].querySelector('[data-slot="card-min-tier"]')?.textContent?.trim()).toBe('门槛 ≥ B');
+    expect(cards[0].querySelector('[data-slot="card-arbitration"]')?.textContent?.trim()).toBe('仲裁');
   });
 
   it('支持任务详情抽屉、草稿编辑发布、未接取 OPEN 撤回草稿、并发抢单 409 冲突拦截与待处理聚合', async () => {
@@ -943,7 +944,7 @@ describe('任务板工作台外壳集成测试', () => {
     const draftCard = target.querySelector<HTMLElement>(`[data-bounty-id="${draftA.id}"]`)!;
     const openCard = target.querySelector<HTMLElement>(`[data-bounty-id="${openB.id}"]`)!;
     expect(openCard.querySelector('.status-pill')).toBeNull();
-    expect(draftCard.querySelector('.status-pill')?.textContent?.trim()).toBe('[草稿]');
+    expect(draftCard.querySelector('.status-pill')?.textContent?.trim()).toBe('草稿');
     expect(target.querySelector<HTMLInputElement>('[data-status-filter="OPEN"]')?.labels?.[0].textContent?.trim()).toBe('待接取');
 
     // 按项目筛选：仅保留 Beta 项目
@@ -4086,7 +4087,8 @@ describe('任务板工作台外壳集成测试', () => {
       '租约已冻结（等待回复）',
     );
     expect(card.querySelector('[data-slot="card-lease-countdown"]')).toBeNull();
-    expect(card.querySelector('[data-slot="card-comment-count"]')?.textContent?.trim()).toBe(
+    expect(card.querySelector('[data-slot="card-comment-count"]')?.textContent?.trim()).toBe('1');
+    expect(card.querySelector('[data-slot="card-comment-count"]')?.getAttribute('aria-label')).toBe(
       '评论 1',
     );
     expect(card.textContent).not.toContain('·');

@@ -850,6 +850,8 @@ export const appMessages: Readonly<Record<string, string>> = {
   "指定": "Specific",
   "添加前置任务": "Add prerequisite",
   "搜索前置任务": "Search prerequisite tasks",
-  "搜索任务标题或编号…": "Search task title or ID…"
+  "搜索任务标题或编号…": "Search task title or ID…",
+  "仲裁": "Arbitration",
+  "门槛 ≥ {tier}": "Min ≥ {tier}"
 };
 
