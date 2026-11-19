@@ -160,11 +160,27 @@ export interface BountyComment {
   author_name: string;
   kind: BountyCommentKind;
   body: string;
+  parent_id?: number | null;
+  reply_to_comment_id?: number | null;
+  reply_to_author_name?: string | null;
+  like_count?: number;
+  liked?: boolean;
+  updated_at?: string | null;
   created_at: string;
 }
 
 export interface CreateBountyCommentInput {
   body: string;
+  reply_to_comment_id?: number | null;
+}
+
+export interface UpdateBountyCommentInput {
+  body: string;
+}
+
+export interface DeleteBountyCommentResult {
+  bounty: BountyTask;
+  deleted_ids: number[];
 }
 
 export interface RequestInfoInput {
@@ -574,6 +590,7 @@ export type ServiceErrorCode =
   | 'BOUNTY_BLOCKED'
   | 'PROJECT_NOT_FOUND'
   | 'BOUNTY_NOT_FOUND'
+  | 'COMMENT_NOT_FOUND'
   | 'AGENT_NOT_FOUND'
   | 'INVITE_TOKEN_NOT_FOUND'
   | 'NOT_FOUND'

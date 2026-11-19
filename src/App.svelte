@@ -53,7 +53,7 @@
   import AgentDirectory from './lib/bounty/AgentDirectory.svelte';
   import BountyCard from './lib/bounty/BountyCard.svelte';
   import BountyComposerModal from './lib/bounty/BountyComposerModal.svelte';
-  import BountyDetailDrawer from './lib/bounty/BountyDetailDrawer.svelte';
+  import BountyDetailModal from './lib/bounty/BountyDetailModal.svelte';
   import { formatAuthError, formatServiceError } from './lib/bounty/helpers';
   import type { AuthAvatarPreset } from './lib/api/types';
   import { BrowserFilePort } from './lib/browser-files';
@@ -2187,7 +2187,11 @@
     }
   }
 
-  async function handleCreateCommentFromDrawer(bountyId: string, body: string): Promise<void> {
+  async function handleCreateCommentFromDrawer(
+    bountyId: string,
+    body: string,
+    replyToCommentId: number | null = null,
+  ): Promise<void> {
     const detailSeq = ++detailRequestSeq;
     const serviceSeq = serviceReconnectSeq;
     const api = activeBountyApi;
@@ -2197,7 +2201,11 @@
     const previousStatus = activeDetail?.bounty.status ?? null;
     detailInFlightCount += 1;
     try {
-      const result = await api.createBountyComment(bountyId, { body });
+      const payload =
+        replyToCommentId != null
+          ? { body, reply_to_comment_id: replyToCommentId }
+          : { body };
+      const result = await api.createBountyComment(bountyId, payload);
       const refreshedDetail = await api.getBountyDetail(bountyId);
       if (
         detailSeq === detailRequestSeq &&
@@ -2213,6 +2221,99 @@
     } catch (error) {
       showToast(formatServiceError(error));
       throw error;
+    } finally {
+      detailInFlightCount -= 1;
+    }
+  }
+
+  async function handleToggleCommentLikeFromModal(
+    bountyId: string,
+    commentId: number,
+  ): Promise<void> {
+    const detailSeq = ++detailRequestSeq;
+    const serviceSeq = serviceReconnectSeq;
+    const api = activeBountyApi;
+    if (typeof api.toggleBountyCommentLike !== 'function') {
+      throw new Error('Comment like API is unavailable');
+    }
+    detailInFlightCount += 1;
+    try {
+      const updatedComment = await api.toggleBountyCommentLike(bountyId, commentId);
+      if (
+        detailSeq === detailRequestSeq &&
+        serviceSeq === serviceReconnectSeq &&
+        api === activeBountyApi &&
+        activeDetail?.bounty.id === bountyId
+      ) {
+        activeDetail = {
+          ...activeDetail,
+          comments: activeDetail.comments.map(item =>
+            item.id === commentId ? updatedComment : item,
+          ),
+        };
+      }
+    } finally {
+      detailInFlightCount -= 1;
+    }
+  }
+
+  async function handleUpdateCommentFromModal(
+    bountyId: string,
+    commentId: number,
+    body: string,
+  ): Promise<void> {
+    const detailSeq = ++detailRequestSeq;
+    const serviceSeq = serviceReconnectSeq;
+    const api = activeBountyApi;
+    if (typeof api.updateBountyComment !== 'function') {
+      throw new Error('Comment edit API is unavailable');
+    }
+    detailInFlightCount += 1;
+    try {
+      const updatedComment = await api.updateBountyComment(bountyId, commentId, { body });
+      if (
+        detailSeq === detailRequestSeq &&
+        serviceSeq === serviceReconnectSeq &&
+        api === activeBountyApi &&
+        activeDetail?.bounty.id === bountyId
+      ) {
+        activeDetail = {
+          ...activeDetail,
+          comments: activeDetail.comments.map(item =>
+            item.id === commentId ? updatedComment : item,
+          ),
+        };
+      }
+      showToast($t('评论已更新'));
+    } finally {
+      detailInFlightCount -= 1;
+    }
+  }
+
+  async function handleDeleteCommentFromModal(
+    bountyId: string,
+    commentId: number,
+  ): Promise<void> {
+    const detailSeq = ++detailRequestSeq;
+    const serviceSeq = serviceReconnectSeq;
+    const api = activeBountyApi;
+    if (typeof api.deleteBountyComment !== 'function') {
+      throw new Error('Comment delete API is unavailable');
+    }
+    detailInFlightCount += 1;
+    try {
+      await api.deleteBountyComment(bountyId, commentId);
+      const refreshedDetail = await api.getBountyDetail(bountyId);
+      if (
+        detailSeq === detailRequestSeq &&
+        serviceSeq === serviceReconnectSeq &&
+        api === activeBountyApi &&
+        activeDetail?.bounty.id === bountyId
+      ) {
+        activeDetail = refreshedDetail;
+      }
+      await refreshBountyWorkspace();
+      showToast($t('评论已删除'));
     } finally {
       detailInFlightCount -= 1;
     }
@@ -3482,11 +3583,12 @@
   </main>
 
   {#if activeDetail}
-    <BountyDetailDrawer
+    <BountyDetailModal
       detail={activeDetail}
       project={bountyProjectsById.get(activeDetail.bounty.project_id)}
       agents={allAgents}
       allBounties={allBountiesForDeps}
+      currentUser={userProfile}
       onClose={closeBountyDetail}
       onEditDraft={openEditDraftComposer}
       onPublish={handlePublishFromDrawer}
@@ -3499,6 +3601,15 @@
       onSelectBounty={id => void openBountyDetail(id)}
       onPublishBatch={handlePublishBatch}
       onCreateComment={handleCreateCommentFromDrawer}
+      onToggleCommentLike={activeBountyApi.toggleBountyCommentLike
+        ? handleToggleCommentLikeFromModal
+        : undefined}
+      onUpdateComment={activeBountyApi.updateBountyComment
+        ? handleUpdateCommentFromModal
+        : undefined}
+      onDeleteComment={activeBountyApi.deleteBountyComment
+        ? handleDeleteCommentFromModal
+        : undefined}
       onApproveArbitration={handleApproveArbitrationFromDrawer}
       onRejectArbitration={handleRejectArbitrationFromDrawer}
     />

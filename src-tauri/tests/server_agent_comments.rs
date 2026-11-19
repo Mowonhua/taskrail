@@ -69,7 +69,10 @@ impl Kernel {
     }
 }
 fn input(body: &str) -> CreateBountyComment {
-    CreateBountyComment { body: body.into() }
+    CreateBountyComment {
+        body: body.into(),
+        reply_to_comment_id: None,
+    }
 }
 fn question(lease_id: i64, body: &str) -> RequestInfoInput {
     RequestInfoInput {
@@ -1324,4 +1327,150 @@ fn concurrent_replies_resume_once_and_preserve_all_comments() {
     assert_eq!(k.inbox(&worker.agent.id, "task.resumed").len(), 1);
     assert_eq!(k.inbox(&worker.agent.id, "comment.replied").len(), 1);
     assert_eq!(k.inbox(&worker.agent.id, "comment.added").len(), 3);
+}
+
+#[tokio::test]
+async fn threaded_replies_like_edit_and_delete_follow_two_level_and_cancelled_rules() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let k = Kernel::new();
+    let worker = k.agent("reply-worker");
+    let b = k.bounty();
+    let root = k.repo.create_bounty_comment(&b.id, input("root comment")).unwrap().comment;
+    assert_eq!(root.parent_id, None);
+    assert_eq!(root.like_count, 0);
+    assert!(!root.liked);
+
+    let sub1 = k
+        .repo
+        .agent_create_comment(
+            &b.id,
+            &worker.agent.id,
+            CreateBountyComment {
+                body: "first reply".into(),
+                reply_to_comment_id: Some(root.id),
+            },
+        )
+        .unwrap()
+        .comment;
+    assert_eq!(sub1.parent_id, Some(root.id));
+    assert_eq!(sub1.reply_to_comment_id, Some(root.id));
+    assert_eq!(sub1.reply_to_author_name.as_deref(), Some("human"));
+
+    // 回复二级评论时仍挂到根评论下（两级楼中楼），并记录被回复人
+    let sub2 = k
+        .repo
+        .create_bounty_comment(
+            &b.id,
+            CreateBountyComment {
+                body: "reply to sub1".into(),
+                reply_to_comment_id: Some(sub1.id),
+            },
+        )
+        .unwrap()
+        .comment;
+    assert_eq!(sub2.parent_id, Some(root.id));
+    assert_eq!(sub2.reply_to_comment_id, Some(sub1.id));
+    assert_eq!(sub2.reply_to_author_name.as_deref(), Some("reply-worker"));
+
+    // 跨任务回复与不存在的目标评论返回 404 COMMENT_NOT_FOUND
+    let other = k.bounty();
+    error(
+        k.repo.create_bounty_comment(
+            &other.id,
+            CreateBountyComment {
+                body: "cross task".into(),
+                reply_to_comment_id: Some(root.id),
+            },
+        ),
+        StatusCode::NOT_FOUND,
+        "COMMENT_NOT_FOUND",
+    );
+
+    let running = k.start().await;
+    let client = Client::new();
+    let like_url = format!(
+        "{}/api/v1/bounties/{}/comments/{}/like",
+        running.info.base_url, b.id, sub1.id
+    );
+    let edit_url = format!(
+        "{}/api/v1/bounties/{}/comments/{}",
+        running.info.base_url, b.id, sub2.id
+    );
+
+    let liked: BountyComment = client
+        .post(&like_url)
+        .bearer_auth("comments-admin")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(liked.liked);
+    assert_eq!(liked.like_count, 1);
+
+    let unliked: BountyComment = client
+        .post(&like_url)
+        .bearer_auth("comments-admin")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(!unliked.liked);
+    assert_eq!(unliked.like_count, 0);
+
+    let edited: BountyComment = client
+        .patch(&edit_url)
+        .bearer_auth("comments-admin")
+        .json(&json!({"body": "edited sub2"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(edited.body, "edited sub2");
+    assert!(edited.updated_at.is_some());
+
+    // 删除顶级评论级联清理全部子回复并更新 comment_count
+    let root_url = format!(
+        "{}/api/v1/bounties/{}/comments/{}",
+        running.info.base_url, b.id, root.id
+    );
+    let deleted: DeleteBountyCommentResult = client
+        .delete(&root_url)
+        .bearer_auth("comments-admin")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(deleted.deleted_ids, vec![root.id, sub1.id, sub2.id]);
+    assert_eq!(deleted.bounty.comment_count, 0);
+
+    // 已取消任务禁止编辑和删除评论
+    let c = k.repo.create_bounty_comment(&b.id, input("before cancel")).unwrap().comment;
+    k.repo.cancel_bounty(&b.id, "human").unwrap();
+    let cancel_edit_url = format!(
+        "{}/api/v1/bounties/{}/comments/{}",
+        running.info.base_url, b.id, c.id
+    );
+    let resp = client
+        .patch(&cancel_edit_url)
+        .bearer_auth("comments-admin")
+        .json(&json!({"body": "nope"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+    let resp_del = client
+        .delete(&cancel_edit_url)
+        .bearer_auth("comments-admin")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp_del.status(), StatusCode::CONFLICT);
 }

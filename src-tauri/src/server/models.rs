@@ -594,6 +594,18 @@ pub struct BountyComment {
     pub author_name: String,
     pub kind: String,
     pub body: String,
+    #[serde(default)]
+    pub parent_id: Option<i64>,
+    #[serde(default)]
+    pub reply_to_comment_id: Option<i64>,
+    #[serde(default)]
+    pub reply_to_author_name: Option<String>,
+    #[serde(default)]
+    pub like_count: i64,
+    #[serde(default)]
+    pub liked: bool,
+    #[serde(default)]
+    pub updated_at: Option<String>,
     pub created_at: String,
 }
 
@@ -602,6 +614,22 @@ pub struct BountyComment {
 #[serde(deny_unknown_fields)]
 pub struct CreateBountyComment {
     pub body: String,
+    #[serde(default)]
+    pub reply_to_comment_id: Option<i64>,
+}
+
+/// 结构职责：编辑评论正文；去除首尾空白后必须非空。
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateBountyComment {
+    pub body: String,
+}
+
+/// 结构职责：删除评论结果；返回最新任务快照和被删除的评论 ID 列表。
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DeleteBountyCommentResult {
+    pub bounty: Bounty,
+    pub deleted_ids: Vec<i64>,
 }
 
 /// 结构职责：当前租约持有者的提问；先校验令牌，再校验非空问题正文。

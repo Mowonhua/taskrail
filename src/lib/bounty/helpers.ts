@@ -454,6 +454,46 @@ export function formatTimestamp(iso: string | null | undefined): string {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
+export function formatCompactTimestamp(iso: string | null | undefined): string {
+  if (!iso) return '';
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return iso;
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const nowYear = new Date().getFullYear();
+  const base = `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  return date.getFullYear() === nowYear ? base : `${date.getFullYear()}-${base}`;
+}
+
+/**
+ * 将多行纯文本或无序列表形式的验收条件转换为勾选列表 Markdown，保留已有复选框、代码块与公式块。
+ */
+export function formatAcceptanceCriteriaMarkdown(source: string, completed = false): string {
+  const trimmed = source.trim();
+  if (!trimmed) return '';
+  const normalized = trimmed.replace(/\r\n?/g, '\n');
+  if (
+    /^\s*(?:```|~~~|\$\$|#{1,6}\s|>\s|\|)/m.test(normalized) ||
+    /^\s*(?:[-*+]|\d+\.)\s+\[[ xX]\]/m.test(normalized)
+  ) {
+    return trimmed;
+  }
+  const lines = normalized
+    .split('\n')
+    .map(line => line.trim())
+    .filter(Boolean);
+  if (lines.length < 2) {
+    return trimmed;
+  }
+  const allListLike = lines.every(line => /^(?:[-*+]|\d+\.)\s+/.test(line));
+  const check = completed ? 'x' : ' ';
+  if (allListLike) {
+    return lines
+      .map(line => `- [${check}] ${line.replace(/^(?:[-*+]|\d+\.)\s+/, '')}`)
+      .join('\n');
+  }
+  return lines.map(line => `- [${check}] ${line}`).join('\n');
+}
+
 export function formatServiceError(error: unknown): string {
   if (error instanceof ServiceApiError) {
     switch (error.code) {
@@ -469,6 +509,8 @@ export function formatServiceError(error: unknown): string {
         return translate('所属项目不存在。');
       case 'BOUNTY_NOT_FOUND':
         return translate('未找到该任务。');
+      case 'COMMENT_NOT_FOUND':
+        return translate('目标评论不存在。');
       case 'BOUNTY_HAS_DEPENDENTS':
         return translate('该任务仍是其他任务的前置任务。');
       case 'AGENT_NOT_FOUND':

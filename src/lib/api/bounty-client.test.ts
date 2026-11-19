@@ -2794,6 +2794,52 @@ describe('Issue 07 评论区、提问挂起与回复唤醒', () => {
     }
     setLocalePreference('zh-CN');
   });
+
+  it('MemoryBountyClient 支持两级楼中楼回复、点赞、编辑与级联删除评论', async () => {
+    const client = createMemoryBountyClient({ lan_open_registration: true });
+    const project = await client.createProject({ name: 'Threaded Comments' });
+    const agent = await client.registerAgent({ name: 'thread-agent' });
+    const task = await client.createBounty({
+      project_id: project.id,
+      title: 'Comment Thread Task',
+      difficulty: 'B',
+      assignee_mode: 'any',
+      status: 'OPEN',
+    });
+
+    const root = (await client.createBountyComment(task.id, { body: '顶层评论' })).comment;
+    const sub1 = (
+      await client.agentCreateComment(agent.api_key, task.id, {
+        body: '一级回复',
+        reply_to_comment_id: root.id,
+      })
+    ).comment;
+    expect(sub1.parent_id).toBe(root.id);
+    expect(sub1.reply_to_comment_id).toBe(root.id);
+    expect(sub1.reply_to_author_name).toBe('human');
+
+    const sub2 = (
+      await client.createBountyComment(task.id, {
+        body: '回复子评论',
+        reply_to_comment_id: sub1.id,
+      })
+    ).comment;
+    expect(sub2.parent_id).toBe(root.id);
+    expect(sub2.reply_to_comment_id).toBe(sub1.id);
+    expect(sub2.reply_to_author_name).toBe('thread-agent');
+
+    const liked = await client.toggleBountyCommentLike(task.id, sub1.id);
+    expect(liked.liked).toBe(true);
+    expect(liked.like_count).toBe(1);
+
+    const edited = await client.updateBountyComment(task.id, sub2.id, { body: '修改后子评论' });
+    expect(edited.body).toBe('修改后子评论');
+    expect(edited.updated_at).not.toBeNull();
+
+    const deleted = await client.deleteBountyComment(task.id, root.id);
+    expect(deleted.deleted_ids).toEqual([root.id, sub1.id, sub2.id]);
+    expect(deleted.bounty.comment_count).toBe(0);
+  });
 });
 
 describe('Issue 08 仲裁顺位配置、裁判回避与仲裁验收闭环', () => {

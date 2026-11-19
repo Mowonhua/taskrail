@@ -158,9 +158,16 @@ CREATE TABLE IF NOT EXISTS bounty_comments (
     author_name TEXT NOT NULL,
     kind TEXT NOT NULL CHECK (kind IN ('comment','question','reply','status')),
     body TEXT NOT NULL,
+    parent_id INTEGER REFERENCES bounty_comments(id) ON DELETE CASCADE,
+    reply_to_comment_id INTEGER REFERENCES bounty_comments(id) ON DELETE SET NULL,
+    reply_to_author_name TEXT,
+    like_count INTEGER NOT NULL DEFAULT 0,
+    liked INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT,
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS bounty_comments_order ON bounty_comments(bounty_id, id);
+CREATE INDEX IF NOT EXISTS bounty_comments_parent ON bounty_comments(parent_id, id);
 
 CREATE INDEX IF NOT EXISTS bounties_arbitration_deadline ON bounties(status,arbitration_expires_at);
 CREATE TABLE IF NOT EXISTS agent_rating_ledger (

@@ -4945,6 +4945,115 @@ describe('任务板工作台外壳集成测试', () => {
     expect(activeDialog.textContent).not.toContain('detail-agent-a');
     expect(getDetailSpy).toHaveBeenCalledTimes(4);
   });
+
+  it('任务详情弹窗支持双栏布局、右栏状态切换、过滤评论时间轴及 Bilibili 式两级楼中楼交互', async () => {
+    const { port } = createMemoryPort({
+      preferences: { ...emptyAppConfig().preferences, workspaceSection: 'bounties' },
+    });
+    const bountyApi = createMemoryBountyClient({ lan_open_registration: true });
+    const project = await bountyApi.createProject({ name: 'Taskrail' });
+    const agent = await bountyApi.registerAgent({ name: 'BiliAgent' });
+    const task = await bountyApi.createBounty({
+      project_id: project.id,
+      title: '优化任务详情弹窗',
+      description: '正文内容与代码块左对齐。\n\n```ts\nconst x = 1;\n```',
+      acceptance_criteria: '支持双栏弹窗\n支持两级楼中楼评论',
+      difficulty: 'B',
+      assignee_mode: 'any',
+      status: 'DRAFT',
+    });
+
+    instance = mount(App, { target, props: { files: port, bountyApi } });
+    await flush();
+
+    target.querySelector<HTMLButtonElement>(`[data-bounty-id="${task.id}"] .bounty-card-button`)!.click();
+    await flush();
+
+    const modal = target.querySelector<HTMLElement>('[data-dialog="bounty-detail"]')!;
+    expect(modal.classList.contains('detail-modal')).toBe(true);
+    expect(modal.querySelector('.detail-modal-project-name')?.textContent?.trim()).toBe('Taskrail');
+    expect(modal.querySelectorAll('[data-slot="detail-criteria"] input[type="checkbox"]')).toHaveLength(2);
+
+    // 置顶评论框默认收起，聚焦后展开并发送顶层评论
+    const topInput = modal.querySelector<HTMLTextAreaElement>('[data-slot="comment-input"]')!;
+    expect(topInput.rows).toBe(1);
+    topInput.dispatchEvent(new FocusEvent('focus'));
+    await flush();
+    expect(topInput.rows).toBe(3);
+
+    topInput.value = '第一条主评论';
+    topInput.dispatchEvent(new Event('input', { bubbles: true }));
+    await flush();
+    modal.querySelector<HTMLButtonElement>('[data-action="submit-comment"]')!.click();
+    await flush();
+
+    // 评论事件不污染状态流转时间轴，且不渲染多余的“评论”标签
+    expect(modal.querySelector('.detail-timeline-item[data-event-type="commented"]')).toBeNull();
+    const rootCommentEl = modal.querySelector<HTMLElement>('[data-comment-id]')!;
+    expect(rootCommentEl.querySelector('.detail-comment-kind')).toBeNull();
+
+    // 右栏状态胶囊直接切换为 OPEN，再测试回复与楼中楼折叠
+    modal.querySelector<HTMLButtonElement>('[data-action="toggle-status-menu"]')!.click();
+    await flush();
+    modal.querySelector<HTMLButtonElement>('[data-status-transition="publish"]')!.click();
+    await flush();
+    expect(modal.dataset.bountyStatus).toBe('OPEN');
+    expect(modal.querySelector('.detail-timeline-item[data-event-type="published"]')).not.toBeNull();
+
+    // 点赞、回复并生成 >3 条子回复验证默认折叠与展开
+    rootCommentEl.querySelector<HTMLButtonElement>('[data-action="like-comment"]')!.click();
+    await flush();
+    expect(
+      rootCommentEl.querySelector('[data-action="like-comment"]')?.getAttribute('aria-pressed'),
+    ).toBe('true');
+
+    rootCommentEl.querySelector<HTMLButtonElement>('[data-action="reply-comment"]')!.click();
+    await flush();
+    const replyInput = modal.querySelector<HTMLTextAreaElement>('[data-slot="reply-input"]')!;
+    replyInput.value = '就地子回复 1';
+    replyInput.dispatchEvent(new Event('input', { bubbles: true }));
+    await flush();
+    modal.querySelector<HTMLButtonElement>('[data-action="submit-reply"]')!.click();
+    await flush();
+
+    const rootId = Number(rootCommentEl.dataset.commentId);
+    for (let i = 2; i <= 4; i += 1) {
+      await bountyApi.agentCreateComment(agent.api_key, task.id, {
+        body: `Agent 回复 ${i}`,
+        reply_to_comment_id: rootId,
+      });
+    }
+    target.querySelector<HTMLButtonElement>('[aria-label="关闭对话框"]')!.click();
+    await flush();
+    target.querySelector<HTMLButtonElement>(`[data-bounty-id="${task.id}"] .bounty-card-button`)!.click();
+    await flush();
+
+    const reopened = target.querySelector<HTMLElement>('[data-dialog="bounty-detail"]')!;
+    expect(reopened.querySelectorAll('.detail-subreply-item')).toHaveLength(2);
+    const expandBtn = reopened.querySelector<HTMLButtonElement>('[data-action="expand-replies"]')!;
+    expect(expandBtn.textContent?.trim()).toBe('共 4 条回复，点击展开');
+    expandBtn.click();
+    await flush();
+    expect(reopened.querySelectorAll('.detail-subreply-item')).toHaveLength(4);
+
+    // 编辑与删除子回复
+    const firstSub = reopened.querySelector<HTMLElement>('.detail-subreply-item')!;
+    firstSub.querySelector<HTMLButtonElement>('[data-action="edit-comment"]')!.click();
+    await flush();
+    const editInput = firstSub.querySelector<HTMLTextAreaElement>('[data-slot="edit-comment-input"]')!;
+    editInput.value = '已编辑的子回复 1';
+    editInput.dispatchEvent(new Event('input', { bubbles: true }));
+    await flush();
+    firstSub.querySelector<HTMLButtonElement>('[data-action="save-comment-edit"]')!.click();
+    await flush();
+    expect(firstSub.textContent).toContain('已编辑的子回复 1');
+    expect(firstSub.textContent).toContain('已编辑');
+
+    firstSub.querySelector<HTMLButtonElement>('[data-action="delete-comment"]')!.click();
+    await flush();
+    expect(reopened.querySelectorAll('.detail-subreply-item')).toHaveLength(3);
+    expect(reopened.textContent).not.toContain('·');
+  });
 });
 
 describe('Issue 10 UI 集成测试：草稿共创拆单、前置依赖选择器与批量发布', () => {
@@ -5418,16 +5527,14 @@ describe('Issue 10 UI 集成测试：草稿共创拆单、前置依赖选择器�
     expect(collabHelpPopover.hidden).toBe(true);
     expect(target.querySelector('[data-dialog="bounty-detail"]')).not.toBeNull();
 
-    // Tab / Shift+Tab 焦点陷阱闭环（空评论时发送按钮 disabled，最后一个可聚焦控件为评论输入框）
-    const drawerCloseBtn = drawer.querySelector<HTMLButtonElement>('[aria-label="关闭对话框"]')!;
-    const drawerCommentInput = drawer.querySelector<HTMLTextAreaElement>(
-      '[data-slot="comment-input"]',
-    )!;
-    drawerCloseBtn.focus();
+    // Tab / Shift+Tab 焦点陷阱闭环（从首控件 Shift+Tab 回到末控件，再 Tab 回到首控件）
+    const firstFocusable = drawer.querySelector<HTMLButtonElement>('[data-action="edit-draft"]')!;
+    const lastFocusable = drawer.querySelector<HTMLButtonElement>('[data-action="toggle-status-menu"]')!;
+    firstFocusable.focus();
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, bubbles: true }));
-    expect(document.activeElement).toBe(drawerCommentInput);
+    expect(document.activeElement).toBe(lastFocusable);
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true }));
-    expect(document.activeElement).toBe(drawerCloseBtn);
+    expect(document.activeElement).toBe(firstFocusable);
 
     // 外部元素触发 focusin 时焦点被拉回抽屉内部
     const outsideNav = target.querySelector<HTMLButtonElement>('[data-nav-section="bounties"]')!;

@@ -51,6 +51,7 @@ import {
   type CreateInviteTokenInput,
   type CreateProjectInput,
   type DeclineBountyInput,
+  type DeleteBountyCommentResult,
   type EmbeddedServerInfo,
   type InviteDraftCollaboratorInput,
   type InviteTokenSummary,
@@ -73,6 +74,7 @@ import {
   type SubmitArbitrationInput,
   type UpdateAgentInput,
   type UpdateAgentWebhookInput,
+  type UpdateBountyCommentInput,
   type UpdateBountyInput,
   type UpdateOnboardingInput,
   type UpdateProjectInput,
@@ -122,7 +124,8 @@ const DECLINE_ALLOWED_KEYS = new Set(['reason']);
 const HEARTBEAT_ALLOWED_KEYS = new Set(['lease_id']);
 const ABANDON_ALLOWED_KEYS = new Set(['lease_id', 'reason']);
 const COMPLETE_ALLOWED_KEYS = new Set(['lease_id', 'completion_note', 'completion_cost']);
-const CREATE_COMMENT_ALLOWED_KEYS = new Set(['body']);
+const CREATE_COMMENT_ALLOWED_KEYS = new Set(['body', 'reply_to_comment_id']);
+const UPDATE_COMMENT_ALLOWED_KEYS = new Set(['body']);
 const REQUEST_INFO_ALLOWED_KEYS = new Set(['lease_id', 'question']);
 const ARBITRATION_CONFIG_ALLOWED_KEYS = new Set(['arbitrator_chain']);
 const SUBMIT_ARBITRATION_ALLOWED_KEYS = new Set([
@@ -156,6 +159,13 @@ export interface BountyApiPort {
     id: string,
     input: CreateBountyCommentInput,
   ): Promise<BountyCommentMutationResult>;
+  toggleBountyCommentLike?(id: string, commentId: number): Promise<BountyComment>;
+  updateBountyComment?(
+    id: string,
+    commentId: number,
+    input: UpdateBountyCommentInput,
+  ): Promise<BountyComment>;
+  deleteBountyComment?(id: string, commentId: number): Promise<DeleteBountyCommentResult>;
   createBounty(input: CreateBountyInput): Promise<BountyTask>;
   updateBounty(id: string, input: UpdateBountyInput): Promise<BountyTask>;
   publishBounty(id: string): Promise<BountyTask>;
@@ -251,6 +261,13 @@ export interface MemoryBountyClient extends BountyApiPort {
     id: string,
     input: CreateBountyCommentInput,
   ): Promise<BountyCommentMutationResult>;
+  toggleBountyCommentLike(id: string, commentId: number): Promise<BountyComment>;
+  updateBountyComment(
+    id: string,
+    commentId: number,
+    input: UpdateBountyCommentInput,
+  ): Promise<BountyComment>;
+  deleteBountyComment(id: string, commentId: number): Promise<DeleteBountyCommentResult>;
   getArbitrationConfig(): Promise<ArbitrationConfig>;
   updateArbitrationConfig(input: ArbitrationConfig): Promise<ArbitrationConfig>;
   approveArbitration(id: string, input?: ApproveArbitrationInput): Promise<BountyTask>;
@@ -518,6 +535,32 @@ export class HttpBountyClient implements BountyApiPort {
       'POST',
       `/api/v1/bounties/${encodeURIComponent(id)}/comments`,
       { body: input },
+    );
+  }
+
+  async toggleBountyCommentLike(id: string, commentId: number): Promise<BountyComment> {
+    return await this.request<BountyComment>(
+      'POST',
+      `/api/v1/bounties/${encodeURIComponent(id)}/comments/${encodeURIComponent(String(commentId))}/like`,
+    );
+  }
+
+  async updateBountyComment(
+    id: string,
+    commentId: number,
+    input: UpdateBountyCommentInput,
+  ): Promise<BountyComment> {
+    return await this.request<BountyComment>(
+      'PATCH',
+      `/api/v1/bounties/${encodeURIComponent(id)}/comments/${encodeURIComponent(String(commentId))}`,
+      { body: input },
+    );
+  }
+
+  async deleteBountyComment(id: string, commentId: number): Promise<DeleteBountyCommentResult> {
+    return await this.request<DeleteBountyCommentResult>(
+      'DELETE',
+      `/api/v1/bounties/${encodeURIComponent(id)}/comments/${encodeURIComponent(String(commentId))}`,
     );
   }
 
@@ -1669,18 +1712,34 @@ export function createMemoryBountyClient(seed?: {
   }
 
   function listHydratedComments(id: string): BountyComment[] {
-    return (commentsByBounty.get(id) ?? [])
-      .map(comment => {
-        const copy = clone(comment);
-        if (copy.author_type === 'agent' && copy.author_id) {
-          const agent = agentsById.get(copy.author_id);
-          if (agent) {
-            copy.author_name = agent.summary.name;
-          }
+    const rawComments = commentsByBounty.get(id) ?? [];
+    const byId = new Map<number, BountyComment>();
+    const hydrated = rawComments.map(comment => {
+      const copy = clone(comment);
+      if (copy.author_type === 'agent' && copy.author_id) {
+        const agent = agentsById.get(copy.author_id);
+        if (agent) {
+          copy.author_name = agent.summary.name;
         }
-        return copy;
-      })
-      .sort((a, b) => a.id - b.id);
+      }
+      copy.parent_id = copy.parent_id ?? null;
+      copy.reply_to_comment_id = copy.reply_to_comment_id ?? null;
+      copy.reply_to_author_name = copy.reply_to_author_name ?? null;
+      copy.like_count = copy.like_count ?? 0;
+      copy.liked = copy.liked ?? false;
+      copy.updated_at = copy.updated_at ?? null;
+      byId.set(copy.id, copy);
+      return copy;
+    });
+    for (const copy of hydrated) {
+      if (copy.reply_to_comment_id != null) {
+        const target = byId.get(copy.reply_to_comment_id);
+        if (target) {
+          copy.reply_to_author_name = target.author_name;
+        }
+      }
+    }
+    return hydrated.sort((a, b) => a.id - b.id);
   }
 
   for (const project of seed?.projects ?? []) {
@@ -2204,6 +2263,7 @@ export function createMemoryBountyClient(seed?: {
     authorId: string | null,
     authorName: string,
     body: string,
+    replyToCommentId: number | null = null,
   ): BountyCommentMutationResult {
     if (bounty.status === 'CANCELLED') {
       throw new ServiceApiError('INVALID_TRANSITION', 409, '当前状态不允许此操作');
@@ -2211,6 +2271,19 @@ export function createMemoryBountyClient(seed?: {
     const trimmedBody = body.trim();
     if (!trimmedBody) {
       throw new ServiceApiError('VALIDATION_ERROR', 400, '评论或问题正文不能为空');
+    }
+    const existingComments = commentsByBounty.get(bounty.id) ?? [];
+    let parentId: number | null = null;
+    let targetCommentId: number | null = null;
+    let replyToAuthorName: string | null = null;
+    if (replyToCommentId !== null) {
+      const target = listHydratedComments(bounty.id).find(item => item.id === replyToCommentId);
+      if (!target) {
+        throw new ServiceApiError('COMMENT_NOT_FOUND', 404, '目标评论不存在');
+      }
+      parentId = target.parent_id ?? target.id;
+      targetCommentId = target.id;
+      replyToAuthorName = target.author_name;
     }
     const resume =
       bounty.status === 'WAITING_INFO' &&
@@ -2226,9 +2299,14 @@ export function createMemoryBountyClient(seed?: {
       author_name: authorName,
       kind,
       body: trimmedBody,
+      parent_id: parentId,
+      reply_to_comment_id: targetCommentId,
+      reply_to_author_name: replyToAuthorName,
+      like_count: 0,
+      liked: false,
+      updated_at: null,
       created_at: timestamp,
     };
-    const existingComments = commentsByBounty.get(bounty.id) ?? [];
     existingComments.push(comment);
     commentsByBounty.set(bounty.id, existingComments);
 
@@ -2879,8 +2957,83 @@ export function createMemoryBountyClient(seed?: {
       if (typeof record.body !== 'string') {
         throw new ServiceApiError('VALIDATION_ERROR', 400, 'body 必须为字符串');
       }
+      const replyToId =
+        record.reply_to_comment_id === undefined || record.reply_to_comment_id === null
+          ? null
+          : typeof record.reply_to_comment_id === 'number' &&
+              Number.isSafeInteger(record.reply_to_comment_id)
+            ? record.reply_to_comment_id
+            : (() => {
+                throw new ServiceApiError('VALIDATION_ERROR', 400, 'reply_to_comment_id 必须为整数');
+              })();
       const existing = requireBounty(id);
-      return addComment(existing, null, 'human', record.body);
+      return addComment(existing, null, 'human', record.body, replyToId);
+    },
+
+    async toggleBountyCommentLike(id: string, commentId: number): Promise<BountyComment> {
+      requireBounty(id);
+      const list = commentsByBounty.get(id) ?? [];
+      const target = list.find(item => item.id === commentId);
+      if (!target) {
+        throw new ServiceApiError('COMMENT_NOT_FOUND', 404, '目标评论不存在');
+      }
+      target.liked = !(target.liked ?? false);
+      target.like_count = target.liked
+        ? (target.like_count ?? 0) + 1
+        : Math.max(0, (target.like_count ?? 0) - 1);
+      return listHydratedComments(id).find(item => item.id === commentId)!;
+    },
+
+    async updateBountyComment(
+      id: string,
+      commentId: number,
+      input: UpdateBountyCommentInput,
+    ): Promise<BountyComment> {
+      const record = validateJsonObjectKeys(input, UPDATE_COMMENT_ALLOWED_KEYS);
+      if (typeof record.body !== 'string') {
+        throw new ServiceApiError('VALIDATION_ERROR', 400, 'body 必须为字符串');
+      }
+      const existing = requireBounty(id);
+      if (existing.status === 'CANCELLED') {
+        throw new ServiceApiError('INVALID_TRANSITION', 409, '当前状态不允许此操作');
+      }
+      const trimmed = record.body.trim();
+      if (!trimmed) {
+        throw new ServiceApiError('VALIDATION_ERROR', 400, '评论或问题正文不能为空');
+      }
+      const list = commentsByBounty.get(id) ?? [];
+      const target = list.find(item => item.id === commentId);
+      if (!target) {
+        throw new ServiceApiError('COMMENT_NOT_FOUND', 404, '目标评论不存在');
+      }
+      target.body = trimmed;
+      target.updated_at = nowIso();
+      return listHydratedComments(id).find(item => item.id === commentId)!;
+    },
+
+    async deleteBountyComment(id: string, commentId: number): Promise<DeleteBountyCommentResult> {
+      const existing = requireBounty(id);
+      if (existing.status === 'CANCELLED') {
+        throw new ServiceApiError('INVALID_TRANSITION', 409, '当前状态不允许此操作');
+      }
+      const list = commentsByBounty.get(id) ?? [];
+      const target = list.find(item => item.id === commentId);
+      if (!target) {
+        throw new ServiceApiError('COMMENT_NOT_FOUND', 404, '目标评论不存在');
+      }
+      const deletedIds = [
+        commentId,
+        ...list.filter(item => item.parent_id === commentId).map(item => item.id),
+      ];
+      const deletedSet = new Set(deletedIds);
+      commentsByBounty.set(
+        id,
+        list.filter(item => !deletedSet.has(item.id)),
+      );
+      return {
+        bounty: hydrateBounty(existing),
+        deleted_ids: deletedIds,
+      };
     },
 
     async createBounty(input: CreateBountyInput): Promise<BountyTask> {
@@ -4127,11 +4280,20 @@ export function createMemoryBountyClient(seed?: {
       if (typeof record.body !== 'string') {
         throw new ServiceApiError('VALIDATION_ERROR', 400, 'body 必须为字符串');
       }
+      const replyToId =
+        record.reply_to_comment_id === undefined || record.reply_to_comment_id === null
+          ? null
+          : typeof record.reply_to_comment_id === 'number' &&
+              Number.isSafeInteger(record.reply_to_comment_id)
+            ? record.reply_to_comment_id
+            : (() => {
+                throw new ServiceApiError('VALIDATION_ERROR', 400, 'reply_to_comment_id 必须为整数');
+              })();
       const bounty = requireBounty(id);
       if (!isBountyVisibleToAgent(entry.summary, bounty)) {
         throw new ServiceApiError('BOUNTY_NOT_FOUND', 404, '任务不存在');
       }
-      return addComment(bounty, entry.summary.id, entry.summary.name, record.body);
+      return addComment(bounty, entry.summary.id, entry.summary.name, record.body, replyToId);
     },
 
     async agentClaimBounty(apiKey: string, id: string): Promise<BountyTask> {

@@ -75,6 +75,14 @@ pub(super) fn router(state: AppState) -> Router {
             "/api/v1/bounties/{id}/comments",
             get(bounty_comments).post(create_bounty_comment),
         )
+        .route(
+            "/api/v1/bounties/{id}/comments/{comment_id}",
+            axum::routing::patch(update_bounty_comment).delete(delete_bounty_comment),
+        )
+        .route(
+            "/api/v1/bounties/{id}/comments/{comment_id}/like",
+            post(toggle_bounty_comment_like),
+        )
         .route("/api/v1/bounties/{id}/publish", post(publish_bounty))
         .route("/api/v1/bounties/{id}/withdraw", post(withdraw_bounty))
         .route("/api/v1/bounties/{id}/cancel", post(cancel_bounty))
@@ -328,6 +336,40 @@ async fn create_bounty_comment(
         StatusCode::CREATED,
         Json(disk(state, move |r| r.create_bounty_comment(&id, input)).await?),
     ))
+}
+async fn toggle_bounty_comment_like(
+    State(state): State<AppState>,
+    Path((id, comment_id)): Path<(String, i64)>,
+) -> Result<Json<BountyComment>> {
+    if id.trim().is_empty() {
+        return Err(ApiError::invalid("路径参数不能为空"));
+    }
+    disk(state, move |r| r.toggle_bounty_comment_like(&id, comment_id))
+        .await
+        .map(Json)
+}
+async fn update_bounty_comment(
+    State(state): State<AppState>,
+    Path((id, comment_id)): Path<(String, i64)>,
+    Body(input): Body<UpdateBountyComment>,
+) -> Result<Json<BountyComment>> {
+    if id.trim().is_empty() {
+        return Err(ApiError::invalid("路径参数不能为空"));
+    }
+    disk(state, move |r| r.update_bounty_comment(&id, comment_id, input))
+        .await
+        .map(Json)
+}
+async fn delete_bounty_comment(
+    State(state): State<AppState>,
+    Path((id, comment_id)): Path<(String, i64)>,
+) -> Result<Json<DeleteBountyCommentResult>> {
+    if id.trim().is_empty() {
+        return Err(ApiError::invalid("路径参数不能为空"));
+    }
+    disk(state, move |r| r.delete_bounty_comment(&id, comment_id))
+        .await
+        .map(Json)
 }
 
 async fn arbitration_config(State(state): State<AppState>) -> Result<Json<ArbitrationConfig>> {
