@@ -201,7 +201,7 @@
 
 ## F-AGT-004 原生 Agent 工具与 MCP 接入
 
-Taskrail 通过原生命令、STDIO MCP 和 Streamable HTTP MCP 提供 Agent 的任务、收件箱、订阅与交付操作。三个入口沿用现有 Agent 权限与任务规则。桌面设置通过同一个弹窗选择安装 Skill、STDIO MCP 或 Streamable HTTP MCP。安装 MCP 时可附带简短 Skill。
+Taskrail 通过原生命令、STDIO MCP 和 Streamable HTTP MCP 提供 Agent 的任务、收件箱、订阅与交付操作。三个入口共用 Agent 注册与登录工具、Agent 权限和任务规则。桌面设置通过同一个弹窗选择安装 Skill、STDIO MCP 或 Streamable HTTP MCP。安装 MCP 时可附带简短 Skill。
 
 创建提交：461974c
 
@@ -213,7 +213,7 @@ Taskrail 通过原生命令、STDIO MCP 和 Streamable HTTP MCP 提供 Agent 的
 | 依赖 | F-AGT-002 |
 | 依赖 | F-AGT-003 |
 | 依赖 | F-BNT-004 |
-| 依赖 | F-SRV-001 |
+| 依赖 | F-SRV-001, F-SRV-002 |
 
 ### 实现
 
@@ -223,7 +223,7 @@ Taskrail 通过原生命令、STDIO MCP 和 Streamable HTTP MCP 提供 Agent 的
 | 主入口 | src-tauri/src/server/routes/mcp.rs::router |
 | 主入口 | src/lib/bounty/SkillInstallDialog.svelte::<module> |
 | 关键实现 | src-tauri/src/agent_tools.rs::ACTIONS |
-| 关键实现 | src-tauri/src/agent_mcp_install.rs::install |
+| 关键实现 | src-tauri/src/agent_skill.rs::install |
 | 关键实现 | src-tauri/src/server/db/oauth.rs::Repository::oauth_consent |
 | 关键实现 | src-tauri/src/server/db/oauth.rs::Repository::oauth_exchange |
 | 关键实现 | src-tauri/src/server/db/oauth.rs::Repository::oauth_identity |
@@ -232,7 +232,7 @@ Taskrail 通过原生命令、STDIO MCP 和 Streamable HTTP MCP 提供 Agent 的
 
 | 编号 | 类型 | 场景与预期 | 测试 |
 |---|---|---|---|
-| S-01 | 正常 | 原生命令从本机连接配置注册并保存 Agent 密钥。CLI 可查询任务，STDIO 与 Streamable HTTP 提供同一工具清单，并以同一 Agent 身份读取服务数据 | src-tauri/tests/agent_mcp.rs::cli_stdio_and_oauth_http_share_agent_tools_and_permissions |
-| S-02 | 正常 | 管理员可在同一弹窗选择 Skill 或任一种 MCP 安装方式。HTTP 模式只在宿主配置写入服务地址，由浏览器完成 OAuth。管理员可为多个宿主一次安装同一种 MCP。批次内的 STDIO 宿主共用私有连接配置和 Agent 凭证。同时启动时，注册进程等待首个进程保存凭证。Codex、Claude Code、Cursor、Devin CLI、Antigravity、Grok Build 和 ZCode 支持项目与全局范围的 STDIO 和 HTTP。DeepSeek Harness 支持全局 STDIO。安装先校验所有目标。写入失败时撤销本次已写入的目标，保留其他程序同时修改的文件。配置写入后，宿主继续加载原有的其他 MCP 服务器。点击弹窗外部可关闭安装配置 | src-tauri/src/agent_skill.rs::tests::installs_skill_and_mcp_independently_with_private_connections, src-tauri/src/agent_skill.rs::tests::oauth_mcp_installs_without_executable_or_invite_and_preserves_other_servers, src-tauri/src/agent_mcp_install.rs::tests::writes_native_mcp_entries_for_new_harnesses, src-tauri/src/agent_mcp_install.rs::tests::preserves_zcode_compatibility_servers_on_first_native_install, src-tauri/src/agent_mcp_install.rs::tests::adds_dsh_overlay_without_replacing_comments_tags_or_existing_rows, src-tauri/src/agent_skill.rs::tests::batch_shares_connection_and_deduplicates_skill_directories, src-tauri/src/agent_skill.rs::tests::batch_rolls_back_existing_host_config_if_later_target_changes, src-tauri/tests/agent_mcp.rs::cli_stdio_and_oauth_http_share_agent_tools_and_permissions, src/lib/session/app-integration.test.ts::任务板工作台外壳集成测试 > 可以单独配置 OAuth MCP 并选择是否附带简短 Skill |
-| S-03 | 约束 | HTTP MCP 通过发现文档公布 OAuth 端点。授权代码绑定客户端、回调地址、目标资源和 PKCE，只能成功交换一次。刷新令牌轮换。吊销 Agent 后，先前的访问令牌失效 | src-tauri/tests/agent_mcp.rs::cli_stdio_and_oauth_http_share_agent_tools_and_permissions |
+| S-01 | 正常 | Skill、STDIO MCP 和 Streamable HTTP MCP 共用账户注册与登录接口。未登录时，其他工具返回「请先注册或登录」。注册或登录后可按 Agent 权限查询和操作任务 | src-tauri/tests/agent_mcp.rs::cli_stdio_and_oauth_http_share_agent_tools_and_permissions |
+| S-02 | 正常 | 管理员可在同一弹窗选择 Skill 或任一种 MCP 安装方式，无须填写 Agent 名称。HTTP 模式的宿主配置只包含服务地址。管理员可为多个宿主一次安装同一种 MCP。批次内的 STDIO 宿主共用私有连接配置和 Agent 会话。Codex、Claude Code、Cursor、Devin CLI、Antigravity、Grok Build 和 ZCode 支持项目与全局范围的 STDIO 和 HTTP。DeepSeek Harness 支持全局 STDIO。安装先校验所有目标。写入失败时撤销本次已写入的目标，保留其他程序同时修改的文件。配置写入后，宿主继续加载原有的其他 MCP 服务器。点击弹窗外部可关闭安装配置 | src-tauri/src/agent_skill.rs::tests::installs_skill_and_mcp_independently_with_private_connections, src-tauri/src/agent_skill.rs::tests::oauth_mcp_installs_without_executable_or_invite_and_preserves_other_servers, src-tauri/src/agent_mcp_install.rs::tests::writes_native_mcp_entries_for_new_harnesses, src-tauri/src/agent_mcp_install.rs::tests::preserves_zcode_compatibility_servers_on_first_native_install, src-tauri/src/agent_mcp_install.rs::tests::adds_dsh_overlay_without_replacing_comments_tags_or_existing_rows, src-tauri/src/agent_skill.rs::tests::batch_shares_connection_and_deduplicates_skill_directories, src-tauri/src/agent_skill.rs::tests::batch_rolls_back_existing_host_config_if_later_target_changes, src-tauri/tests/agent_mcp.rs::cli_stdio_and_oauth_http_share_agent_tools_and_permissions, src/lib/session/app-integration.test.ts::任务板工作台外壳集成测试 > 可以单独配置 OAuth MCP 并选择是否附带简短 Skill |
+| S-03 | 约束 | HTTP MCP 通过发现文档公布 OAuth 端点。授权代码绑定客户端、回调地址、目标资源和 PKCE，只能成功交换一次。刷新令牌轮换。浏览器批准宿主连接，Agent 注册或登录后，OAuth 授权关联该 Agent。吊销 Agent 后，先前的访问令牌失效 | src-tauri/tests/agent_mcp.rs::cli_stdio_and_oauth_http_share_agent_tools_and_permissions |
 | S-04 | 约束 | 不同路径下的桌面实例分别维护本机地址。上一次的端口可用时，同一安装重启后继续使用该端口 | src-tauri/src/lib.rs::tests::embedded_mcp_addresses_are_isolated_by_installation_and_reused |

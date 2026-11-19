@@ -4,7 +4,7 @@
 
 范围：[原生 Agent 工具与 MCP 接入](../../features/agents.md#f-agt-004-原生-agent-工具与-mcp-接入)。
 
-Taskrail 随桌面包分发原生命令。只安装 Skill 的 Agent 可以通过终端执行任务，只配置 MCP 的 Agent 可以通过宿主直接调用工具。三个入口共用同一组操作，服务端统一判断身份、租约与交付规则。STDIO 读取 Taskrail 私有连接配置，Streamable HTTP 使用绑定当前 MCP 地址的 OAuth 令牌。
+Taskrail 随桌面包分发原生命令。只安装 Skill 的 Agent 可以通过终端执行任务，只配置 MCP 的 Agent 可以通过宿主直接调用工具。三个入口共用同一组操作，服务端统一判断身份、租约与交付规则。STDIO 读取 Taskrail 私有连接配置，Streamable HTTP 使用绑定当前 MCP 地址的 OAuth 令牌。三个入口共用用户与 Agent 的账户服务。浏览器只批准 HTTP 宿主连接，Agent 在宿主中决定注册资料。授权在注册或登录后关联 Agent，宿主继续使用同一 OAuth 凭证。这个次序保留了宿主的标准授权流程，也让 Agent 自行选择和复用身份。
 
 设置页共用一个安装入口，每次对多个宿主提交同一种方式。多个宿主读取同一个 Skill 目录时只写入一次。同批 STDIO 宿主共用一个连接文件，避免重复注册同名 Agent。服务地址覆盖属于当次安装配置。文档预览使用当前连接，复制动作读取同一份预览文档。
 
