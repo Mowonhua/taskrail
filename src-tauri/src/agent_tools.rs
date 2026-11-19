@@ -233,9 +233,9 @@ impl ServerHandler for ToolServer {
         _: Option<PaginatedRequestParams>,
         _: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, ErrorData> {
-        let mut result = ListToolsResult::default();
-        result.tools = ACTIONS.iter().map(|action| action.tool()).collect();
-        Ok(result)
+        Ok(ListToolsResult::with_all_items(
+            ACTIONS.iter().map(|action| action.tool()).collect(),
+        ))
     }
 
     async fn call_tool(
